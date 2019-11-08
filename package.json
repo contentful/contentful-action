@@ -15,7 +15,8 @@
   "keywords": [
     "GitHub",
     "Actions",
-    "JavaScript"
+    "JavaScript",
+    "Contentful"
   ],
   "author": "GitHub",
   "license": "MIT",
@@ -24,7 +25,9 @@
   },
   "homepage": "https://github.com/actions/javascript-action#readme",
   "dependencies": {
-    "@actions/core": "^1.1.1"
+    "@actions/core": "^1.1.1",
+    "contentful-management": "^6.2.0-beta0",
+    "contentful-migration": "^0.17.1-beta0"
   },
   "devDependencies": {
     "@zeit/ncc": "^0.20.5",
