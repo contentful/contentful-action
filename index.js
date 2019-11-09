@@ -50,7 +50,7 @@ async function run() {
       ENVIRONMENT_ID = "master-".concat(getStringDate());
     }else{
       console.log('Running on feature branch');
-      ENVIRONMENT_ID = ENVIRONMENT_INPUT;
+      ENVIRONMENT_ID = "github-".concat(ENVIRONMENT_INPUT);
     }
     console.log(`ENVIRONMENT_ID: ${ENVIRONMENT_ID}`);
 
