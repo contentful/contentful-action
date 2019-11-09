@@ -19,8 +19,12 @@ async function run() {
     //
     // Configuration variables
     //
-    const [,, SPACE_ID, ENVIRONMENT_INPUT, CMA_ACCESS_TOKEN] = process.argv;
-    const MIGRATIONS_DIR = process.env.GITHUB_WORKSPACE + "/" + process.env.contentfulMigrationLocation
+    const {
+      SPACE_ID,
+      ENVIRONMENT_INPUT,
+      CMA_ACCESS_TOKEN
+    } = process.env;
+    const MIGRATIONS_DIR = process.env.GITHUB_WORKSPACE + "/migrations"
 
     const client = createClient({
       accessToken: CMA_ACCESS_TOKEN
