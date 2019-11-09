@@ -13768,7 +13768,7 @@ async function run() {
     // ---------------------------------------------------------------------------
     console.log('Run migrations and update version entry');
     while(migrationToRun = migrationsToRun.shift()) {
-      const filePath = path.join(__dirname, '..', 'migrations', getFileOfVersion(migrationToRun));
+      const filePath = path.join(MIGRATIONS_DIR, getFileOfVersion(migrationToRun));
       console.log(`Running ${filePath}`);
       await runMigration(Object.assign(migrationOptions, {
         filePath
