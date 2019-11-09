@@ -12,8 +12,5 @@ outputs:
   time: # output will be available to future steps
     description: 'The message to output'
 runs:
-  uses: shy/contentful-action@master
   using: 'node12'
   main: 'dist/index.js'
-
-
