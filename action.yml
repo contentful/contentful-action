@@ -1,9 +1,5 @@
 name: 'Wait'
 description: 'Wait a designated number of milliseconds'
-env:
-  SPACE_ID: $SPACE_ID
-  ENVIRONMENT_INPUT: '{{ github.ref }}'
-  MANAGEMENT_API_KEY: $MANAGEMENT_API_KEY
 inputs:
   milliseconds:  # id of input
     description: 'number of milliseconds to wait'
