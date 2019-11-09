@@ -21,11 +21,12 @@ async function run() {
     //
     const {
       SPACE_ID,
-      ENVIRONMENT_INPUT,
+      GITHUB_REF,
       MANAGEMENT_API_KEY
     } = process.env;
 
-    console.log(process.env);
+    const githubRefSplit = GITHUB_REF.split('/');
+    const ENVIRONMENT_INPUT = githubRefSplit[githubRefSplit.length - 1];
 
     const MIGRATIONS_DIR = process.env.GITHUB_WORKSPACE + "/migrations"
 
