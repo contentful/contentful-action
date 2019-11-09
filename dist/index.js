@@ -13633,6 +13633,8 @@ async function run() {
       MANAGEMENT_API_KEY
     } = process.env;
 
+    console.log(process.env);
+
     const MIGRATIONS_DIR = process.env.GITHUB_WORKSPACE + "/migrations"
 
     const client = createClient({
