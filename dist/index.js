@@ -13627,11 +13627,16 @@ async function run() {
     //
     // Configuration variables
     //
-    const [,, SPACE_ID, ENVIRONMENT_INPUT, CMA_ACCESS_TOKEN] = process.argv;
-    const MIGRATIONS_DIR = process.env.GITHUB_WORKSPACE + "/" + process.env.contentfulMigrationLocation
+    const {
+      SPACE_ID,
+      ENVIRONMENT_INPUT,
+      MANAGEMENT_API_KEY
+    } = process.env;
+
+    const MIGRATIONS_DIR = process.env.GITHUB_WORKSPACE + "/migrations"
 
     const client = createClient({
-      accessToken: CMA_ACCESS_TOKEN
+      accessToken: MANAGEMENT_API_KEY
     });
     const space = await client.getSpace(SPACE_ID);
 
@@ -13750,7 +13755,7 @@ async function run() {
     const migrationOptions = {
       spaceId: SPACE_ID,
       environmentId: ENVIRONMENT_ID,
-      accessToken: CMA_ACCESS_TOKEN,
+      accessToken: MANAGEMENT_API_KEY,
       yes: true
     };
 
