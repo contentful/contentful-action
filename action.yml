@@ -1,8 +1,8 @@
 name: 'Wait'
 description: 'Wait a designated number of milliseconds'
 env:
-  SPACE_ID: ${{ secrets.SPACE_ID }}
-  MANAGEMENT_API_KEY: ${{ secrets.MANAGEMENT_API_KEY }}
+  SPACE_ID: $SPACE_ID
+  MANAGEMENT_API_KEY: $MANAGEMENT_API_KEY
 inputs:
   milliseconds:  # id of input
     description: 'number of milliseconds to wait'
