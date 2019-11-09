@@ -19,17 +19,18 @@ async function run() {
     //
     // Configuration variables
     //
-    const {
-      SPACE_ID,
-      GITHUB_REF,
-      MANAGEMENT_API_KEY
-    } = process.env;
+    const SPACE_ID = process.env.SPACE_ID;
+    const GITHUB_REF = process.env.GITHUB_REF;
+    const MANAGEMENT_API_KEY = process.env.MANAGEMENT_API_KEY;
+
+    console.log(process.env);
 
     const githubRefSplit = GITHUB_REF.split('/');
     const ENVIRONMENT_INPUT = githubRefSplit[githubRefSplit.length - 1];
 
     const MIGRATIONS_DIR = process.env.GITHUB_WORKSPACE + "/migrations"
 
+    console.log('MIGRATIONS_DIR', MIGRATIONS_DIR);
     console.log('MANAGEMENT_API_KEY', MANAGEMENT_API_KEY, MANAGEMENT_API_KEY.length)
 
     const client = createClient({
