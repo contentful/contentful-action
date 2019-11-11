@@ -1,13 +1,19 @@
-name: 'Wait'
-description: 'Wait a designated number of milliseconds'
-inputs:
-  milliseconds:  # id of input
-    description: 'number of milliseconds to wait'
-    required: true
-    default: '1000'
-outputs:
-  time: # output will be available to future steps
-    description: 'The message to output'
-runs:
-  using: 'node12'
-  main: 'dist/index.js'
+name: Contentful Migration Example
+
+on: [push]
+
+jobs:
+  build:
+
+    runs-on: ubuntu-latest
+    name: Contentful Migration Example
+    steps:
+    - name: Check out code into the directory
+      uses: actions/checkout@v1
+
+    - name: Contentful Migration
+      id: migrate
+      uses: contentful/contentful-action@v1
+      env: # Set the secret as an input
+        SPACE_ID: ${{ secrets.SPACE_ID }}
+        MANAGEMENT_API_KEY: ${{ secrets.MANAGEMENT_API_KEY }}
