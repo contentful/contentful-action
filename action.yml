@@ -1,19 +1,5 @@
-name: Contentful Migration Example
-
-on: [push]
-
-jobs:
-  build:
-
-    runs-on: ubuntu-latest
-    name: Contentful Migration Example
-    steps:
-    - name: Check out code into the directory
-      uses: actions/checkout@v1
-
-    - name: Contentful Migration
-      id: migrate
-      uses: contentful/contentful-action@v1
-      env: # Set the secret as an input
-        SPACE_ID: ${{ secrets.SPACE_ID }}
-        MANAGEMENT_API_KEY: ${{ secrets.MANAGEMENT_API_KEY }}
+name: 'Contentful Migration Action'
+description: 'Run a Migration against your Contentful space'
+runs:
+  using: 'node12'
+  main: 'dist/index.js'
