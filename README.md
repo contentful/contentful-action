@@ -2,9 +2,9 @@
 
 An action for running migration scripts against a Contentful CLI. To learn about making changes to a content model and entries on a Contentful Space using the Contentful CLI check out our [tutorial on Scripting Migrations](https://www.contentful.com/developers/docs/tutorials/cli/scripting-migrations/). You can read our [conceptual guide](https://www.contentful.com/developers/docs/concepts/deployment-pipeline/) on how to utilize Contentful Environments inside your continuous delivery pipeline.
 
-Usage
+## Usage
 
-See action.yml or our example usage in our contentful-action-example repository. This action requires a folder labeled migration where your scripts live. For GitHub to know which migrations it should run, we’ll need to track which migrations have been run by adding a version number into Contentful. We accomplish this in Contentful by creating a new content model with an ID of versionTracking that has a single short-text-field named version.
+See action.yml or our [example usage](https://github.com/contentful-labs/contentful-action-example) in our contentful-action-example repository. This action requires a folder labeled migration where your scripts live. For GitHub to know which migrations it should run, we’ll need to track which migrations have been run by adding a version number into Contentful. We accomplish this in Contentful by creating a new content model with an ID of versionTracking that has a single short-text-field named version.
 
 ![Screenshot of Contentful Version Tracking Entry](images/version-tracking.png)
 
