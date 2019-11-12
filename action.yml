@@ -3,3 +3,6 @@ description: 'Run a Migration against your Contentful space'
 runs:
   using: 'node12'
   main: 'dist/index.js'
+branding:
+  icon: 'upload-cloud'
+  color: 'red'
