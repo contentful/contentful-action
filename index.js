@@ -26,7 +26,8 @@ async function run() {
     const githubRefSplit = GITHUB_REF.split('/');
     const ENVIRONMENT_INPUT = githubRefSplit[githubRefSplit.length - 1];
 
-    const MIGRATIONS_DIR = process.env.GITHUB_WORKSPACE + "/migrations"
+    const DEFAULT_MIGRATIONS_DIR = 'migrations';
+    const MIGRATIONS_DIR = path.join(process.env.GITHUB_WORKSPACE, process.env.MIGRATIONS_DIR || DEFAULT_MIGRATIONS_DIR);
 
     const client = createClient({
       accessToken: MANAGEMENT_API_KEY
