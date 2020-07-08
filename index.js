@@ -183,6 +183,13 @@ async function run() {
       console.log('No alias changes required');
     }
 
+    const environmentUrl = `https://app.contentful.com/spaces/${space.sys.id}/environments/${ENVIRONMENT_ID}`
+    const environmentName = ENVIRONMENT_ID
+
+    core.debug(`Contentful environment url is ${environmentUrl}`)
+    core.debug(`Contentful environment name is ${environmentName}`)
+    core.setOutput('environment-url', environmentUrl)
+    core.setOutput('environment-name', environmentName)
     console.log('All done!');
   }
   catch (error) {
