@@ -1,10 +1,11 @@
 const core = require('@actions/core');
-const wait = require('./wait');
-
+const github = require('@actions/github');
 
 // most @actions toolkit packages have async methods
 async function run() {
   try {
+    const { context } = github
+
     const {promisify} = require('util');
     const {readdir} = require('fs');
     const readdirAsync = promisify(readdir);
@@ -16,17 +17,34 @@ async function run() {
     const getVersionOfFile = (file) => file.replace('.js', '').replace(/_/g, '.');
     const getFileOfVersion = (version) => version.replace(/\./g, '_') + '.js';
 
+    const getBranchName = () => {
+      let { ref } = context
+
+      if (github.context.eventName === 'pull_request') {
+        const pullRequestPayload = github.context.payload
+        core.info(`head : ${pullRequestPayload.pull_request.head}`)
+  
+        // actual branch name, not something like 'pull/111/merge'
+        ref = pullRequestPayload.pull_request.head.ref
+        core.info(`The head ref is: ${pullRequestPayload.pull_request.head.ref}`)
+      }
+
+      return ref
+        .replace('refs/heads/', '')
+        // normalize git-flow branch names ie. feat/foo-feature -> feat-foo-feature
+        .replace(/\//g, '-')
+    }
+
     //
     // Configuration variables
     //
     const SPACE_ID = process.env.SPACE_ID;
-    const GITHUB_REF = process.env.GITHUB_REF;
     const MANAGEMENT_API_KEY = process.env.MANAGEMENT_API_KEY;
 
-    const githubRefSplit = GITHUB_REF.split('/');
-    const ENVIRONMENT_INPUT = githubRefSplit[githubRefSplit.length - 1];
+    const ENVIRONMENT_INPUT = getBranchName();
 
-    const MIGRATIONS_DIR = process.env.GITHUB_WORKSPACE + "/migrations"
+    const DEFAULT_MIGRATIONS_DIR = 'migrations';
+    const MIGRATIONS_DIR = path.join(process.env.GITHUB_WORKSPACE, process.env.MIGRATIONS_DIR || DEFAULT_MIGRATIONS_DIR);
 
     const client = createClient({
       accessToken: MANAGEMENT_API_KEY
@@ -185,6 +203,13 @@ async function run() {
       console.log('No alias changes required');
     }
 
+    const environmentUrl = `https://app.contentful.com/spaces/${space.sys.id}/environments/${ENVIRONMENT_ID}`
+    const environmentName = ENVIRONMENT_ID
+
+    core.debug(`Contentful environment url is ${environmentUrl}`)
+    core.debug(`Contentful environment name is ${environmentName}`)
+    core.setOutput('environment-url', environmentUrl)
+    core.setOutput('environment-name', environmentName)
     console.log('All done!');
   }
   catch (error) {

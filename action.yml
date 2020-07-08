@@ -1,5 +1,10 @@
 name: 'Contentful Migration Action'
 description: 'Run a Migration against your Contentful space'
+outputs:
+  environment-url:
+    description: 'Contentful environment URL'
+  environment-name:
+    description: 'Contentful environment name'
 runs:
   using: 'node12'
   main: 'dist/index.js'
