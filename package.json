@@ -26,6 +26,7 @@
   "homepage": "https://github.com/actions/javascript-action#readme",
   "dependencies": {
     "@actions/core": "^1.1.1",
+    "@actions/github": "^3.0.0",
     "contentful-management": "^6.2.0-beta0",
     "contentful-migration": "^0.17.1-beta0"
   },
