@@ -2,7 +2,7 @@ name: 'Contentful Migration Action'
 description: 'Run a Migration against your Contentful space'
 outputs:
   environment-url:
-    description: 'Contenful enviornment URL'
+    description: 'Contentful environment URL'
   environment-name:
     description: 'Contentful environment name'
 runs:
