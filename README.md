@@ -20,7 +20,7 @@ module.exports = function runMigration(migration) {
 };
 ```
 
-Going forward you can create a JavaScript file with an increasing integer such as `2.js`, `3.js` and so on.
+Going forward you can create a JavaScript file with an increasing integer such as `2.js`, `3.js` and so on. The action by default looks for a folder labeled `migration` but it's configurable via the environment variable `MIGRATIONS_DIR`.
 
 Lastly you'll need to update your workflow file to use this action and update the settings to include your `SPACE_ID` and `MANAGEMENT_API_KEY` from Contentful. Update your `main.yml` file by adding the following step:
 
@@ -30,6 +30,7 @@ Lastly you'll need to update your workflow file to use this action and update th
   env: # Set the secret as an input
     SPACE_ID: ${{ secrets.SPACE_ID }}
     MANAGEMENT_API_KEY: ${{ secrets.MANAGEMENT_API_KEY }}
+#   MIGRATIONS_DIR: ${{ secrets.MIGRATIONS_DIR }}
 ```
 
 License
