@@ -210,6 +210,8 @@ async function run() {
     core.debug(`Contentful environment name is ${environmentName}`)
     core.setOutput('environment_url', environmentUrl)
     core.setOutput('environment_name', environmentName)
+    console.log(environmentUrl);
+    console.log(environmentName);
     console.log('All done!');
   }
   catch (error) {
