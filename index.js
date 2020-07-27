@@ -23,7 +23,7 @@ async function run() {
       if (github.context.eventName === 'pull_request') {
         const pullRequestPayload = github.context.payload
         core.info(`head : ${pullRequestPayload.pull_request.head}`)
-  
+
         // actual branch name, not something like 'pull/111/merge'
         ref = pullRequestPayload.pull_request.head.ref
         core.info(`The head ref is: ${pullRequestPayload.pull_request.head.ref}`)
@@ -208,8 +208,8 @@ async function run() {
 
     core.debug(`Contentful environment url is ${environmentUrl}`)
     core.debug(`Contentful environment name is ${environmentName}`)
-    core.setOutput('environment-url', environmentUrl)
-    core.setOutput('environment-name', environmentName)
+    core.setOutput('environment_url', environmentUrl)
+    core.setOutput('environment_name', environmentName)
     console.log('All done!');
   }
   catch (error) {
