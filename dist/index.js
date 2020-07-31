@@ -14292,12 +14292,8 @@ async function run() {
     const environmentUrl = `https://app.contentful.com/spaces/${space.sys.id}/environments/${ENVIRONMENT_ID}`
     const environmentName = ENVIRONMENT_ID
 
-    core.debug(`Contentful environment url is ${environmentUrl}`)
-    core.debug(`Contentful environment name is ${environmentName}`)
     core.setOutput('environment_url', environmentUrl)
     core.setOutput('environment_name', environmentName)
-    console.log(environmentUrl);
-    console.log(environmentName);
     console.log('All done!!!');
   }
   catch (error) {
