@@ -645,7 +645,59 @@ function findIdx(table, val) {
 
 
 /***/ }),
-/* 2 */,
+/* 2 */
+/***/ (function(module, __unusedexports, __webpack_require__) {
+
+"use strict";
+
+const os = __webpack_require__(87);
+const macosRelease = __webpack_require__(118);
+const winRelease = __webpack_require__(49);
+
+const osName = (platform, release) => {
+	if (!platform && release) {
+		throw new Error('You can\'t specify a `release` without specifying `platform`');
+	}
+
+	platform = platform || os.platform();
+
+	let id;
+
+	if (platform === 'darwin') {
+		if (!release && os.platform() === 'darwin') {
+			release = os.release();
+		}
+
+		const prefix = release ? (Number(release.split('.')[0]) > 15 ? 'macOS' : 'OS X') : 'macOS';
+		id = release ? macosRelease(release).name : '';
+		return prefix + (id ? ' ' + id : '');
+	}
+
+	if (platform === 'linux') {
+		if (!release && os.platform() === 'linux') {
+			release = os.release();
+		}
+
+		id = release ? release.replace(/^(\d+\.\d+).*/, '$1') : '';
+		return 'Linux' + (id ? ' ' + id : '');
+	}
+
+	if (platform === 'win32') {
+		if (!release && os.platform() === 'win32') {
+			release = os.release();
+		}
+
+		id = release ? winRelease(release) : '';
+		return 'Windows' + (id ? ' ' + id : '');
+	}
+
+	return platform;
+};
+
+module.exports = osName;
+
+
+/***/ }),
 /* 3 */
 /***/ (function(module, __unusedexports, __webpack_require__) {
 
@@ -776,7 +828,7 @@ var Observable_1 = __webpack_require__(524);
 var Subscriber_1 = __webpack_require__(789);
 var Subscription_1 = __webpack_require__(560);
 var ObjectUnsubscribedError_1 = __webpack_require__(940);
-var SubjectSubscription_1 = __webpack_require__(510);
+var SubjectSubscription_1 = __webpack_require__(895);
 var rxSubscriber_1 = __webpack_require__(944);
 /**
  * @class SubjectSubscriber<T>
@@ -938,23 +990,96 @@ exports.AnonymousSubject = AnonymousSubject;
 /***/ }),
 /* 8 */,
 /* 9 */
-/***/ (function(__unusedmodule, exports, __webpack_require__) {
+/***/ (function(module, __unusedexports, __webpack_require__) {
 
-"use strict";
+var once = __webpack_require__(969);
 
-Object.defineProperty(exports, "__esModule", { value: true });
-const action_1 = __webpack_require__(64);
-class ContentTypeSaveAction extends action_1.APIAction {
-    constructor(contentTypeId) {
-        super();
-        this.contentTypeId = contentTypeId;
-    }
-    async applyTo(api) {
-        await api.saveContentType(this.contentTypeId);
-    }
-}
-exports.ContentTypeSaveAction = ContentTypeSaveAction;
-//# sourceMappingURL=content-type-save.js.map
+var noop = function() {};
+
+var isRequest = function(stream) {
+	return stream.setHeader && typeof stream.abort === 'function';
+};
+
+var isChildProcess = function(stream) {
+	return stream.stdio && Array.isArray(stream.stdio) && stream.stdio.length === 3
+};
+
+var eos = function(stream, opts, callback) {
+	if (typeof opts === 'function') return eos(stream, null, opts);
+	if (!opts) opts = {};
+
+	callback = once(callback || noop);
+
+	var ws = stream._writableState;
+	var rs = stream._readableState;
+	var readable = opts.readable || (opts.readable !== false && stream.readable);
+	var writable = opts.writable || (opts.writable !== false && stream.writable);
+
+	var onlegacyfinish = function() {
+		if (!stream.writable) onfinish();
+	};
+
+	var onfinish = function() {
+		writable = false;
+		if (!readable) callback.call(stream);
+	};
+
+	var onend = function() {
+		readable = false;
+		if (!writable) callback.call(stream);
+	};
+
+	var onexit = function(exitCode) {
+		callback.call(stream, exitCode ? new Error('exited with error code: ' + exitCode) : null);
+	};
+
+	var onerror = function(err) {
+		callback.call(stream, err);
+	};
+
+	var onclose = function() {
+		if (readable && !(rs && rs.ended)) return callback.call(stream, new Error('premature close'));
+		if (writable && !(ws && ws.ended)) return callback.call(stream, new Error('premature close'));
+	};
+
+	var onrequest = function() {
+		stream.req.on('finish', onfinish);
+	};
+
+	if (isRequest(stream)) {
+		stream.on('complete', onfinish);
+		stream.on('abort', onclose);
+		if (stream.req) onrequest();
+		else stream.on('request', onrequest);
+	} else if (writable && !ws) { // legacy streams
+		stream.on('end', onlegacyfinish);
+		stream.on('close', onlegacyfinish);
+	}
+
+	if (isChildProcess(stream)) stream.on('exit', onexit);
+
+	stream.on('end', onend);
+	stream.on('finish', onfinish);
+	if (opts.error !== false) stream.on('error', onerror);
+	stream.on('close', onclose);
+
+	return function() {
+		stream.removeListener('complete', onfinish);
+		stream.removeListener('abort', onclose);
+		stream.removeListener('request', onrequest);
+		if (stream.req) stream.req.removeListener('finish', onfinish);
+		stream.removeListener('end', onlegacyfinish);
+		stream.removeListener('close', onlegacyfinish);
+		stream.removeListener('finish', onfinish);
+		stream.removeListener('exit', onexit);
+		stream.removeListener('end', onend);
+		stream.removeListener('error', onerror);
+		stream.removeListener('close', onclose);
+	};
+};
+
+module.exports = eos;
+
 
 /***/ }),
 /* 10 */
@@ -1001,987 +1126,41 @@ module.exports = isFunction;
 
 /***/ }),
 /* 11 */
-/***/ (function(__unusedmodule, exports, __webpack_require__) {
+/***/ (function(module) {
 
-"use strict";
+// Returns a wrapper function that returns a wrapped callback
+// The wrapper function should do some stuff, and return a
+// presumably different callback function.
+// This makes sure that own properties are retained, so that
+// decorations and such are not lost along the way.
+module.exports = wrappy
+function wrappy (fn, cb) {
+  if (fn && cb) return wrappy(fn)(cb)
 
+  if (typeof fn !== 'function')
+    throw new TypeError('need wrapper function')
 
-// Load modules
+  Object.keys(fn).forEach(function (k) {
+    wrapper[k] = fn[k]
+  })
 
-const Crypto = __webpack_require__(417);
-const Path = __webpack_require__(622);
-const Util = __webpack_require__(669);
-const Escape = __webpack_require__(480);
+  return wrapper
 
-
-// Declare internals
-
-const internals = {};
-
-
-// Clone object or array
-
-exports.clone = function (obj, seen) {
-
-    if (typeof obj !== 'object' ||
-        obj === null) {
-
-        return obj;
+  function wrapper() {
+    var args = new Array(arguments.length)
+    for (var i = 0; i < args.length; i++) {
+      args[i] = arguments[i]
     }
-
-    seen = seen || new Map();
-
-    const lookup = seen.get(obj);
-    if (lookup) {
-        return lookup;
+    var ret = fn.apply(this, args)
+    var cb = args[args.length-1]
+    if (typeof ret === 'function' && ret !== cb) {
+      Object.keys(cb).forEach(function (k) {
+        ret[k] = cb[k]
+      })
     }
-
-    let newObj;
-    let cloneDeep = false;
-
-    if (!Array.isArray(obj)) {
-        if (Buffer.isBuffer(obj)) {
-            newObj = new Buffer(obj);
-        }
-        else if (obj instanceof Date) {
-            newObj = new Date(obj.getTime());
-        }
-        else if (obj instanceof RegExp) {
-            newObj = new RegExp(obj);
-        }
-        else {
-            const proto = Object.getPrototypeOf(obj);
-            if (proto &&
-                proto.isImmutable) {
-
-                newObj = obj;
-            }
-            else {
-                newObj = Object.create(proto);
-                cloneDeep = true;
-            }
-        }
-    }
-    else {
-        newObj = [];
-        cloneDeep = true;
-    }
-
-    seen.set(obj, newObj);
-
-    if (cloneDeep) {
-        const keys = Object.getOwnPropertyNames(obj);
-        for (let i = 0; i < keys.length; ++i) {
-            const key = keys[i];
-            const descriptor = Object.getOwnPropertyDescriptor(obj, key);
-            if (descriptor &&
-                (descriptor.get ||
-                 descriptor.set)) {
-
-                Object.defineProperty(newObj, key, descriptor);
-            }
-            else {
-                newObj[key] = exports.clone(obj[key], seen);
-            }
-        }
-    }
-
-    return newObj;
-};
-
-
-// Merge all the properties of source into target, source wins in conflict, and by default null and undefined from source are applied
-
-/*eslint-disable */
-exports.merge = function (target, source, isNullOverride /* = true */, isMergeArrays /* = true */) {
-/*eslint-enable */
-
-    exports.assert(target && typeof target === 'object', 'Invalid target value: must be an object');
-    exports.assert(source === null || source === undefined || typeof source === 'object', 'Invalid source value: must be null, undefined, or an object');
-
-    if (!source) {
-        return target;
-    }
-
-    if (Array.isArray(source)) {
-        exports.assert(Array.isArray(target), 'Cannot merge array onto an object');
-        if (isMergeArrays === false) {                                                  // isMergeArrays defaults to true
-            target.length = 0;                                                          // Must not change target assignment
-        }
-
-        for (let i = 0; i < source.length; ++i) {
-            target.push(exports.clone(source[i]));
-        }
-
-        return target;
-    }
-
-    const keys = Object.keys(source);
-    for (let i = 0; i < keys.length; ++i) {
-        const key = keys[i];
-        if (key === '__proto__') {
-            continue;
-        }
-
-        const value = source[key];
-        if (value &&
-            typeof value === 'object') {
-
-            if (!target[key] ||
-                typeof target[key] !== 'object' ||
-                (Array.isArray(target[key]) !== Array.isArray(value)) ||
-                value instanceof Date ||
-                Buffer.isBuffer(value) ||
-                value instanceof RegExp) {
-
-                target[key] = exports.clone(value);
-            }
-            else {
-                exports.merge(target[key], value, isNullOverride, isMergeArrays);
-            }
-        }
-        else {
-            if (value !== null &&
-                value !== undefined) {                              // Explicit to preserve empty strings
-
-                target[key] = value;
-            }
-            else if (isNullOverride !== false) {                    // Defaults to true
-                target[key] = value;
-            }
-        }
-    }
-
-    return target;
-};
-
-
-// Apply options to a copy of the defaults
-
-exports.applyToDefaults = function (defaults, options, isNullOverride) {
-
-    exports.assert(defaults && typeof defaults === 'object', 'Invalid defaults value: must be an object');
-    exports.assert(!options || options === true || typeof options === 'object', 'Invalid options value: must be true, falsy or an object');
-
-    if (!options) {                                                 // If no options, return null
-        return null;
-    }
-
-    const copy = exports.clone(defaults);
-
-    if (options === true) {                                         // If options is set to true, use defaults
-        return copy;
-    }
-
-    return exports.merge(copy, options, isNullOverride === true, false);
-};
-
-
-// Clone an object except for the listed keys which are shallow copied
-
-exports.cloneWithShallow = function (source, keys) {
-
-    if (!source ||
-        typeof source !== 'object') {
-
-        return source;
-    }
-
-    const storage = internals.store(source, keys);    // Move shallow copy items to storage
-    const copy = exports.clone(source);               // Deep copy the rest
-    internals.restore(copy, source, storage);       // Shallow copy the stored items and restore
-    return copy;
-};
-
-
-internals.store = function (source, keys) {
-
-    const storage = {};
-    for (let i = 0; i < keys.length; ++i) {
-        const key = keys[i];
-        const value = exports.reach(source, key);
-        if (value !== undefined) {
-            storage[key] = value;
-            internals.reachSet(source, key, undefined);
-        }
-    }
-
-    return storage;
-};
-
-
-internals.restore = function (copy, source, storage) {
-
-    const keys = Object.keys(storage);
-    for (let i = 0; i < keys.length; ++i) {
-        const key = keys[i];
-        internals.reachSet(copy, key, storage[key]);
-        internals.reachSet(source, key, storage[key]);
-    }
-};
-
-
-internals.reachSet = function (obj, key, value) {
-
-    const path = key.split('.');
-    let ref = obj;
-    for (let i = 0; i < path.length; ++i) {
-        const segment = path[i];
-        if (i + 1 === path.length) {
-            ref[segment] = value;
-        }
-
-        ref = ref[segment];
-    }
-};
-
-
-// Apply options to defaults except for the listed keys which are shallow copied from option without merging
-
-exports.applyToDefaultsWithShallow = function (defaults, options, keys) {
-
-    exports.assert(defaults && typeof defaults === 'object', 'Invalid defaults value: must be an object');
-    exports.assert(!options || options === true || typeof options === 'object', 'Invalid options value: must be true, falsy or an object');
-    exports.assert(keys && Array.isArray(keys), 'Invalid keys');
-
-    if (!options) {                                                 // If no options, return null
-        return null;
-    }
-
-    const copy = exports.cloneWithShallow(defaults, keys);
-
-    if (options === true) {                                         // If options is set to true, use defaults
-        return copy;
-    }
-
-    const storage = internals.store(options, keys);   // Move shallow copy items to storage
-    exports.merge(copy, options, false, false);     // Deep copy the rest
-    internals.restore(copy, options, storage);      // Shallow copy the stored items and restore
-    return copy;
-};
-
-
-// Deep object or array comparison
-
-exports.deepEqual = function (obj, ref, options, seen) {
-
-    options = options || { prototype: true };
-
-    const type = typeof obj;
-
-    if (type !== typeof ref) {
-        return false;
-    }
-
-    if (type !== 'object' ||
-        obj === null ||
-        ref === null) {
-
-        if (obj === ref) {                                                      // Copied from Deep-eql, copyright(c) 2013 Jake Luer, jake@alogicalparadox.com, MIT Licensed, https://github.com/chaijs/deep-eql
-            return obj !== 0 || 1 / obj === 1 / ref;        // -0 / +0
-        }
-
-        return obj !== obj && ref !== ref;                  // NaN
-    }
-
-    seen = seen || [];
-    if (seen.indexOf(obj) !== -1) {
-        return true;                            // If previous comparison failed, it would have stopped execution
-    }
-
-    seen.push(obj);
-
-    if (Array.isArray(obj)) {
-        if (!Array.isArray(ref)) {
-            return false;
-        }
-
-        if (!options.part && obj.length !== ref.length) {
-            return false;
-        }
-
-        for (let i = 0; i < obj.length; ++i) {
-            if (options.part) {
-                let found = false;
-                for (let j = 0; j < ref.length; ++j) {
-                    if (exports.deepEqual(obj[i], ref[j], options)) {
-                        found = true;
-                        break;
-                    }
-                }
-
-                return found;
-            }
-
-            if (!exports.deepEqual(obj[i], ref[i], options)) {
-                return false;
-            }
-        }
-
-        return true;
-    }
-
-    if (Buffer.isBuffer(obj)) {
-        if (!Buffer.isBuffer(ref)) {
-            return false;
-        }
-
-        if (obj.length !== ref.length) {
-            return false;
-        }
-
-        for (let i = 0; i < obj.length; ++i) {
-            if (obj[i] !== ref[i]) {
-                return false;
-            }
-        }
-
-        return true;
-    }
-
-    if (obj instanceof Date) {
-        return (ref instanceof Date && obj.getTime() === ref.getTime());
-    }
-
-    if (obj instanceof RegExp) {
-        return (ref instanceof RegExp && obj.toString() === ref.toString());
-    }
-
-    if (options.prototype) {
-        if (Object.getPrototypeOf(obj) !== Object.getPrototypeOf(ref)) {
-            return false;
-        }
-    }
-
-    const keys = Object.getOwnPropertyNames(obj);
-
-    if (!options.part && keys.length !== Object.getOwnPropertyNames(ref).length) {
-        return false;
-    }
-
-    for (let i = 0; i < keys.length; ++i) {
-        const key = keys[i];
-        const descriptor = Object.getOwnPropertyDescriptor(obj, key);
-        if (descriptor.get) {
-            if (!exports.deepEqual(descriptor, Object.getOwnPropertyDescriptor(ref, key), options, seen)) {
-                return false;
-            }
-        }
-        else if (!exports.deepEqual(obj[key], ref[key], options, seen)) {
-            return false;
-        }
-    }
-
-    return true;
-};
-
-
-// Remove duplicate items from array
-
-exports.unique = (array, key) => {
-
-    let result;
-    if (key) {
-        result = [];
-        const index = new Set();
-        array.forEach((item) => {
-
-            const identifier = item[key];
-            if (!index.has(identifier)) {
-                index.add(identifier);
-                result.push(item);
-            }
-        });
-    }
-    else {
-        result = Array.from(new Set(array));
-    }
-
-    return result;
-};
-
-
-// Convert array into object
-
-exports.mapToObject = function (array, key) {
-
-    if (!array) {
-        return null;
-    }
-
-    const obj = {};
-    for (let i = 0; i < array.length; ++i) {
-        if (key) {
-            if (array[i][key]) {
-                obj[array[i][key]] = true;
-            }
-        }
-        else {
-            obj[array[i]] = true;
-        }
-    }
-
-    return obj;
-};
-
-
-// Find the common unique items in two arrays
-
-exports.intersect = function (array1, array2, justFirst) {
-
-    if (!array1 || !array2) {
-        return [];
-    }
-
-    const common = [];
-    const hash = (Array.isArray(array1) ? exports.mapToObject(array1) : array1);
-    const found = {};
-    for (let i = 0; i < array2.length; ++i) {
-        if (hash[array2[i]] && !found[array2[i]]) {
-            if (justFirst) {
-                return array2[i];
-            }
-
-            common.push(array2[i]);
-            found[array2[i]] = true;
-        }
-    }
-
-    return (justFirst ? null : common);
-};
-
-
-// Test if the reference contains the values
-
-exports.contain = function (ref, values, options) {
-
-    /*
-        string -> string(s)
-        array -> item(s)
-        object -> key(s)
-        object -> object (key:value)
-    */
-
-    let valuePairs = null;
-    if (typeof ref === 'object' &&
-        typeof values === 'object' &&
-        !Array.isArray(ref) &&
-        !Array.isArray(values)) {
-
-        valuePairs = values;
-        values = Object.keys(values);
-    }
-    else {
-        values = [].concat(values);
-    }
-
-    options = options || {};            // deep, once, only, part
-
-    exports.assert(arguments.length >= 2, 'Insufficient arguments');
-    exports.assert(typeof ref === 'string' || typeof ref === 'object', 'Reference must be string or an object');
-    exports.assert(values.length, 'Values array cannot be empty');
-
-    let compare;
-    let compareFlags;
-    if (options.deep) {
-        compare = exports.deepEqual;
-
-        const hasOnly = options.hasOwnProperty('only');
-        const hasPart = options.hasOwnProperty('part');
-
-        compareFlags = {
-            prototype: hasOnly ? options.only : hasPart ? !options.part : false,
-            part: hasOnly ? !options.only : hasPart ? options.part : true
-        };
-    }
-    else {
-        compare = (a, b) => a === b;
-    }
-
-    let misses = false;
-    const matches = new Array(values.length);
-    for (let i = 0; i < matches.length; ++i) {
-        matches[i] = 0;
-    }
-
-    if (typeof ref === 'string') {
-        let pattern = '(';
-        for (let i = 0; i < values.length; ++i) {
-            const value = values[i];
-            exports.assert(typeof value === 'string', 'Cannot compare string reference to non-string value');
-            pattern += (i ? '|' : '') + exports.escapeRegex(value);
-        }
-
-        const regex = new RegExp(pattern + ')', 'g');
-        const leftovers = ref.replace(regex, ($0, $1) => {
-
-            const index = values.indexOf($1);
-            ++matches[index];
-            return '';          // Remove from string
-        });
-
-        misses = !!leftovers;
-    }
-    else if (Array.isArray(ref)) {
-        for (let i = 0; i < ref.length; ++i) {
-            let matched = false;
-            for (let j = 0; j < values.length && matched === false; ++j) {
-                matched = compare(values[j], ref[i], compareFlags) && j;
-            }
-
-            if (matched !== false) {
-                ++matches[matched];
-            }
-            else {
-                misses = true;
-            }
-        }
-    }
-    else {
-        const keys = Object.getOwnPropertyNames(ref);
-        for (let i = 0; i < keys.length; ++i) {
-            const key = keys[i];
-            const pos = values.indexOf(key);
-            if (pos !== -1) {
-                if (valuePairs &&
-                    !compare(valuePairs[key], ref[key], compareFlags)) {
-
-                    return false;
-                }
-
-                ++matches[pos];
-            }
-            else {
-                misses = true;
-            }
-        }
-    }
-
-    let result = false;
-    for (let i = 0; i < matches.length; ++i) {
-        result = result || !!matches[i];
-        if ((options.once && matches[i] > 1) ||
-            (!options.part && !matches[i])) {
-
-            return false;
-        }
-    }
-
-    if (options.only &&
-        misses) {
-
-        return false;
-    }
-
-    return result;
-};
-
-
-// Flatten array
-
-exports.flatten = function (array, target) {
-
-    const result = target || [];
-
-    for (let i = 0; i < array.length; ++i) {
-        if (Array.isArray(array[i])) {
-            exports.flatten(array[i], result);
-        }
-        else {
-            result.push(array[i]);
-        }
-    }
-
-    return result;
-};
-
-
-// Convert an object key chain string ('a.b.c') to reference (object[a][b][c])
-
-exports.reach = function (obj, chain, options) {
-
-    if (chain === false ||
-        chain === null ||
-        typeof chain === 'undefined') {
-
-        return obj;
-    }
-
-    options = options || {};
-    if (typeof options === 'string') {
-        options = { separator: options };
-    }
-
-    const path = chain.split(options.separator || '.');
-    let ref = obj;
-    for (let i = 0; i < path.length; ++i) {
-        let key = path[i];
-        if (key[0] === '-' && Array.isArray(ref)) {
-            key = key.slice(1, key.length);
-            key = ref.length - key;
-        }
-
-        if (!ref ||
-            !((typeof ref === 'object' || typeof ref === 'function') && key in ref) ||
-            (typeof ref !== 'object' && options.functions === false)) {         // Only object and function can have properties
-
-            exports.assert(!options.strict || i + 1 === path.length, 'Missing segment', key, 'in reach path ', chain);
-            exports.assert(typeof ref === 'object' || options.functions === true || typeof ref !== 'function', 'Invalid segment', key, 'in reach path ', chain);
-            ref = options.default;
-            break;
-        }
-
-        ref = ref[key];
-    }
-
-    return ref;
-};
-
-
-exports.reachTemplate = function (obj, template, options) {
-
-    return template.replace(/{([^}]+)}/g, ($0, chain) => {
-
-        const value = exports.reach(obj, chain, options);
-        return (value === undefined || value === null ? '' : value);
-    });
-};
-
-
-exports.formatStack = function (stack) {
-
-    const trace = [];
-    for (let i = 0; i < stack.length; ++i) {
-        const item = stack[i];
-        trace.push([item.getFileName(), item.getLineNumber(), item.getColumnNumber(), item.getFunctionName(), item.isConstructor()]);
-    }
-
-    return trace;
-};
-
-
-exports.formatTrace = function (trace) {
-
-    const display = [];
-
-    for (let i = 0; i < trace.length; ++i) {
-        const row = trace[i];
-        display.push((row[4] ? 'new ' : '') + row[3] + ' (' + row[0] + ':' + row[1] + ':' + row[2] + ')');
-    }
-
-    return display;
-};
-
-
-exports.callStack = function (slice) {
-
-    // http://code.google.com/p/v8/wiki/JavaScriptStackTraceApi
-
-    const v8 = Error.prepareStackTrace;
-    Error.prepareStackTrace = function (_, stack) {
-
-        return stack;
-    };
-
-    const capture = {};
-    Error.captureStackTrace(capture, this);     // arguments.callee is not supported in strict mode so we use this and slice the trace of this off the result
-    const stack = capture.stack;
-
-    Error.prepareStackTrace = v8;
-
-    const trace = exports.formatStack(stack);
-
-    return trace.slice(1 + slice);
-};
-
-
-exports.displayStack = function (slice) {
-
-    const trace = exports.callStack(slice === undefined ? 1 : slice + 1);
-
-    return exports.formatTrace(trace);
-};
-
-
-exports.abortThrow = false;
-
-
-exports.abort = function (message, hideStack) {
-
-    if (process.env.NODE_ENV === 'test' || exports.abortThrow === true) {
-        throw new Error(message || 'Unknown error');
-    }
-
-    let stack = '';
-    if (!hideStack) {
-        stack = exports.displayStack(1).join('\n\t');
-    }
-    console.log('ABORT: ' + message + '\n\t' + stack);
-    process.exit(1);
-};
-
-
-exports.assert = function (condition /*, msg1, msg2, msg3 */) {
-
-    if (condition) {
-        return;
-    }
-
-    if (arguments.length === 2 && arguments[1] instanceof Error) {
-        throw arguments[1];
-    }
-
-    let msgs = [];
-    for (let i = 1; i < arguments.length; ++i) {
-        if (arguments[i] !== '') {
-            msgs.push(arguments[i]);            // Avoids Array.slice arguments leak, allowing for V8 optimizations
-        }
-    }
-
-    msgs = msgs.map((msg) => {
-
-        return typeof msg === 'string' ? msg : msg instanceof Error ? msg.message : exports.stringify(msg);
-    });
-
-    throw new Error(msgs.join(' ') || 'Unknown error');
-};
-
-
-exports.Timer = function () {
-
-    this.ts = 0;
-    this.reset();
-};
-
-
-exports.Timer.prototype.reset = function () {
-
-    this.ts = Date.now();
-};
-
-
-exports.Timer.prototype.elapsed = function () {
-
-    return Date.now() - this.ts;
-};
-
-
-exports.Bench = function () {
-
-    this.ts = 0;
-    this.reset();
-};
-
-
-exports.Bench.prototype.reset = function () {
-
-    this.ts = exports.Bench.now();
-};
-
-
-exports.Bench.prototype.elapsed = function () {
-
-    return exports.Bench.now() - this.ts;
-};
-
-
-exports.Bench.now = function () {
-
-    const ts = process.hrtime();
-    return (ts[0] * 1e3) + (ts[1] / 1e6);
-};
-
-
-// Escape string for Regex construction
-
-exports.escapeRegex = function (string) {
-
-    // Escape ^$.*+-?=!:|\/()[]{},
-    return string.replace(/[\^\$\.\*\+\-\?\=\!\:\|\\\/\(\)\[\]\{\}\,]/g, '\\$&');
-};
-
-
-// Base64url (RFC 4648) encode
-
-exports.base64urlEncode = function (value, encoding) {
-
-    exports.assert(typeof value === 'string' || Buffer.isBuffer(value), 'value must be string or buffer');
-    const buf = (Buffer.isBuffer(value) ? value : new Buffer(value, encoding || 'binary'));
-    return buf.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/\=/g, '');
-};
-
-
-// Base64url (RFC 4648) decode
-
-exports.base64urlDecode = function (value, encoding) {
-
-    if (typeof value !== 'string') {
-
-        return new Error('Value not a string');
-    }
-
-    if (!/^[\w\-]*$/.test(value)) {
-
-        return new Error('Invalid character');
-    }
-
-    const buf = new Buffer(value, 'base64');
-    return (encoding === 'buffer' ? buf : buf.toString(encoding || 'binary'));
-};
-
-
-// Escape attribute value for use in HTTP header
-
-exports.escapeHeaderAttribute = function (attribute) {
-
-    // Allowed value characters: !#$%&'()*+,-./:;<=>?@[]^_`{|}~ and space, a-z, A-Z, 0-9, \, "
-
-    exports.assert(/^[ \w\!#\$%&'\(\)\*\+,\-\.\/\:;<\=>\?@\[\]\^`\{\|\}~\"\\]*$/.test(attribute), 'Bad attribute value (' + attribute + ')');
-
-    return attribute.replace(/\\/g, '\\\\').replace(/\"/g, '\\"');                             // Escape quotes and slash
-};
-
-
-exports.escapeHtml = function (string) {
-
-    return Escape.escapeHtml(string);
-};
-
-
-exports.escapeJavaScript = function (string) {
-
-    return Escape.escapeJavaScript(string);
-};
-
-exports.escapeJson = function (string) {
-
-    return Escape.escapeJson(string);
-};
-
-exports.nextTick = function (callback) {
-
-    return function () {
-
-        const args = arguments;
-        process.nextTick(() => {
-
-            callback.apply(null, args);
-        });
-    };
-};
-
-
-exports.once = function (method) {
-
-    if (method._hoekOnce) {
-        return method;
-    }
-
-    let once = false;
-    const wrapped = function () {
-
-        if (!once) {
-            once = true;
-            method.apply(null, arguments);
-        }
-    };
-
-    wrapped._hoekOnce = true;
-
-    return wrapped;
-};
-
-
-exports.isInteger = Number.isSafeInteger;
-
-
-exports.ignore = function () { };
-
-
-exports.inherits = Util.inherits;
-
-
-exports.format = Util.format;
-
-
-exports.transform = function (source, transform, options) {
-
-    exports.assert(source === null || source === undefined || typeof source === 'object' || Array.isArray(source), 'Invalid source object: must be null, undefined, an object, or an array');
-    const separator = (typeof options === 'object' && options !== null) ? (options.separator || '.') : '.';
-
-    if (Array.isArray(source)) {
-        const results = [];
-        for (let i = 0; i < source.length; ++i) {
-            results.push(exports.transform(source[i], transform, options));
-        }
-        return results;
-    }
-
-    const result = {};
-    const keys = Object.keys(transform);
-
-    for (let i = 0; i < keys.length; ++i) {
-        const key = keys[i];
-        const path = key.split(separator);
-        const sourcePath = transform[key];
-
-        exports.assert(typeof sourcePath === 'string', 'All mappings must be "." delineated strings');
-
-        let segment;
-        let res = result;
-
-        while (path.length > 1) {
-            segment = path.shift();
-            if (!res[segment]) {
-                res[segment] = {};
-            }
-            res = res[segment];
-        }
-        segment = path.shift();
-        res[segment] = exports.reach(source, sourcePath, options);
-    }
-
-    return result;
-};
-
-
-exports.uniqueFilename = function (path, extension) {
-
-    if (extension) {
-        extension = extension[0] !== '.' ? '.' + extension : extension;
-    }
-    else {
-        extension = '';
-    }
-
-    path = Path.resolve(path);
-    const name = [Date.now(), process.pid, Crypto.randomBytes(8).toString('hex')].join('-') + extension;
-    return Path.join(path, name);
-};
-
-
-exports.stringify = function () {
-
-    try {
-        return JSON.stringify.apply(null, arguments);
-    }
-    catch (err) {
-        return '[Cannot display object: ' + err.message + ']';
-    }
-};
-
-
-exports.shallow = function (source) {
-
-    const target = {};
-    const keys = Object.keys(source);
-    for (let i = 0; i < keys.length; ++i) {
-        const key = keys[i];
-        target[key] = source[key];
-    }
-
-    return target;
-};
+    return ret
+  }
+}
 
 
 /***/ }),
@@ -2012,7 +1191,13 @@ module.exports = require("tls");
 
 /***/ }),
 /* 17 */,
-/* 18 */,
+/* 18 */
+/***/ (function() {
+
+eval("require")("encoding");
+
+
+/***/ }),
 /* 19 */
 /***/ (function(__unusedmodule, exports) {
 
@@ -2129,7 +1314,52 @@ exports.default = Intent;
 //# sourceMappingURL=base-intent.js.map
 
 /***/ }),
-/* 20 */,
+/* 20 */
+/***/ (function(module, __unusedexports, __webpack_require__) {
+
+"use strict";
+
+
+const cp = __webpack_require__(129);
+const parse = __webpack_require__(568);
+const enoent = __webpack_require__(881);
+
+function spawn(command, args, options) {
+    // Parse the arguments
+    const parsed = parse(command, args, options);
+
+    // Spawn the child process
+    const spawned = cp.spawn(parsed.command, parsed.args, parsed.options);
+
+    // Hook into child process "exit" event to emit an error if the command
+    // does not exists, see: https://github.com/IndigoUnited/node-cross-spawn/issues/16
+    enoent.hookChildProcess(spawned, parsed);
+
+    return spawned;
+}
+
+function spawnSync(command, args, options) {
+    // Parse the arguments
+    const parsed = parse(command, args, options);
+
+    // Spawn the child process
+    const result = cp.spawnSync(parsed.command, parsed.args, parsed.options);
+
+    // Analyze if the command does not exist, see: https://github.com/IndigoUnited/node-cross-spawn/issues/16
+    result.error = result.error || enoent.verifyENOENTSync(result.status, parsed);
+
+    return result;
+}
+
+module.exports = spawn;
+module.exports.spawn = spawn;
+module.exports.sync = spawnSync;
+
+module.exports._parse = parse;
+module.exports._enoent = enoent;
+
+
+/***/ }),
 /* 21 */
 /***/ (function(module, __unusedexports, __webpack_require__) {
 
@@ -2139,7 +1369,7 @@ exports.default = Intent;
 // Load modules
 
 const Any = __webpack_require__(227);
-const Hoek = __webpack_require__(11);
+const Hoek = __webpack_require__(970);
 
 
 // Declare internals
@@ -2262,7 +1492,7 @@ module.exports = listCacheClear;
 
 Object.defineProperty(exports, "__esModule", { value: true });
 const fs = __webpack_require__(747);
-const cardinal = __webpack_require__(262);
+const cardinal = __webpack_require__(305);
 const _ = __webpack_require__(557);
 const chalk_1 = __webpack_require__(946);
 const getLineWithContext = function (lines, lineNumber, context) {
@@ -3391,7 +2621,7 @@ module.exports = class Set {
  * treat as a browser.
  */
 if (typeof process === 'undefined' || process.type === 'renderer' || process.browser === true || process.__nwjs) {
-  module.exports = __webpack_require__(141);
+  module.exports = __webpack_require__(679);
 } else {
   module.exports = __webpack_require__(411);
 }
@@ -10481,7 +9711,7 @@ const field_movement_1 = __webpack_require__(387);
 const entry_derive_1 = __webpack_require__(765);
 const content_transform_1 = __webpack_require__(627);
 const intent_list_1 = __webpack_require__(332);
-const errors = __webpack_require__(197);
+const errors = __webpack_require__(718);
 const entry_1 = __webpack_require__(255);
 const fetcher_1 = __webpack_require__(771);
 const offline_api_1 = __webpack_require__(666);
@@ -10588,92 +9818,126 @@ exports.createMigrationParser = createMigrationParser;
 
 /***/ }),
 /* 39 */
-/***/ (function(__unusedmodule, exports, __webpack_require__) {
+/***/ (function(module) {
 
 "use strict";
 
-var ansiEscapes = __webpack_require__(223);
+module.exports = opts => {
+	opts = opts || {};
 
-/**
- * Move cursor left by `x`
- * @param  {Readline} rl - Readline instance
- * @param  {Number}   x  - How far to go left (default to 1)
- */
+	const env = opts.env || process.env;
+	const platform = opts.platform || process.platform;
 
-exports.left = function (rl, x) {
-  rl.output.write(ansiEscapes.cursorBackward(x));
-};
+	if (platform !== 'win32') {
+		return 'PATH';
+	}
 
-/**
- * Move cursor right by `x`
- * @param  {Readline} rl - Readline instance
- * @param  {Number}   x  - How far to go left (default to 1)
- */
-
-exports.right = function (rl, x) {
-  rl.output.write(ansiEscapes.cursorForward(x));
-};
-
-/**
- * Move cursor up by `x`
- * @param  {Readline} rl - Readline instance
- * @param  {Number}   x  - How far to go up (default to 1)
- */
-
-exports.up = function (rl, x) {
-  rl.output.write(ansiEscapes.cursorUp(x));
-};
-
-/**
- * Move cursor down by `x`
- * @param  {Readline} rl - Readline instance
- * @param  {Number}   x  - How far to go down (default to 1)
- */
-
-exports.down = function (rl, x) {
-  rl.output.write(ansiEscapes.cursorDown(x));
-};
-
-/**
- * Clear current line
- * @param  {Readline} rl  - Readline instance
- * @param  {Number}   len - number of line to delete
- */
-exports.clearLine = function (rl, len) {
-  rl.output.write(ansiEscapes.eraseLines(len));
+	return Object.keys(env).find(x => x.toUpperCase() === 'PATH') || 'Path';
 };
 
 
 /***/ }),
 /* 40 */
-/***/ (function(__unusedmodule, exports) {
+/***/ (function(module, __unusedexports, __webpack_require__) {
 
-"use strict";
+var conversions = __webpack_require__(600);
 
-var __extends = (this && this.__extends) || function (d, b) {
-    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
-    function __() { this.constructor = d; }
-    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+/*
+	this function routes a model to all other models.
+
+	all functions that are routed have a property `.conversion` attached
+	to the returned synthetic function. This property is an array
+	of strings, each with the steps in between the 'from' and 'to'
+	color models (inclusive).
+
+	conversions that are not possible simply are not included.
+*/
+
+function buildGraph() {
+	var graph = {};
+	// https://jsperf.com/object-keys-vs-for-in-with-closure/3
+	var models = Object.keys(conversions);
+
+	for (var len = models.length, i = 0; i < len; i++) {
+		graph[models[i]] = {
+			// http://jsperf.com/1-vs-infinity
+			// micro-opt, but this is simple.
+			distance: -1,
+			parent: null
+		};
+	}
+
+	return graph;
+}
+
+// https://en.wikipedia.org/wiki/Breadth-first_search
+function deriveBFS(fromModel) {
+	var graph = buildGraph();
+	var queue = [fromModel]; // unshift -> queue -> pop
+
+	graph[fromModel].distance = 0;
+
+	while (queue.length) {
+		var current = queue.pop();
+		var adjacents = Object.keys(conversions[current]);
+
+		for (var len = adjacents.length, i = 0; i < len; i++) {
+			var adjacent = adjacents[i];
+			var node = graph[adjacent];
+
+			if (node.distance === -1) {
+				node.distance = graph[current].distance + 1;
+				node.parent = current;
+				queue.unshift(adjacent);
+			}
+		}
+	}
+
+	return graph;
+}
+
+function link(from, to) {
+	return function (args) {
+		return to(from(args));
+	};
+}
+
+function wrapConversion(toModel, graph) {
+	var path = [graph[toModel].parent, toModel];
+	var fn = conversions[graph[toModel].parent][toModel];
+
+	var cur = graph[toModel].parent;
+	while (graph[cur].parent) {
+		path.unshift(graph[cur].parent);
+		fn = link(conversions[graph[cur].parent][cur], fn);
+		cur = graph[cur].parent;
+	}
+
+	fn.conversion = path;
+	return fn;
+}
+
+module.exports = function (fromModel) {
+	var graph = deriveBFS(fromModel);
+	var conversion = {};
+
+	var models = Object.keys(graph);
+	for (var len = models.length, i = 0; i < len; i++) {
+		var toModel = models[i];
+		var node = graph[toModel];
+
+		if (node.parent === null) {
+			// no possible conversion, or this node is the source model.
+			continue;
+		}
+
+		conversion[toModel] = wrapConversion(toModel, graph);
+	}
+
+	return conversion;
 };
-/**
- * An error thrown when one or more errors have occurred during the
- * `unsubscribe` of a {@link Subscription}.
- */
-var UnsubscriptionError = (function (_super) {
-    __extends(UnsubscriptionError, _super);
-    function UnsubscriptionError(errors) {
-        _super.call(this);
-        this.errors = errors;
-        var err = Error.call(this, errors ?
-            errors.length + " errors occurred during unsubscription:\n  " + errors.map(function (err, i) { return ((i + 1) + ") " + err.toString()); }).join('\n  ') : '');
-        this.name = err.name = 'UnsubscriptionError';
-        this.stack = err.stack;
-        this.message = err.message;
-    }
-    return UnsubscriptionError;
-}(Error));
-exports.UnsubscriptionError = UnsubscriptionError;
-//# sourceMappingURL=UnsubscriptionError.js.map
+
+
 
 /***/ }),
 /* 41 */,
@@ -10689,35 +9953,57 @@ exports.UnsubscriptionError = UnsubscriptionError;
 
 "use strict";
 
-var ansiEscapes = __webpack_require__(746);
-var cliCursor = __webpack_require__(388);
+const os = __webpack_require__(87);
+const execa = __webpack_require__(955);
 
-function main(stream) {
-	var prevLineCount = 0;
+// Reference: https://www.gaijin.at/en/lstwinver.php
+const names = new Map([
+	['10.0', '10'],
+	['6.3', '8.1'],
+	['6.2', '8'],
+	['6.1', '7'],
+	['6.0', 'Vista'],
+	['5.2', 'Server 2003'],
+	['5.1', 'XP'],
+	['5.0', '2000'],
+	['4.9', 'ME'],
+	['4.1', '98'],
+	['4.0', '95']
+]);
 
-	var render = function () {
-		cliCursor.hide();
-		var out = [].join.call(arguments, ' ') + '\n';
-		stream.write(ansiEscapes.eraseLines(prevLineCount) + out);
-		prevLineCount = out.split('\n').length;
-	};
+const windowsRelease = release => {
+	const version = /\d+\.\d/.exec(release || os.release());
 
-	render.clear = function () {
-		stream.write(ansiEscapes.eraseLines(prevLineCount));
-		prevLineCount = 0;
-	};
+	if (release && !version) {
+		throw new Error('`release` argument doesn\'t match `n.n`');
+	}
 
-	render.done = function () {
-		prevLineCount = 0;
-		cliCursor.show();
-	};
+	const ver = (version || [])[0];
 
-	return render;
-}
+	// Server 2008, 2012, 2016, and 2019 versions are ambiguous with desktop versions and must be detected at runtime.
+	// If `release` is omitted or we're on a Windows system, and the version number is an ambiguous version
+	// then use `wmic` to get the OS caption: https://msdn.microsoft.com/en-us/library/aa394531(v=vs.85).aspx
+	// If `wmic` is obsoloete (later versions of Windows 10), use PowerShell instead.
+	// If the resulting caption contains the year 2008, 2012, 2016 or 2019, it is a server version, so return a server OS name.
+	if ((!release || release === os.release()) && ['6.1', '6.2', '6.3', '10.0'].includes(ver)) {
+		let stdout;
+		try {
+			stdout = execa.sync('wmic', ['os', 'get', 'Caption']).stdout || '';
+		} catch (_) {
+			stdout = execa.sync('powershell', ['(Get-CimInstance -ClassName Win32_OperatingSystem).caption']).stdout || '';
+		}
 
-module.exports = main(process.stdout);
-module.exports.stderr = main(process.stderr);
-module.exports.create = main;
+		const year = (stdout.match(/2008|2012|2016|2019/) || [])[0];
+
+		if (year) {
+			return `Server ${year}`;
+		}
+	}
+
+	return names.get(ver);
+};
+
+module.exports = windowsRelease;
 
 
 /***/ }),
@@ -10890,7 +10176,128 @@ module.exports = internals.Uri;
 
 
 /***/ }),
-/* 57 */,
+/* 57 */
+/***/ (function(module, __unusedexports, __webpack_require__) {
+
+"use strict";
+
+var _ = __webpack_require__(557);
+var rx = __webpack_require__(757);
+var util = __webpack_require__(669);
+var runAsync = __webpack_require__(4);
+var utils = __webpack_require__(414);
+var Base = __webpack_require__(825);
+
+/**
+ * Base interface class other can inherits from
+ */
+
+var PromptUI = module.exports = function (prompts, opt) {
+  Base.call(this, opt);
+  this.prompts = prompts;
+};
+util.inherits(PromptUI, Base);
+
+PromptUI.prototype.run = function (questions) {
+  // Keep global reference to the answers
+  this.answers = {};
+
+  // Make sure questions is an array.
+  if (_.isPlainObject(questions)) {
+    questions = [questions];
+  }
+
+  // Create an observable, unless we received one as parameter.
+  // Note: As this is a public interface, we cannot do an instanceof check as we won't
+  // be using the exact same object in memory.
+  var obs = _.isArray(questions) ? rx.Observable.from(questions) : questions;
+
+  this.process = obs
+    .concatMap(this.processQuestion.bind(this))
+    // `publish` creates a hot Observable. It prevents duplicating prompts.
+    .publish();
+
+  this.process.connect();
+
+  return this.process
+    .reduce(function (answers, answer) {
+      _.set(this.answers, answer.name, answer.answer);
+      return this.answers;
+    }.bind(this), {})
+    .toPromise(Promise)
+    .then(this.onCompletion.bind(this));
+};
+
+/**
+ * Once all prompt are over
+ */
+
+PromptUI.prototype.onCompletion = function (answers) {
+  this.close();
+
+  return answers;
+};
+
+PromptUI.prototype.processQuestion = function (question) {
+  question = _.clone(question);
+  return rx.Observable.defer(function () {
+    var obs = rx.Observable.of(question);
+
+    return obs
+      .concatMap(this.setDefaultType.bind(this))
+      .concatMap(this.filterIfRunnable.bind(this))
+      .concatMap(utils.fetchAsyncQuestionProperty.bind(null, question, 'message', this.answers))
+      .concatMap(utils.fetchAsyncQuestionProperty.bind(null, question, 'default', this.answers))
+      .concatMap(utils.fetchAsyncQuestionProperty.bind(null, question, 'choices', this.answers))
+      .concatMap(this.fetchAnswer.bind(this));
+  }.bind(this));
+};
+
+PromptUI.prototype.fetchAnswer = function (question) {
+  var Prompt = this.prompts[question.type];
+  this.activePrompt = new Prompt(question, this.rl, this.answers);
+  return rx.Observable.defer(function () {
+    return rx.Observable.fromPromise(this.activePrompt.run().then(function (answer) {
+      return {name: question.name, answer: answer};
+    }));
+  }.bind(this));
+};
+
+PromptUI.prototype.setDefaultType = function (question) {
+  // Default type to input
+  if (!this.prompts[question.type]) {
+    question.type = 'input';
+  }
+  return rx.Observable.defer(function () {
+    return rx.Observable.return(question);
+  });
+};
+
+PromptUI.prototype.filterIfRunnable = function (question) {
+  if (question.when === false) {
+    return rx.Observable.empty();
+  }
+
+  if (!_.isFunction(question.when)) {
+    return rx.Observable.return(question);
+  }
+
+  var answers = this.answers;
+  return rx.Observable.defer(function () {
+    return rx.Observable.fromPromise(
+      runAsync(question.when)(answers).then(function (shouldRun) {
+        if (shouldRun) {
+          return question;
+        }
+      })
+    ).filter(function (val) {
+      return val != null;
+    });
+  });
+};
+
+
+/***/ }),
 /* 58 */
 /***/ (function(module) {
 
@@ -10971,9 +10378,65 @@ exports.UpdateEditorInterfaceAction = UpdateEditorInterfaceAction;
 //# sourceMappingURL=editorinterface-update.js.map
 
 /***/ }),
-/* 66 */,
+/* 66 */
+/***/ (function(module, __unusedexports, __webpack_require__) {
+
+var freeGlobal = __webpack_require__(319);
+
+/** Detect free variable `self`. */
+var freeSelf = typeof self == 'object' && self && self.Object === Object && self;
+
+/** Used as a reference to the global object. */
+var root = freeGlobal || freeSelf || Function('return this')();
+
+module.exports = root;
+
+
+/***/ }),
 /* 67 */,
-/* 68 */,
+/* 68 */
+/***/ (function(module, __unusedexports, __webpack_require__) {
+
+var Symbol = __webpack_require__(498),
+    arrayMap = __webpack_require__(727),
+    isArray = __webpack_require__(143),
+    isSymbol = __webpack_require__(186);
+
+/** Used as references for various `Number` constants. */
+var INFINITY = 1 / 0;
+
+/** Used to convert symbols to primitives and strings. */
+var symbolProto = Symbol ? Symbol.prototype : undefined,
+    symbolToString = symbolProto ? symbolProto.toString : undefined;
+
+/**
+ * The base implementation of `_.toString` which doesn't convert nullish
+ * values to empty strings.
+ *
+ * @private
+ * @param {*} value The value to process.
+ * @returns {string} Returns the string.
+ */
+function baseToString(value) {
+  // Exit early for strings to avoid a performance hit in some environments.
+  if (typeof value == 'string') {
+    return value;
+  }
+  if (isArray(value)) {
+    // Recursively convert values (susceptible to call stack limits).
+    return arrayMap(value, baseToString) + '';
+  }
+  if (isSymbol(value)) {
+    return symbolToString ? symbolToString.call(value) : '';
+  }
+  var result = (value + '');
+  return (result == '0' && (1 / value) == -INFINITY) ? '-0' : result;
+}
+
+module.exports = baseToString;
+
+
+/***/ }),
 /* 69 */,
 /* 70 */,
 /* 71 */,
@@ -11008,7 +10471,1022 @@ module.exports = mapCacheSet;
 /***/ }),
 /* 74 */,
 /* 75 */,
-/* 76 */,
+/* 76 */
+/***/ (function(module, __unusedexports, __webpack_require__) {
+
+"use strict";
+
+module.exports = function(Promise, Context,
+    enableAsyncHooks, disableAsyncHooks) {
+var async = Promise._async;
+var Warning = __webpack_require__(607).Warning;
+var util = __webpack_require__(248);
+var es5 = __webpack_require__(883);
+var canAttachTrace = util.canAttachTrace;
+var unhandledRejectionHandled;
+var possiblyUnhandledRejection;
+var bluebirdFramePattern =
+    /[\\\/]bluebird[\\\/]js[\\\/](release|debug|instrumented)/;
+var nodeFramePattern = /\((?:timers\.js):\d+:\d+\)/;
+var parseLinePattern = /[\/<\(](.+?):(\d+):(\d+)\)?\s*$/;
+var stackFramePattern = null;
+var formatStack = null;
+var indentStackFrames = false;
+var printWarning;
+var debugging = !!(util.env("BLUEBIRD_DEBUG") != 0 &&
+                        ( false ||
+                         util.env("BLUEBIRD_DEBUG") ||
+                         util.env("NODE_ENV") === "development"));
+
+var warnings = !!(util.env("BLUEBIRD_WARNINGS") != 0 &&
+    (debugging || util.env("BLUEBIRD_WARNINGS")));
+
+var longStackTraces = !!(util.env("BLUEBIRD_LONG_STACK_TRACES") != 0 &&
+    (debugging || util.env("BLUEBIRD_LONG_STACK_TRACES")));
+
+var wForgottenReturn = util.env("BLUEBIRD_W_FORGOTTEN_RETURN") != 0 &&
+    (warnings || !!util.env("BLUEBIRD_W_FORGOTTEN_RETURN"));
+
+var deferUnhandledRejectionCheck;
+(function() {
+    var promises = [];
+
+    function unhandledRejectionCheck() {
+        for (var i = 0; i < promises.length; ++i) {
+            promises[i]._notifyUnhandledRejection();
+        }
+        unhandledRejectionClear();
+    }
+
+    function unhandledRejectionClear() {
+        promises.length = 0;
+    }
+
+    deferUnhandledRejectionCheck = function(promise) {
+        promises.push(promise);
+        setTimeout(unhandledRejectionCheck, 1);
+    };
+
+    es5.defineProperty(Promise, "_unhandledRejectionCheck", {
+        value: unhandledRejectionCheck
+    });
+    es5.defineProperty(Promise, "_unhandledRejectionClear", {
+        value: unhandledRejectionClear
+    });
+})();
+
+Promise.prototype.suppressUnhandledRejections = function() {
+    var target = this._target();
+    target._bitField = ((target._bitField & (~1048576)) |
+                      524288);
+};
+
+Promise.prototype._ensurePossibleRejectionHandled = function () {
+    if ((this._bitField & 524288) !== 0) return;
+    this._setRejectionIsUnhandled();
+    deferUnhandledRejectionCheck(this);
+};
+
+Promise.prototype._notifyUnhandledRejectionIsHandled = function () {
+    fireRejectionEvent("rejectionHandled",
+                                  unhandledRejectionHandled, undefined, this);
+};
+
+Promise.prototype._setReturnedNonUndefined = function() {
+    this._bitField = this._bitField | 268435456;
+};
+
+Promise.prototype._returnedNonUndefined = function() {
+    return (this._bitField & 268435456) !== 0;
+};
+
+Promise.prototype._notifyUnhandledRejection = function () {
+    if (this._isRejectionUnhandled()) {
+        var reason = this._settledValue();
+        this._setUnhandledRejectionIsNotified();
+        fireRejectionEvent("unhandledRejection",
+                                      possiblyUnhandledRejection, reason, this);
+    }
+};
+
+Promise.prototype._setUnhandledRejectionIsNotified = function () {
+    this._bitField = this._bitField | 262144;
+};
+
+Promise.prototype._unsetUnhandledRejectionIsNotified = function () {
+    this._bitField = this._bitField & (~262144);
+};
+
+Promise.prototype._isUnhandledRejectionNotified = function () {
+    return (this._bitField & 262144) > 0;
+};
+
+Promise.prototype._setRejectionIsUnhandled = function () {
+    this._bitField = this._bitField | 1048576;
+};
+
+Promise.prototype._unsetRejectionIsUnhandled = function () {
+    this._bitField = this._bitField & (~1048576);
+    if (this._isUnhandledRejectionNotified()) {
+        this._unsetUnhandledRejectionIsNotified();
+        this._notifyUnhandledRejectionIsHandled();
+    }
+};
+
+Promise.prototype._isRejectionUnhandled = function () {
+    return (this._bitField & 1048576) > 0;
+};
+
+Promise.prototype._warn = function(message, shouldUseOwnTrace, promise) {
+    return warn(message, shouldUseOwnTrace, promise || this);
+};
+
+Promise.onPossiblyUnhandledRejection = function (fn) {
+    var context = Promise._getContext();
+    possiblyUnhandledRejection = util.contextBind(context, fn);
+};
+
+Promise.onUnhandledRejectionHandled = function (fn) {
+    var context = Promise._getContext();
+    unhandledRejectionHandled = util.contextBind(context, fn);
+};
+
+var disableLongStackTraces = function() {};
+Promise.longStackTraces = function () {
+    if (async.haveItemsQueued() && !config.longStackTraces) {
+        throw new Error("cannot enable long stack traces after promises have been created\u000a\u000a    See http://goo.gl/MqrFmX\u000a");
+    }
+    if (!config.longStackTraces && longStackTracesIsSupported()) {
+        var Promise_captureStackTrace = Promise.prototype._captureStackTrace;
+        var Promise_attachExtraTrace = Promise.prototype._attachExtraTrace;
+        var Promise_dereferenceTrace = Promise.prototype._dereferenceTrace;
+        config.longStackTraces = true;
+        disableLongStackTraces = function() {
+            if (async.haveItemsQueued() && !config.longStackTraces) {
+                throw new Error("cannot enable long stack traces after promises have been created\u000a\u000a    See http://goo.gl/MqrFmX\u000a");
+            }
+            Promise.prototype._captureStackTrace = Promise_captureStackTrace;
+            Promise.prototype._attachExtraTrace = Promise_attachExtraTrace;
+            Promise.prototype._dereferenceTrace = Promise_dereferenceTrace;
+            Context.deactivateLongStackTraces();
+            config.longStackTraces = false;
+        };
+        Promise.prototype._captureStackTrace = longStackTracesCaptureStackTrace;
+        Promise.prototype._attachExtraTrace = longStackTracesAttachExtraTrace;
+        Promise.prototype._dereferenceTrace = longStackTracesDereferenceTrace;
+        Context.activateLongStackTraces();
+    }
+};
+
+Promise.hasLongStackTraces = function () {
+    return config.longStackTraces && longStackTracesIsSupported();
+};
+
+
+var legacyHandlers = {
+    unhandledrejection: {
+        before: function() {
+            var ret = util.global.onunhandledrejection;
+            util.global.onunhandledrejection = null;
+            return ret;
+        },
+        after: function(fn) {
+            util.global.onunhandledrejection = fn;
+        }
+    },
+    rejectionhandled: {
+        before: function() {
+            var ret = util.global.onrejectionhandled;
+            util.global.onrejectionhandled = null;
+            return ret;
+        },
+        after: function(fn) {
+            util.global.onrejectionhandled = fn;
+        }
+    }
+};
+
+var fireDomEvent = (function() {
+    var dispatch = function(legacy, e) {
+        if (legacy) {
+            var fn;
+            try {
+                fn = legacy.before();
+                return !util.global.dispatchEvent(e);
+            } finally {
+                legacy.after(fn);
+            }
+        } else {
+            return !util.global.dispatchEvent(e);
+        }
+    };
+    try {
+        if (typeof CustomEvent === "function") {
+            var event = new CustomEvent("CustomEvent");
+            util.global.dispatchEvent(event);
+            return function(name, event) {
+                name = name.toLowerCase();
+                var eventData = {
+                    detail: event,
+                    cancelable: true
+                };
+                var domEvent = new CustomEvent(name, eventData);
+                es5.defineProperty(
+                    domEvent, "promise", {value: event.promise});
+                es5.defineProperty(
+                    domEvent, "reason", {value: event.reason});
+
+                return dispatch(legacyHandlers[name], domEvent);
+            };
+        } else if (typeof Event === "function") {
+            var event = new Event("CustomEvent");
+            util.global.dispatchEvent(event);
+            return function(name, event) {
+                name = name.toLowerCase();
+                var domEvent = new Event(name, {
+                    cancelable: true
+                });
+                domEvent.detail = event;
+                es5.defineProperty(domEvent, "promise", {value: event.promise});
+                es5.defineProperty(domEvent, "reason", {value: event.reason});
+                return dispatch(legacyHandlers[name], domEvent);
+            };
+        } else {
+            var event = document.createEvent("CustomEvent");
+            event.initCustomEvent("testingtheevent", false, true, {});
+            util.global.dispatchEvent(event);
+            return function(name, event) {
+                name = name.toLowerCase();
+                var domEvent = document.createEvent("CustomEvent");
+                domEvent.initCustomEvent(name, false, true,
+                    event);
+                return dispatch(legacyHandlers[name], domEvent);
+            };
+        }
+    } catch (e) {}
+    return function() {
+        return false;
+    };
+})();
+
+var fireGlobalEvent = (function() {
+    if (util.isNode) {
+        return function() {
+            return process.emit.apply(process, arguments);
+        };
+    } else {
+        if (!util.global) {
+            return function() {
+                return false;
+            };
+        }
+        return function(name) {
+            var methodName = "on" + name.toLowerCase();
+            var method = util.global[methodName];
+            if (!method) return false;
+            method.apply(util.global, [].slice.call(arguments, 1));
+            return true;
+        };
+    }
+})();
+
+function generatePromiseLifecycleEventObject(name, promise) {
+    return {promise: promise};
+}
+
+var eventToObjectGenerator = {
+    promiseCreated: generatePromiseLifecycleEventObject,
+    promiseFulfilled: generatePromiseLifecycleEventObject,
+    promiseRejected: generatePromiseLifecycleEventObject,
+    promiseResolved: generatePromiseLifecycleEventObject,
+    promiseCancelled: generatePromiseLifecycleEventObject,
+    promiseChained: function(name, promise, child) {
+        return {promise: promise, child: child};
+    },
+    warning: function(name, warning) {
+        return {warning: warning};
+    },
+    unhandledRejection: function (name, reason, promise) {
+        return {reason: reason, promise: promise};
+    },
+    rejectionHandled: generatePromiseLifecycleEventObject
+};
+
+var activeFireEvent = function (name) {
+    var globalEventFired = false;
+    try {
+        globalEventFired = fireGlobalEvent.apply(null, arguments);
+    } catch (e) {
+        async.throwLater(e);
+        globalEventFired = true;
+    }
+
+    var domEventFired = false;
+    try {
+        domEventFired = fireDomEvent(name,
+                    eventToObjectGenerator[name].apply(null, arguments));
+    } catch (e) {
+        async.throwLater(e);
+        domEventFired = true;
+    }
+
+    return domEventFired || globalEventFired;
+};
+
+Promise.config = function(opts) {
+    opts = Object(opts);
+    if ("longStackTraces" in opts) {
+        if (opts.longStackTraces) {
+            Promise.longStackTraces();
+        } else if (!opts.longStackTraces && Promise.hasLongStackTraces()) {
+            disableLongStackTraces();
+        }
+    }
+    if ("warnings" in opts) {
+        var warningsOption = opts.warnings;
+        config.warnings = !!warningsOption;
+        wForgottenReturn = config.warnings;
+
+        if (util.isObject(warningsOption)) {
+            if ("wForgottenReturn" in warningsOption) {
+                wForgottenReturn = !!warningsOption.wForgottenReturn;
+            }
+        }
+    }
+    if ("cancellation" in opts && opts.cancellation && !config.cancellation) {
+        if (async.haveItemsQueued()) {
+            throw new Error(
+                "cannot enable cancellation after promises are in use");
+        }
+        Promise.prototype._clearCancellationData =
+            cancellationClearCancellationData;
+        Promise.prototype._propagateFrom = cancellationPropagateFrom;
+        Promise.prototype._onCancel = cancellationOnCancel;
+        Promise.prototype._setOnCancel = cancellationSetOnCancel;
+        Promise.prototype._attachCancellationCallback =
+            cancellationAttachCancellationCallback;
+        Promise.prototype._execute = cancellationExecute;
+        propagateFromFunction = cancellationPropagateFrom;
+        config.cancellation = true;
+    }
+    if ("monitoring" in opts) {
+        if (opts.monitoring && !config.monitoring) {
+            config.monitoring = true;
+            Promise.prototype._fireEvent = activeFireEvent;
+        } else if (!opts.monitoring && config.monitoring) {
+            config.monitoring = false;
+            Promise.prototype._fireEvent = defaultFireEvent;
+        }
+    }
+    if ("asyncHooks" in opts && util.nodeSupportsAsyncResource) {
+        var prev = config.asyncHooks;
+        var cur = !!opts.asyncHooks;
+        if (prev !== cur) {
+            config.asyncHooks = cur;
+            if (cur) {
+                enableAsyncHooks();
+            } else {
+                disableAsyncHooks();
+            }
+        }
+    }
+    return Promise;
+};
+
+function defaultFireEvent() { return false; }
+
+Promise.prototype._fireEvent = defaultFireEvent;
+Promise.prototype._execute = function(executor, resolve, reject) {
+    try {
+        executor(resolve, reject);
+    } catch (e) {
+        return e;
+    }
+};
+Promise.prototype._onCancel = function () {};
+Promise.prototype._setOnCancel = function (handler) { ; };
+Promise.prototype._attachCancellationCallback = function(onCancel) {
+    ;
+};
+Promise.prototype._captureStackTrace = function () {};
+Promise.prototype._attachExtraTrace = function () {};
+Promise.prototype._dereferenceTrace = function () {};
+Promise.prototype._clearCancellationData = function() {};
+Promise.prototype._propagateFrom = function (parent, flags) {
+    ;
+    ;
+};
+
+function cancellationExecute(executor, resolve, reject) {
+    var promise = this;
+    try {
+        executor(resolve, reject, function(onCancel) {
+            if (typeof onCancel !== "function") {
+                throw new TypeError("onCancel must be a function, got: " +
+                                    util.toString(onCancel));
+            }
+            promise._attachCancellationCallback(onCancel);
+        });
+    } catch (e) {
+        return e;
+    }
+}
+
+function cancellationAttachCancellationCallback(onCancel) {
+    if (!this._isCancellable()) return this;
+
+    var previousOnCancel = this._onCancel();
+    if (previousOnCancel !== undefined) {
+        if (util.isArray(previousOnCancel)) {
+            previousOnCancel.push(onCancel);
+        } else {
+            this._setOnCancel([previousOnCancel, onCancel]);
+        }
+    } else {
+        this._setOnCancel(onCancel);
+    }
+}
+
+function cancellationOnCancel() {
+    return this._onCancelField;
+}
+
+function cancellationSetOnCancel(onCancel) {
+    this._onCancelField = onCancel;
+}
+
+function cancellationClearCancellationData() {
+    this._cancellationParent = undefined;
+    this._onCancelField = undefined;
+}
+
+function cancellationPropagateFrom(parent, flags) {
+    if ((flags & 1) !== 0) {
+        this._cancellationParent = parent;
+        var branchesRemainingToCancel = parent._branchesRemainingToCancel;
+        if (branchesRemainingToCancel === undefined) {
+            branchesRemainingToCancel = 0;
+        }
+        parent._branchesRemainingToCancel = branchesRemainingToCancel + 1;
+    }
+    if ((flags & 2) !== 0 && parent._isBound()) {
+        this._setBoundTo(parent._boundTo);
+    }
+}
+
+function bindingPropagateFrom(parent, flags) {
+    if ((flags & 2) !== 0 && parent._isBound()) {
+        this._setBoundTo(parent._boundTo);
+    }
+}
+var propagateFromFunction = bindingPropagateFrom;
+
+function boundValueFunction() {
+    var ret = this._boundTo;
+    if (ret !== undefined) {
+        if (ret instanceof Promise) {
+            if (ret.isFulfilled()) {
+                return ret.value();
+            } else {
+                return undefined;
+            }
+        }
+    }
+    return ret;
+}
+
+function longStackTracesCaptureStackTrace() {
+    this._trace = new CapturedTrace(this._peekContext());
+}
+
+function longStackTracesAttachExtraTrace(error, ignoreSelf) {
+    if (canAttachTrace(error)) {
+        var trace = this._trace;
+        if (trace !== undefined) {
+            if (ignoreSelf) trace = trace._parent;
+        }
+        if (trace !== undefined) {
+            trace.attachExtraTrace(error);
+        } else if (!error.__stackCleaned__) {
+            var parsed = parseStackAndMessage(error);
+            util.notEnumerableProp(error, "stack",
+                parsed.message + "\n" + parsed.stack.join("\n"));
+            util.notEnumerableProp(error, "__stackCleaned__", true);
+        }
+    }
+}
+
+function longStackTracesDereferenceTrace() {
+    this._trace = undefined;
+}
+
+function checkForgottenReturns(returnValue, promiseCreated, name, promise,
+                               parent) {
+    if (returnValue === undefined && promiseCreated !== null &&
+        wForgottenReturn) {
+        if (parent !== undefined && parent._returnedNonUndefined()) return;
+        if ((promise._bitField & 65535) === 0) return;
+
+        if (name) name = name + " ";
+        var handlerLine = "";
+        var creatorLine = "";
+        if (promiseCreated._trace) {
+            var traceLines = promiseCreated._trace.stack.split("\n");
+            var stack = cleanStack(traceLines);
+            for (var i = stack.length - 1; i >= 0; --i) {
+                var line = stack[i];
+                if (!nodeFramePattern.test(line)) {
+                    var lineMatches = line.match(parseLinePattern);
+                    if (lineMatches) {
+                        handlerLine  = "at " + lineMatches[1] +
+                            ":" + lineMatches[2] + ":" + lineMatches[3] + " ";
+                    }
+                    break;
+                }
+            }
+
+            if (stack.length > 0) {
+                var firstUserLine = stack[0];
+                for (var i = 0; i < traceLines.length; ++i) {
+
+                    if (traceLines[i] === firstUserLine) {
+                        if (i > 0) {
+                            creatorLine = "\n" + traceLines[i - 1];
+                        }
+                        break;
+                    }
+                }
+
+            }
+        }
+        var msg = "a promise was created in a " + name +
+            "handler " + handlerLine + "but was not returned from it, " +
+            "see http://goo.gl/rRqMUw" +
+            creatorLine;
+        promise._warn(msg, true, promiseCreated);
+    }
+}
+
+function deprecated(name, replacement) {
+    var message = name +
+        " is deprecated and will be removed in a future version.";
+    if (replacement) message += " Use " + replacement + " instead.";
+    return warn(message);
+}
+
+function warn(message, shouldUseOwnTrace, promise) {
+    if (!config.warnings) return;
+    var warning = new Warning(message);
+    var ctx;
+    if (shouldUseOwnTrace) {
+        promise._attachExtraTrace(warning);
+    } else if (config.longStackTraces && (ctx = Promise._peekContext())) {
+        ctx.attachExtraTrace(warning);
+    } else {
+        var parsed = parseStackAndMessage(warning);
+        warning.stack = parsed.message + "\n" + parsed.stack.join("\n");
+    }
+
+    if (!activeFireEvent("warning", warning)) {
+        formatAndLogError(warning, "", true);
+    }
+}
+
+function reconstructStack(message, stacks) {
+    for (var i = 0; i < stacks.length - 1; ++i) {
+        stacks[i].push("From previous event:");
+        stacks[i] = stacks[i].join("\n");
+    }
+    if (i < stacks.length) {
+        stacks[i] = stacks[i].join("\n");
+    }
+    return message + "\n" + stacks.join("\n");
+}
+
+function removeDuplicateOrEmptyJumps(stacks) {
+    for (var i = 0; i < stacks.length; ++i) {
+        if (stacks[i].length === 0 ||
+            ((i + 1 < stacks.length) && stacks[i][0] === stacks[i+1][0])) {
+            stacks.splice(i, 1);
+            i--;
+        }
+    }
+}
+
+function removeCommonRoots(stacks) {
+    var current = stacks[0];
+    for (var i = 1; i < stacks.length; ++i) {
+        var prev = stacks[i];
+        var currentLastIndex = current.length - 1;
+        var currentLastLine = current[currentLastIndex];
+        var commonRootMeetPoint = -1;
+
+        for (var j = prev.length - 1; j >= 0; --j) {
+            if (prev[j] === currentLastLine) {
+                commonRootMeetPoint = j;
+                break;
+            }
+        }
+
+        for (var j = commonRootMeetPoint; j >= 0; --j) {
+            var line = prev[j];
+            if (current[currentLastIndex] === line) {
+                current.pop();
+                currentLastIndex--;
+            } else {
+                break;
+            }
+        }
+        current = prev;
+    }
+}
+
+function cleanStack(stack) {
+    var ret = [];
+    for (var i = 0; i < stack.length; ++i) {
+        var line = stack[i];
+        var isTraceLine = "    (No stack trace)" === line ||
+            stackFramePattern.test(line);
+        var isInternalFrame = isTraceLine && shouldIgnore(line);
+        if (isTraceLine && !isInternalFrame) {
+            if (indentStackFrames && line.charAt(0) !== " ") {
+                line = "    " + line;
+            }
+            ret.push(line);
+        }
+    }
+    return ret;
+}
+
+function stackFramesAsArray(error) {
+    var stack = error.stack.replace(/\s+$/g, "").split("\n");
+    for (var i = 0; i < stack.length; ++i) {
+        var line = stack[i];
+        if ("    (No stack trace)" === line || stackFramePattern.test(line)) {
+            break;
+        }
+    }
+    if (i > 0 && error.name != "SyntaxError") {
+        stack = stack.slice(i);
+    }
+    return stack;
+}
+
+function parseStackAndMessage(error) {
+    var stack = error.stack;
+    var message = error.toString();
+    stack = typeof stack === "string" && stack.length > 0
+                ? stackFramesAsArray(error) : ["    (No stack trace)"];
+    return {
+        message: message,
+        stack: error.name == "SyntaxError" ? stack : cleanStack(stack)
+    };
+}
+
+function formatAndLogError(error, title, isSoft) {
+    if (typeof console !== "undefined") {
+        var message;
+        if (util.isObject(error)) {
+            var stack = error.stack;
+            message = title + formatStack(stack, error);
+        } else {
+            message = title + String(error);
+        }
+        if (typeof printWarning === "function") {
+            printWarning(message, isSoft);
+        } else if (typeof console.log === "function" ||
+            typeof console.log === "object") {
+            console.log(message);
+        }
+    }
+}
+
+function fireRejectionEvent(name, localHandler, reason, promise) {
+    var localEventFired = false;
+    try {
+        if (typeof localHandler === "function") {
+            localEventFired = true;
+            if (name === "rejectionHandled") {
+                localHandler(promise);
+            } else {
+                localHandler(reason, promise);
+            }
+        }
+    } catch (e) {
+        async.throwLater(e);
+    }
+
+    if (name === "unhandledRejection") {
+        if (!activeFireEvent(name, reason, promise) && !localEventFired) {
+            formatAndLogError(reason, "Unhandled rejection ");
+        }
+    } else {
+        activeFireEvent(name, promise);
+    }
+}
+
+function formatNonError(obj) {
+    var str;
+    if (typeof obj === "function") {
+        str = "[function " +
+            (obj.name || "anonymous") +
+            "]";
+    } else {
+        str = obj && typeof obj.toString === "function"
+            ? obj.toString() : util.toString(obj);
+        var ruselessToString = /\[object [a-zA-Z0-9$_]+\]/;
+        if (ruselessToString.test(str)) {
+            try {
+                var newStr = JSON.stringify(obj);
+                str = newStr;
+            }
+            catch(e) {
+
+            }
+        }
+        if (str.length === 0) {
+            str = "(empty array)";
+        }
+    }
+    return ("(<" + snip(str) + ">, no stack trace)");
+}
+
+function snip(str) {
+    var maxChars = 41;
+    if (str.length < maxChars) {
+        return str;
+    }
+    return str.substr(0, maxChars - 3) + "...";
+}
+
+function longStackTracesIsSupported() {
+    return typeof captureStackTrace === "function";
+}
+
+var shouldIgnore = function() { return false; };
+var parseLineInfoRegex = /[\/<\(]([^:\/]+):(\d+):(?:\d+)\)?\s*$/;
+function parseLineInfo(line) {
+    var matches = line.match(parseLineInfoRegex);
+    if (matches) {
+        return {
+            fileName: matches[1],
+            line: parseInt(matches[2], 10)
+        };
+    }
+}
+
+function setBounds(firstLineError, lastLineError) {
+    if (!longStackTracesIsSupported()) return;
+    var firstStackLines = (firstLineError.stack || "").split("\n");
+    var lastStackLines = (lastLineError.stack || "").split("\n");
+    var firstIndex = -1;
+    var lastIndex = -1;
+    var firstFileName;
+    var lastFileName;
+    for (var i = 0; i < firstStackLines.length; ++i) {
+        var result = parseLineInfo(firstStackLines[i]);
+        if (result) {
+            firstFileName = result.fileName;
+            firstIndex = result.line;
+            break;
+        }
+    }
+    for (var i = 0; i < lastStackLines.length; ++i) {
+        var result = parseLineInfo(lastStackLines[i]);
+        if (result) {
+            lastFileName = result.fileName;
+            lastIndex = result.line;
+            break;
+        }
+    }
+    if (firstIndex < 0 || lastIndex < 0 || !firstFileName || !lastFileName ||
+        firstFileName !== lastFileName || firstIndex >= lastIndex) {
+        return;
+    }
+
+    shouldIgnore = function(line) {
+        if (bluebirdFramePattern.test(line)) return true;
+        var info = parseLineInfo(line);
+        if (info) {
+            if (info.fileName === firstFileName &&
+                (firstIndex <= info.line && info.line <= lastIndex)) {
+                return true;
+            }
+        }
+        return false;
+    };
+}
+
+function CapturedTrace(parent) {
+    this._parent = parent;
+    this._promisesCreated = 0;
+    var length = this._length = 1 + (parent === undefined ? 0 : parent._length);
+    captureStackTrace(this, CapturedTrace);
+    if (length > 32) this.uncycle();
+}
+util.inherits(CapturedTrace, Error);
+Context.CapturedTrace = CapturedTrace;
+
+CapturedTrace.prototype.uncycle = function() {
+    var length = this._length;
+    if (length < 2) return;
+    var nodes = [];
+    var stackToIndex = {};
+
+    for (var i = 0, node = this; node !== undefined; ++i) {
+        nodes.push(node);
+        node = node._parent;
+    }
+    length = this._length = i;
+    for (var i = length - 1; i >= 0; --i) {
+        var stack = nodes[i].stack;
+        if (stackToIndex[stack] === undefined) {
+            stackToIndex[stack] = i;
+        }
+    }
+    for (var i = 0; i < length; ++i) {
+        var currentStack = nodes[i].stack;
+        var index = stackToIndex[currentStack];
+        if (index !== undefined && index !== i) {
+            if (index > 0) {
+                nodes[index - 1]._parent = undefined;
+                nodes[index - 1]._length = 1;
+            }
+            nodes[i]._parent = undefined;
+            nodes[i]._length = 1;
+            var cycleEdgeNode = i > 0 ? nodes[i - 1] : this;
+
+            if (index < length - 1) {
+                cycleEdgeNode._parent = nodes[index + 1];
+                cycleEdgeNode._parent.uncycle();
+                cycleEdgeNode._length =
+                    cycleEdgeNode._parent._length + 1;
+            } else {
+                cycleEdgeNode._parent = undefined;
+                cycleEdgeNode._length = 1;
+            }
+            var currentChildLength = cycleEdgeNode._length + 1;
+            for (var j = i - 2; j >= 0; --j) {
+                nodes[j]._length = currentChildLength;
+                currentChildLength++;
+            }
+            return;
+        }
+    }
+};
+
+CapturedTrace.prototype.attachExtraTrace = function(error) {
+    if (error.__stackCleaned__) return;
+    this.uncycle();
+    var parsed = parseStackAndMessage(error);
+    var message = parsed.message;
+    var stacks = [parsed.stack];
+
+    var trace = this;
+    while (trace !== undefined) {
+        stacks.push(cleanStack(trace.stack.split("\n")));
+        trace = trace._parent;
+    }
+    removeCommonRoots(stacks);
+    removeDuplicateOrEmptyJumps(stacks);
+    util.notEnumerableProp(error, "stack", reconstructStack(message, stacks));
+    util.notEnumerableProp(error, "__stackCleaned__", true);
+};
+
+var captureStackTrace = (function stackDetection() {
+    var v8stackFramePattern = /^\s*at\s*/;
+    var v8stackFormatter = function(stack, error) {
+        if (typeof stack === "string") return stack;
+
+        if (error.name !== undefined &&
+            error.message !== undefined) {
+            return error.toString();
+        }
+        return formatNonError(error);
+    };
+
+    if (typeof Error.stackTraceLimit === "number" &&
+        typeof Error.captureStackTrace === "function") {
+        Error.stackTraceLimit += 6;
+        stackFramePattern = v8stackFramePattern;
+        formatStack = v8stackFormatter;
+        var captureStackTrace = Error.captureStackTrace;
+
+        shouldIgnore = function(line) {
+            return bluebirdFramePattern.test(line);
+        };
+        return function(receiver, ignoreUntil) {
+            Error.stackTraceLimit += 6;
+            captureStackTrace(receiver, ignoreUntil);
+            Error.stackTraceLimit -= 6;
+        };
+    }
+    var err = new Error();
+
+    if (typeof err.stack === "string" &&
+        err.stack.split("\n")[0].indexOf("stackDetection@") >= 0) {
+        stackFramePattern = /@/;
+        formatStack = v8stackFormatter;
+        indentStackFrames = true;
+        return function captureStackTrace(o) {
+            o.stack = new Error().stack;
+        };
+    }
+
+    var hasStackAfterThrow;
+    try { throw new Error(); }
+    catch(e) {
+        hasStackAfterThrow = ("stack" in e);
+    }
+    if (!("stack" in err) && hasStackAfterThrow &&
+        typeof Error.stackTraceLimit === "number") {
+        stackFramePattern = v8stackFramePattern;
+        formatStack = v8stackFormatter;
+        return function captureStackTrace(o) {
+            Error.stackTraceLimit += 6;
+            try { throw new Error(); }
+            catch(e) { o.stack = e.stack; }
+            Error.stackTraceLimit -= 6;
+        };
+    }
+
+    formatStack = function(stack, error) {
+        if (typeof stack === "string") return stack;
+
+        if ((typeof error === "object" ||
+            typeof error === "function") &&
+            error.name !== undefined &&
+            error.message !== undefined) {
+            return error.toString();
+        }
+        return formatNonError(error);
+    };
+
+    return null;
+
+})([]);
+
+if (typeof console !== "undefined" && typeof console.warn !== "undefined") {
+    printWarning = function (message) {
+        console.warn(message);
+    };
+    if (util.isNode && process.stderr.isTTY) {
+        printWarning = function(message, isSoft) {
+            var color = isSoft ? "\u001b[33m" : "\u001b[31m";
+            console.warn(color + message + "\u001b[0m\n");
+        };
+    } else if (!util.isNode && typeof (new Error().stack) === "string") {
+        printWarning = function(message, isSoft) {
+            console.warn("%c" + message,
+                        isSoft ? "color: darkorange" : "color: red");
+        };
+    }
+}
+
+var config = {
+    warnings: warnings,
+    longStackTraces: false,
+    cancellation: false,
+    monitoring: false,
+    asyncHooks: false
+};
+
+if (longStackTraces) Promise.longStackTraces();
+
+return {
+    asyncHooks: function() {
+        return config.asyncHooks;
+    },
+    longStackTraces: function() {
+        return config.longStackTraces;
+    },
+    warnings: function() {
+        return config.warnings;
+    },
+    cancellation: function() {
+        return config.cancellation;
+    },
+    monitoring: function() {
+        return config.monitoring;
+    },
+    propagateFromFunction: function() {
+        return propagateFromFunction;
+    },
+    boundValueFunction: function() {
+        return boundValueFunction;
+    },
+    checkForgottenReturns: checkForgottenReturns,
+    setBounds: setBounds,
+    warn: warn,
+    deprecated: deprecated,
+    CapturedTrace: CapturedTrace,
+    fireDomEvent: fireDomEvent,
+    fireGlobalEvent: fireGlobalEvent
+};
+};
+
+
+/***/ }),
 /* 77 */
 /***/ (function(module) {
 
@@ -11504,7 +11982,7 @@ Promise._SomePromiseArray = SomePromiseArray;
 
 // Load modules
 
-const Dns = __webpack_require__(881);
+const Dns = __webpack_require__(819);
 
 
 // Declare internals
@@ -13607,12 +14085,13 @@ exports.ContentTypeUpdateAction = ContentTypeUpdateAction;
 /***/ (function(__unusedmodule, __unusedexports, __webpack_require__) {
 
 const core = __webpack_require__(470);
-const wait = __webpack_require__(949);
-
+const github = __webpack_require__(469);
 
 // most @actions toolkit packages have async methods
 async function run() {
   try {
+    const { context } = github
+
     const {promisify} = __webpack_require__(669);
     const {readdir} = __webpack_require__(747);
     const readdirAsync = promisify(readdir);
@@ -13624,17 +14103,34 @@ async function run() {
     const getVersionOfFile = (file) => file.replace('.js', '').replace(/_/g, '.');
     const getFileOfVersion = (version) => version.replace(/\./g, '_') + '.js';
 
+    const getBranchName = () => {
+      let { ref } = context
+
+      if (github.context.eventName === 'pull_request') {
+        const pullRequestPayload = github.context.payload
+        core.info(`head : ${pullRequestPayload.pull_request.head}`)
+
+        // actual branch name, not something like 'pull/111/merge'
+        ref = pullRequestPayload.pull_request.head.ref
+        core.info(`The head ref is: ${pullRequestPayload.pull_request.head.ref}`)
+      }
+
+      return ref
+        .replace('refs/heads/', '')
+        // normalize git-flow branch names ie. feat/foo-feature -> feat-foo-feature
+        .replace(/\//g, '-')
+    }
+
     //
     // Configuration variables
     //
     const SPACE_ID = process.env.SPACE_ID;
-    const GITHUB_REF = process.env.GITHUB_REF;
     const MANAGEMENT_API_KEY = process.env.MANAGEMENT_API_KEY;
 
-    const githubRefSplit = GITHUB_REF.split('/');
-    const ENVIRONMENT_INPUT = githubRefSplit[githubRefSplit.length - 1];
+    const ENVIRONMENT_INPUT = getBranchName();
 
-    const MIGRATIONS_DIR = process.env.GITHUB_WORKSPACE + "/migrations"
+    const DEFAULT_MIGRATIONS_DIR = 'migrations';
+    const MIGRATIONS_DIR = path.join(process.env.GITHUB_WORKSPACE, process.env.MIGRATIONS_DIR || DEFAULT_MIGRATIONS_DIR);
 
     const client = createClient({
       accessToken: MANAGEMENT_API_KEY
@@ -13793,7 +14289,16 @@ async function run() {
       console.log('No alias changes required');
     }
 
-    console.log('All done!');
+    const environmentUrl = `https://app.contentful.com/spaces/${space.sys.id}/environments/${ENVIRONMENT_ID}`
+    const environmentName = ENVIRONMENT_ID
+
+    core.debug(`Contentful environment url is ${environmentUrl}`)
+    core.debug(`Contentful environment name is ${environmentName}`)
+    core.setOutput('environment_url', environmentUrl)
+    core.setOutput('environment_name', environmentName)
+    console.log(environmentUrl);
+    console.log(environmentName);
+    console.log('All done!!!');
   }
   catch (error) {
     core.setFailed(error.message);
@@ -13877,7 +14382,7 @@ module.exports = onetime(function () {
 
 "use strict";
 
-var stripAnsi = __webpack_require__(692);
+var stripAnsi = __webpack_require__(824);
 var codePointAt = __webpack_require__(281);
 var isFullwidthCodePoint = __webpack_require__(616);
 
@@ -13987,6 +14492,8 @@ class EditorInterfaces {
     constructor(apiEditorInterfaces) {
         this._version = apiEditorInterfaces.sys.version;
         this._controls = apiEditorInterfaces.controls;
+        this._sidebar = apiEditorInterfaces.sidebar || undefined;
+        this._editor = apiEditorInterfaces.editor || undefined;
     }
     get version() {
         return this._version;
@@ -14031,17 +14538,24 @@ class EditorInterfaces {
         }
     }
     toAPI() {
-        let result = [];
+        let controls = [];
         lodash_1.forEach(this._controls, (c) => {
-            result.push({
+            controls.push({
                 fieldId: c.fieldId,
                 widgetId: c.widgetId,
                 settings: c.settings
             });
         });
-        return {
-            controls: result
+        const result = {
+            controls
         };
+        if (this._sidebar) {
+            result.sidebar = this._sidebar;
+        }
+        if (this._editor) {
+            result.editor = this._editor;
+        }
+        return result;
     }
 }
 exports.EditorInterfaces = EditorInterfaces;
@@ -14154,151 +14668,39 @@ module.exports = values;
 /* 118 */
 /***/ (function(module, __unusedexports, __webpack_require__) {
 
-var Stream = __webpack_require__(413)
+"use strict";
 
-module.exports = MuteStream
+const os = __webpack_require__(87);
 
-// var out = new MuteStream(process.stdout)
-// argument auto-pipes
-function MuteStream (opts) {
-  Stream.apply(this)
-  opts = opts || {}
-  this.writable = this.readable = true
-  this.muted = false
-  this.on('pipe', this._onpipe)
-  this.replace = opts.replace
+const nameMap = new Map([
+	[19, 'Catalina'],
+	[18, 'Mojave'],
+	[17, 'High Sierra'],
+	[16, 'Sierra'],
+	[15, 'El Capitan'],
+	[14, 'Yosemite'],
+	[13, 'Mavericks'],
+	[12, 'Mountain Lion'],
+	[11, 'Lion'],
+	[10, 'Snow Leopard'],
+	[9, 'Leopard'],
+	[8, 'Tiger'],
+	[7, 'Panther'],
+	[6, 'Jaguar'],
+	[5, 'Puma']
+]);
 
-  // For readline-type situations
-  // This much at the start of a line being redrawn after a ctrl char
-  // is seen (such as backspace) won't be redrawn as the replacement
-  this._prompt = opts.prompt || null
-  this._hadControl = false
-}
+const macosRelease = release => {
+	release = Number((release || os.release()).split('.')[0]);
+	return {
+		name: nameMap.get(release),
+		version: '10.' + (release - 4)
+	};
+};
 
-MuteStream.prototype = Object.create(Stream.prototype)
-
-Object.defineProperty(MuteStream.prototype, 'constructor', {
-  value: MuteStream,
-  enumerable: false
-})
-
-MuteStream.prototype.mute = function () {
-  this.muted = true
-}
-
-MuteStream.prototype.unmute = function () {
-  this.muted = false
-}
-
-Object.defineProperty(MuteStream.prototype, '_onpipe', {
-  value: onPipe,
-  enumerable: false,
-  writable: true,
-  configurable: true
-})
-
-function onPipe (src) {
-  this._src = src
-}
-
-Object.defineProperty(MuteStream.prototype, 'isTTY', {
-  get: getIsTTY,
-  set: setIsTTY,
-  enumerable: true,
-  configurable: true
-})
-
-function getIsTTY () {
-  return( (this._dest) ? this._dest.isTTY
-        : (this._src) ? this._src.isTTY
-        : false
-        )
-}
-
-// basically just get replace the getter/setter with a regular value
-function setIsTTY (isTTY) {
-  Object.defineProperty(this, 'isTTY', {
-    value: isTTY,
-    enumerable: true,
-    writable: true,
-    configurable: true
-  })
-}
-
-Object.defineProperty(MuteStream.prototype, 'rows', {
-  get: function () {
-    return( this._dest ? this._dest.rows
-          : this._src ? this._src.rows
-          : undefined )
-  }, enumerable: true, configurable: true })
-
-Object.defineProperty(MuteStream.prototype, 'columns', {
-  get: function () {
-    return( this._dest ? this._dest.columns
-          : this._src ? this._src.columns
-          : undefined )
-  }, enumerable: true, configurable: true })
-
-
-MuteStream.prototype.pipe = function (dest, options) {
-  this._dest = dest
-  return Stream.prototype.pipe.call(this, dest, options)
-}
-
-MuteStream.prototype.pause = function () {
-  if (this._src) return this._src.pause()
-}
-
-MuteStream.prototype.resume = function () {
-  if (this._src) return this._src.resume()
-}
-
-MuteStream.prototype.write = function (c) {
-  if (this.muted) {
-    if (!this.replace) return true
-    if (c.match(/^\u001b/)) {
-      if(c.indexOf(this._prompt) === 0) {
-        c = c.substr(this._prompt.length);
-        c = c.replace(/./g, this.replace);
-        c = this._prompt + c;
-      }
-      this._hadControl = true
-      return this.emit('data', c)
-    } else {
-      if (this._prompt && this._hadControl &&
-          c.indexOf(this._prompt) === 0) {
-        this._hadControl = false
-        this.emit('data', this._prompt)
-        c = c.substr(this._prompt.length)
-      }
-      c = c.toString().replace(/./g, this.replace)
-    }
-  }
-  this.emit('data', c)
-}
-
-MuteStream.prototype.end = function (c) {
-  if (this.muted) {
-    if (c && this.replace) {
-      c = c.toString().replace(/./g, this.replace)
-    } else {
-      c = null
-    }
-  }
-  if (c) this.emit('data', c)
-  this.emit('end')
-}
-
-function proxy (fn) { return function () {
-  var d = this._dest
-  var s = this._src
-  if (d && d[fn]) d[fn].apply(d, arguments)
-  if (s && s[fn]) s[fn].apply(s, arguments)
-}}
-
-MuteStream.prototype.destroy = proxy('destroy')
-MuteStream.prototype.destroySoon = proxy('destroySoon')
-MuteStream.prototype.close = proxy('close')
+module.exports = macosRelease;
+// TODO: remove this in the next major version
+module.exports.default = macosRelease;
 
 
 /***/ }),
@@ -14310,8 +14712,8 @@ MuteStream.prototype.close = proxy('close')
 Object.defineProperty(exports, "__esModule", { value: true });
 const Joi = __webpack_require__(274);
 const _ = __webpack_require__(557);
-const hoek_1 = __webpack_require__(11);
-const kindOf = __webpack_require__(224);
+const hoek_1 = __webpack_require__(970);
+const kindOf = __webpack_require__(341);
 const errors_1 = __webpack_require__(992);
 const content_type_schema_1 = __webpack_require__(444);
 const fields_schema_1 = __webpack_require__(241);
@@ -14547,7 +14949,55 @@ module.exports = function highlightFileSync (fullPath, opts) {
 /* 124 */,
 /* 125 */,
 /* 126 */,
-/* 127 */,
+/* 127 */
+/***/ (function(__unusedmodule, exports, __webpack_require__) {
+
+"use strict";
+
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    Object.defineProperty(o, k2, { enumerable: true, get: function() { return m[k]; } });
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || function (mod) {
+    if (mod && mod.__esModule) return mod;
+    var result = {};
+    if (mod != null) for (var k in mod) if (Object.hasOwnProperty.call(mod, k)) __createBinding(result, mod, k);
+    __setModuleDefault(result, mod);
+    return result;
+};
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.getApiBaseUrl = exports.getProxyAgent = exports.getAuthString = void 0;
+const httpClient = __importStar(__webpack_require__(539));
+function getAuthString(token, options) {
+    if (!token && !options.auth) {
+        throw new Error('Parameter token or opts.auth is required');
+    }
+    else if (token && options.auth) {
+        throw new Error('Parameters token and opts.auth may not both be specified');
+    }
+    return typeof options.auth === 'string' ? options.auth : `token ${token}`;
+}
+exports.getAuthString = getAuthString;
+function getProxyAgent(destinationUrl) {
+    const hc = new httpClient.HttpClient();
+    return hc.getAgent(destinationUrl);
+}
+exports.getProxyAgent = getProxyAgent;
+function getApiBaseUrl() {
+    return process.env['GITHUB_API_URL'] || 'https://api.github.com';
+}
+exports.getApiBaseUrl = getApiBaseUrl;
+//# sourceMappingURL=utils.js.map
+
+/***/ }),
 /* 128 */,
 /* 129 */
 /***/ (function(module) {
@@ -14564,7 +15014,7 @@ module.exports = require("child_process");
 Object.defineProperty(exports, "__esModule", { value: true });
 const base_intent_1 = __webpack_require__(19);
 const field_update_1 = __webpack_require__(644);
-const content_type_save_1 = __webpack_require__(9);
+const content_type_save_1 = __webpack_require__(132);
 const content_type_publish_1 = __webpack_require__(907);
 const entry_field_purge_1 = __webpack_require__(204);
 const chalk_1 = __webpack_require__(946);
@@ -14606,7 +15056,26 @@ exports.default = FieldDeleteIntent;
 //# sourceMappingURL=field-delete.js.map
 
 /***/ }),
-/* 132 */,
+/* 132 */
+/***/ (function(__unusedmodule, exports, __webpack_require__) {
+
+"use strict";
+
+Object.defineProperty(exports, "__esModule", { value: true });
+const action_1 = __webpack_require__(64);
+class ContentTypeSaveAction extends action_1.APIAction {
+    constructor(contentTypeId) {
+        super();
+        this.contentTypeId = contentTypeId;
+    }
+    async applyTo(api) {
+        await api.saveContentType(this.contentTypeId);
+    }
+}
+exports.ContentTypeSaveAction = ContentTypeSaveAction;
+//# sourceMappingURL=content-type-save.js.map
+
+/***/ }),
 /* 133 */
 /***/ (function(__unusedmodule, exports) {
 
@@ -14931,6 +15400,7 @@ module.exports = __nested_webpack_require_3846__(/*! ./lib/axios */ "../node_mod
 
 var utils = __nested_webpack_require_4260__(/*! ./../utils */ "../node_modules/axios/lib/utils.js");
 var settle = __nested_webpack_require_4260__(/*! ./../core/settle */ "../node_modules/axios/lib/core/settle.js");
+var buildFullPath = __nested_webpack_require_4260__(/*! ../core/buildFullPath */ "../node_modules/axios/lib/core/buildFullPath.js");
 var buildURL = __nested_webpack_require_4260__(/*! ./../helpers/buildURL */ "../node_modules/axios/lib/helpers/buildURL.js");
 var http = __nested_webpack_require_4260__(/*! http */ "http");
 var https = __nested_webpack_require_4260__(/*! https */ "https");
@@ -14947,13 +15417,10 @@ var isHttps = /https:?/;
 /*eslint consistent-return:0*/
 module.exports = function httpAdapter(config) {
   return new Promise(function dispatchHttpRequest(resolvePromise, rejectPromise) {
-    var timer;
     var resolve = function resolve(value) {
-      clearTimeout(timer);
       resolvePromise(value);
     };
     var reject = function reject(value) {
-      clearTimeout(timer);
       rejectPromise(value);
     };
     var data = config.data;
@@ -14993,7 +15460,8 @@ module.exports = function httpAdapter(config) {
     }
 
     // Parse url
-    var parsed = url.parse(config.url);
+    var fullPath = buildFullPath(config.baseURL, config.url);
+    var parsed = url.parse(fullPath);
     var protocol = parsed.protocol || 'http:';
 
     if (!auth && parsed.auth) {
@@ -15015,6 +15483,7 @@ module.exports = function httpAdapter(config) {
       method: config.method.toUpperCase(),
       headers: headers,
       agent: agent,
+      agents: { http: config.httpAgent, https: config.httpsAgent },
       auth: auth
     };
 
@@ -15047,8 +15516,7 @@ module.exports = function httpAdapter(config) {
               return true;
             }
             if (proxyElement[0] === '.' &&
-                parsed.hostname.substr(parsed.hostname.length - proxyElement.length) === proxyElement &&
-                proxyElement.match(/\./g).length === parsed.hostname.match(/\./g).length) {
+                parsed.hostname.substr(parsed.hostname.length - proxyElement.length) === proxyElement) {
               return true;
             }
 
@@ -15176,10 +15644,15 @@ module.exports = function httpAdapter(config) {
 
     // Handle request timeout
     if (config.timeout) {
-      timer = setTimeout(function handleRequestTimeout() {
+      // Sometime, the response will be very slow, and does not respond, the connect event will be block by event loop system.
+      // And timer callback will be fired, and abort() will be invoked before connection, then get "socket hang up" and code ECONNRESET.
+      // At this time, if we have a large number of request, nodejs will hang up some socket on background. and the number will up and up.
+      // And then these socket which be hang up will devoring CPU little by little.
+      // ClientRequest.setTimeout will be fired on the specify milliseconds, and can make sure that abort() will be fired after connect.
+      req.setTimeout(config.timeout, function handleRequestTimeout() {
         req.abort();
         reject(createError('timeout of ' + config.timeout + 'ms exceeded', config, 'ECONNABORTED', req));
-      }, config.timeout);
+      });
     }
 
     if (config.cancelToken) {
@@ -15211,17 +15684,18 @@ module.exports = function httpAdapter(config) {
   !*** ../node_modules/axios/lib/adapters/xhr.js ***!
   \*************************************************/
 /*! no static exports found */
-/***/ (function(module, exports, __nested_webpack_require_13826__) {
+/***/ (function(module, exports, __nested_webpack_require_14534__) {
 
 "use strict";
 
 
-var utils = __nested_webpack_require_13826__(/*! ./../utils */ "../node_modules/axios/lib/utils.js");
-var settle = __nested_webpack_require_13826__(/*! ./../core/settle */ "../node_modules/axios/lib/core/settle.js");
-var buildURL = __nested_webpack_require_13826__(/*! ./../helpers/buildURL */ "../node_modules/axios/lib/helpers/buildURL.js");
-var parseHeaders = __nested_webpack_require_13826__(/*! ./../helpers/parseHeaders */ "../node_modules/axios/lib/helpers/parseHeaders.js");
-var isURLSameOrigin = __nested_webpack_require_13826__(/*! ./../helpers/isURLSameOrigin */ "../node_modules/axios/lib/helpers/isURLSameOrigin.js");
-var createError = __nested_webpack_require_13826__(/*! ../core/createError */ "../node_modules/axios/lib/core/createError.js");
+var utils = __nested_webpack_require_14534__(/*! ./../utils */ "../node_modules/axios/lib/utils.js");
+var settle = __nested_webpack_require_14534__(/*! ./../core/settle */ "../node_modules/axios/lib/core/settle.js");
+var buildURL = __nested_webpack_require_14534__(/*! ./../helpers/buildURL */ "../node_modules/axios/lib/helpers/buildURL.js");
+var buildFullPath = __nested_webpack_require_14534__(/*! ../core/buildFullPath */ "../node_modules/axios/lib/core/buildFullPath.js");
+var parseHeaders = __nested_webpack_require_14534__(/*! ./../helpers/parseHeaders */ "../node_modules/axios/lib/helpers/parseHeaders.js");
+var isURLSameOrigin = __nested_webpack_require_14534__(/*! ./../helpers/isURLSameOrigin */ "../node_modules/axios/lib/helpers/isURLSameOrigin.js");
+var createError = __nested_webpack_require_14534__(/*! ../core/createError */ "../node_modules/axios/lib/core/createError.js");
 
 module.exports = function xhrAdapter(config) {
   return new Promise(function dispatchXhrRequest(resolve, reject) {
@@ -15241,7 +15715,8 @@ module.exports = function xhrAdapter(config) {
       requestHeaders.Authorization = 'Basic ' + btoa(username + ':' + password);
     }
 
-    request.open(config.method.toUpperCase(), buildURL(config.url, config.params, config.paramsSerializer), true);
+    var fullPath = buildFullPath(config.baseURL, config.url);
+    request.open(config.method.toUpperCase(), buildURL(fullPath, config.params, config.paramsSerializer), true);
 
     // Set the request timeout in MS
     request.timeout = config.timeout;
@@ -15302,7 +15777,11 @@ module.exports = function xhrAdapter(config) {
 
     // Handle timeout
     request.ontimeout = function handleTimeout() {
-      reject(createError('timeout of ' + config.timeout + 'ms exceeded', config, 'ECONNABORTED',
+      var timeoutErrorMessage = 'timeout of ' + config.timeout + 'ms exceeded';
+      if (config.timeoutErrorMessage) {
+        timeoutErrorMessage = config.timeoutErrorMessage;
+      }
+      reject(createError(timeoutErrorMessage, config, 'ECONNABORTED',
         request));
 
       // Clean up request
@@ -15313,10 +15792,10 @@ module.exports = function xhrAdapter(config) {
     // This is only done if running in a standard browser environment.
     // Specifically not if we're in a web worker, or react-native.
     if (utils.isStandardBrowserEnv()) {
-      var cookies = __nested_webpack_require_13826__(/*! ./../helpers/cookies */ "../node_modules/axios/lib/helpers/cookies.js");
+      var cookies = __nested_webpack_require_14534__(/*! ./../helpers/cookies */ "../node_modules/axios/lib/helpers/cookies.js");
 
       // Add xsrf header
-      var xsrfValue = (config.withCredentials || isURLSameOrigin(config.url)) && config.xsrfCookieName ?
+      var xsrfValue = (config.withCredentials || isURLSameOrigin(fullPath)) && config.xsrfCookieName ?
         cookies.read(config.xsrfCookieName) :
         undefined;
 
@@ -15339,8 +15818,8 @@ module.exports = function xhrAdapter(config) {
     }
 
     // Add withCredentials to request if needed
-    if (config.withCredentials) {
-      request.withCredentials = true;
+    if (!utils.isUndefined(config.withCredentials)) {
+      request.withCredentials = !!config.withCredentials;
     }
 
     // Add responseType to request if needed
@@ -15397,16 +15876,16 @@ module.exports = function xhrAdapter(config) {
   !*** ../node_modules/axios/lib/axios.js ***!
   \******************************************/
 /*! no static exports found */
-/***/ (function(module, exports, __nested_webpack_require_20090__) {
+/***/ (function(module, exports, __nested_webpack_require_21176__) {
 
 "use strict";
 
 
-var utils = __nested_webpack_require_20090__(/*! ./utils */ "../node_modules/axios/lib/utils.js");
-var bind = __nested_webpack_require_20090__(/*! ./helpers/bind */ "../node_modules/axios/lib/helpers/bind.js");
-var Axios = __nested_webpack_require_20090__(/*! ./core/Axios */ "../node_modules/axios/lib/core/Axios.js");
-var mergeConfig = __nested_webpack_require_20090__(/*! ./core/mergeConfig */ "../node_modules/axios/lib/core/mergeConfig.js");
-var defaults = __nested_webpack_require_20090__(/*! ./defaults */ "../node_modules/axios/lib/defaults.js");
+var utils = __nested_webpack_require_21176__(/*! ./utils */ "../node_modules/axios/lib/utils.js");
+var bind = __nested_webpack_require_21176__(/*! ./helpers/bind */ "../node_modules/axios/lib/helpers/bind.js");
+var Axios = __nested_webpack_require_21176__(/*! ./core/Axios */ "../node_modules/axios/lib/core/Axios.js");
+var mergeConfig = __nested_webpack_require_21176__(/*! ./core/mergeConfig */ "../node_modules/axios/lib/core/mergeConfig.js");
+var defaults = __nested_webpack_require_21176__(/*! ./defaults */ "../node_modules/axios/lib/defaults.js");
 
 /**
  * Create an instance of Axios
@@ -15439,15 +15918,15 @@ axios.create = function create(instanceConfig) {
 };
 
 // Expose Cancel & CancelToken
-axios.Cancel = __nested_webpack_require_20090__(/*! ./cancel/Cancel */ "../node_modules/axios/lib/cancel/Cancel.js");
-axios.CancelToken = __nested_webpack_require_20090__(/*! ./cancel/CancelToken */ "../node_modules/axios/lib/cancel/CancelToken.js");
-axios.isCancel = __nested_webpack_require_20090__(/*! ./cancel/isCancel */ "../node_modules/axios/lib/cancel/isCancel.js");
+axios.Cancel = __nested_webpack_require_21176__(/*! ./cancel/Cancel */ "../node_modules/axios/lib/cancel/Cancel.js");
+axios.CancelToken = __nested_webpack_require_21176__(/*! ./cancel/CancelToken */ "../node_modules/axios/lib/cancel/CancelToken.js");
+axios.isCancel = __nested_webpack_require_21176__(/*! ./cancel/isCancel */ "../node_modules/axios/lib/cancel/isCancel.js");
 
 // Expose all/spread
 axios.all = function all(promises) {
   return Promise.all(promises);
 };
-axios.spread = __nested_webpack_require_20090__(/*! ./helpers/spread */ "../node_modules/axios/lib/helpers/spread.js");
+axios.spread = __nested_webpack_require_21176__(/*! ./helpers/spread */ "../node_modules/axios/lib/helpers/spread.js");
 
 module.exports = axios;
 
@@ -15462,7 +15941,7 @@ module.exports.default = axios;
   !*** ../node_modules/axios/lib/cancel/Cancel.js ***!
   \**************************************************/
 /*! no static exports found */
-/***/ (function(module, exports, __nested_webpack_require_22386__) {
+/***/ (function(module, exports, __nested_webpack_require_23472__) {
 
 "use strict";
 
@@ -15493,12 +15972,12 @@ module.exports = Cancel;
   !*** ../node_modules/axios/lib/cancel/CancelToken.js ***!
   \*******************************************************/
 /*! no static exports found */
-/***/ (function(module, exports, __nested_webpack_require_23112__) {
+/***/ (function(module, exports, __nested_webpack_require_24198__) {
 
 "use strict";
 
 
-var Cancel = __nested_webpack_require_23112__(/*! ./Cancel */ "../node_modules/axios/lib/cancel/Cancel.js");
+var Cancel = __nested_webpack_require_24198__(/*! ./Cancel */ "../node_modules/axios/lib/cancel/Cancel.js");
 
 /**
  * A `CancelToken` is an object that can be used to request cancellation of an operation.
@@ -15562,7 +16041,7 @@ module.exports = CancelToken;
   !*** ../node_modules/axios/lib/cancel/isCancel.js ***!
   \****************************************************/
 /*! no static exports found */
-/***/ (function(module, exports, __nested_webpack_require_24743__) {
+/***/ (function(module, exports, __nested_webpack_require_25829__) {
 
 "use strict";
 
@@ -15579,16 +16058,16 @@ module.exports = function isCancel(value) {
   !*** ../node_modules/axios/lib/core/Axios.js ***!
   \***********************************************/
 /*! no static exports found */
-/***/ (function(module, exports, __nested_webpack_require_25154__) {
+/***/ (function(module, exports, __nested_webpack_require_26240__) {
 
 "use strict";
 
 
-var utils = __nested_webpack_require_25154__(/*! ./../utils */ "../node_modules/axios/lib/utils.js");
-var buildURL = __nested_webpack_require_25154__(/*! ../helpers/buildURL */ "../node_modules/axios/lib/helpers/buildURL.js");
-var InterceptorManager = __nested_webpack_require_25154__(/*! ./InterceptorManager */ "../node_modules/axios/lib/core/InterceptorManager.js");
-var dispatchRequest = __nested_webpack_require_25154__(/*! ./dispatchRequest */ "../node_modules/axios/lib/core/dispatchRequest.js");
-var mergeConfig = __nested_webpack_require_25154__(/*! ./mergeConfig */ "../node_modules/axios/lib/core/mergeConfig.js");
+var utils = __nested_webpack_require_26240__(/*! ./../utils */ "../node_modules/axios/lib/utils.js");
+var buildURL = __nested_webpack_require_26240__(/*! ../helpers/buildURL */ "../node_modules/axios/lib/helpers/buildURL.js");
+var InterceptorManager = __nested_webpack_require_26240__(/*! ./InterceptorManager */ "../node_modules/axios/lib/core/InterceptorManager.js");
+var dispatchRequest = __nested_webpack_require_26240__(/*! ./dispatchRequest */ "../node_modules/axios/lib/core/dispatchRequest.js");
+var mergeConfig = __nested_webpack_require_26240__(/*! ./mergeConfig */ "../node_modules/axios/lib/core/mergeConfig.js");
 
 /**
  * Create a new instance of Axios
@@ -15619,7 +16098,15 @@ Axios.prototype.request = function request(config) {
   }
 
   config = mergeConfig(this.defaults, config);
-  config.method = config.method ? config.method.toLowerCase() : 'get';
+
+  // Set config.method
+  if (config.method) {
+    config.method = config.method.toLowerCase();
+  } else if (this.defaults.method) {
+    config.method = this.defaults.method.toLowerCase();
+  } else {
+    config.method = 'get';
+  }
 
   // Hook up interceptors middleware
   var chain = [dispatchRequest, undefined];
@@ -15677,12 +16164,12 @@ module.exports = Axios;
   !*** ../node_modules/axios/lib/core/InterceptorManager.js ***!
   \************************************************************/
 /*! no static exports found */
-/***/ (function(module, exports, __nested_webpack_require_28295__) {
+/***/ (function(module, exports, __nested_webpack_require_29541__) {
 
 "use strict";
 
 
-var utils = __nested_webpack_require_28295__(/*! ./../utils */ "../node_modules/axios/lib/utils.js");
+var utils = __nested_webpack_require_29541__(/*! ./../utils */ "../node_modules/axios/lib/utils.js");
 
 function InterceptorManager() {
   this.handlers = [];
@@ -15736,17 +16223,49 @@ module.exports = InterceptorManager;
 
 /***/ }),
 
+/***/ "../node_modules/axios/lib/core/buildFullPath.js":
+/*!*******************************************************!*\
+  !*** ../node_modules/axios/lib/core/buildFullPath.js ***!
+  \*******************************************************/
+/*! no static exports found */
+/***/ (function(module, exports, __nested_webpack_require_31187__) {
+
+"use strict";
+
+
+var isAbsoluteURL = __nested_webpack_require_31187__(/*! ../helpers/isAbsoluteURL */ "../node_modules/axios/lib/helpers/isAbsoluteURL.js");
+var combineURLs = __nested_webpack_require_31187__(/*! ../helpers/combineURLs */ "../node_modules/axios/lib/helpers/combineURLs.js");
+
+/**
+ * Creates a new URL by combining the baseURL with the requestedURL,
+ * only when the requestedURL is not already an absolute URL.
+ * If the requestURL is absolute, this function returns the requestedURL untouched.
+ *
+ * @param {string} baseURL The base URL
+ * @param {string} requestedURL Absolute or relative URL to combine
+ * @returns {string} The combined full path
+ */
+module.exports = function buildFullPath(baseURL, requestedURL) {
+  if (baseURL && !isAbsoluteURL(requestedURL)) {
+    return combineURLs(baseURL, requestedURL);
+  }
+  return requestedURL;
+};
+
+
+/***/ }),
+
 /***/ "../node_modules/axios/lib/core/createError.js":
 /*!*****************************************************!*\
   !*** ../node_modules/axios/lib/core/createError.js ***!
   \*****************************************************/
 /*! no static exports found */
-/***/ (function(module, exports, __nested_webpack_require_29933__) {
+/***/ (function(module, exports, __nested_webpack_require_32353__) {
 
 "use strict";
 
 
-var enhanceError = __nested_webpack_require_29933__(/*! ./enhanceError */ "../node_modules/axios/lib/core/enhanceError.js");
+var enhanceError = __nested_webpack_require_32353__(/*! ./enhanceError */ "../node_modules/axios/lib/core/enhanceError.js");
 
 /**
  * Create an Error with the specified message, config, error code, request and response.
@@ -15771,17 +16290,15 @@ module.exports = function createError(message, config, code, request, response) 
   !*** ../node_modules/axios/lib/core/dispatchRequest.js ***!
   \*********************************************************/
 /*! no static exports found */
-/***/ (function(module, exports, __nested_webpack_require_30973__) {
+/***/ (function(module, exports, __nested_webpack_require_33393__) {
 
 "use strict";
 
 
-var utils = __nested_webpack_require_30973__(/*! ./../utils */ "../node_modules/axios/lib/utils.js");
-var transformData = __nested_webpack_require_30973__(/*! ./transformData */ "../node_modules/axios/lib/core/transformData.js");
-var isCancel = __nested_webpack_require_30973__(/*! ../cancel/isCancel */ "../node_modules/axios/lib/cancel/isCancel.js");
-var defaults = __nested_webpack_require_30973__(/*! ../defaults */ "../node_modules/axios/lib/defaults.js");
-var isAbsoluteURL = __nested_webpack_require_30973__(/*! ./../helpers/isAbsoluteURL */ "../node_modules/axios/lib/helpers/isAbsoluteURL.js");
-var combineURLs = __nested_webpack_require_30973__(/*! ./../helpers/combineURLs */ "../node_modules/axios/lib/helpers/combineURLs.js");
+var utils = __nested_webpack_require_33393__(/*! ./../utils */ "../node_modules/axios/lib/utils.js");
+var transformData = __nested_webpack_require_33393__(/*! ./transformData */ "../node_modules/axios/lib/core/transformData.js");
+var isCancel = __nested_webpack_require_33393__(/*! ../cancel/isCancel */ "../node_modules/axios/lib/cancel/isCancel.js");
+var defaults = __nested_webpack_require_33393__(/*! ../defaults */ "../node_modules/axios/lib/defaults.js");
 
 /**
  * Throws a `Cancel` if cancellation has been requested.
@@ -15801,11 +16318,6 @@ function throwIfCancellationRequested(config) {
 module.exports = function dispatchRequest(config) {
   throwIfCancellationRequested(config);
 
-  // Support baseURL config
-  if (config.baseURL && !isAbsoluteURL(config.url)) {
-    config.url = combineURLs(config.baseURL, config.url);
-  }
-
   // Ensure headers exist
   config.headers = config.headers || {};
 
@@ -15820,7 +16332,7 @@ module.exports = function dispatchRequest(config) {
   config.headers = utils.merge(
     config.headers.common || {},
     config.headers[config.method] || {},
-    config.headers || {}
+    config.headers
   );
 
   utils.forEach(
@@ -15869,7 +16381,7 @@ module.exports = function dispatchRequest(config) {
   !*** ../node_modules/axios/lib/core/enhanceError.js ***!
   \******************************************************/
 /*! no static exports found */
-/***/ (function(module, exports, __nested_webpack_require_33889__) {
+/***/ (function(module, exports, __nested_webpack_require_35906__) {
 
 "use strict";
 
@@ -15923,12 +16435,12 @@ module.exports = function enhanceError(error, config, code, request, response) {
   !*** ../node_modules/axios/lib/core/mergeConfig.js ***!
   \*****************************************************/
 /*! no static exports found */
-/***/ (function(module, exports, __nested_webpack_require_35264__) {
+/***/ (function(module, exports, __nested_webpack_require_37281__) {
 
 "use strict";
 
 
-var utils = __nested_webpack_require_35264__(/*! ../utils */ "../node_modules/axios/lib/utils.js");
+var utils = __nested_webpack_require_37281__(/*! ../utils */ "../node_modules/axios/lib/utils.js");
 
 /**
  * Config-specific merge-function which creates a new config-object
@@ -15943,13 +16455,23 @@ module.exports = function mergeConfig(config1, config2) {
   config2 = config2 || {};
   var config = {};
 
-  utils.forEach(['url', 'method', 'params', 'data'], function valueFromConfig2(prop) {
+  var valueFromConfig2Keys = ['url', 'method', 'params', 'data'];
+  var mergeDeepPropertiesKeys = ['headers', 'auth', 'proxy'];
+  var defaultToConfig2Keys = [
+    'baseURL', 'url', 'transformRequest', 'transformResponse', 'paramsSerializer',
+    'timeout', 'withCredentials', 'adapter', 'responseType', 'xsrfCookieName',
+    'xsrfHeaderName', 'onUploadProgress', 'onDownloadProgress',
+    'maxContentLength', 'validateStatus', 'maxRedirects', 'httpAgent',
+    'httpsAgent', 'cancelToken', 'socketPath'
+  ];
+
+  utils.forEach(valueFromConfig2Keys, function valueFromConfig2(prop) {
     if (typeof config2[prop] !== 'undefined') {
       config[prop] = config2[prop];
     }
   });
 
-  utils.forEach(['headers', 'auth', 'proxy'], function mergeDeepProperties(prop) {
+  utils.forEach(mergeDeepPropertiesKeys, function mergeDeepProperties(prop) {
     if (utils.isObject(config2[prop])) {
       config[prop] = utils.deepMerge(config1[prop], config2[prop]);
     } else if (typeof config2[prop] !== 'undefined') {
@@ -15961,13 +16483,25 @@ module.exports = function mergeConfig(config1, config2) {
     }
   });
 
-  utils.forEach([
-    'baseURL', 'transformRequest', 'transformResponse', 'paramsSerializer',
-    'timeout', 'withCredentials', 'adapter', 'responseType', 'xsrfCookieName',
-    'xsrfHeaderName', 'onUploadProgress', 'onDownloadProgress', 'maxContentLength',
-    'validateStatus', 'maxRedirects', 'httpAgent', 'httpsAgent', 'cancelToken',
-    'socketPath'
-  ], function defaultToConfig2(prop) {
+  utils.forEach(defaultToConfig2Keys, function defaultToConfig2(prop) {
+    if (typeof config2[prop] !== 'undefined') {
+      config[prop] = config2[prop];
+    } else if (typeof config1[prop] !== 'undefined') {
+      config[prop] = config1[prop];
+    }
+  });
+
+  var axiosKeys = valueFromConfig2Keys
+    .concat(mergeDeepPropertiesKeys)
+    .concat(defaultToConfig2Keys);
+
+  var otherKeys = Object
+    .keys(config2)
+    .filter(function filterAxiosKeys(key) {
+      return axiosKeys.indexOf(key) === -1;
+    });
+
+  utils.forEach(otherKeys, function otherKeysDefaultToConfig2(prop) {
     if (typeof config2[prop] !== 'undefined') {
       config[prop] = config2[prop];
     } else if (typeof config1[prop] !== 'undefined') {
@@ -15986,12 +16520,12 @@ module.exports = function mergeConfig(config1, config2) {
   !*** ../node_modules/axios/lib/core/settle.js ***!
   \************************************************/
 /*! no static exports found */
-/***/ (function(module, exports, __nested_webpack_require_37363__) {
+/***/ (function(module, exports, __nested_webpack_require_40058__) {
 
 "use strict";
 
 
-var createError = __nested_webpack_require_37363__(/*! ./createError */ "../node_modules/axios/lib/core/createError.js");
+var createError = __nested_webpack_require_40058__(/*! ./createError */ "../node_modules/axios/lib/core/createError.js");
 
 /**
  * Resolve or reject a Promise based on response status.
@@ -16023,12 +16557,12 @@ module.exports = function settle(resolve, reject, response) {
   !*** ../node_modules/axios/lib/core/transformData.js ***!
   \*******************************************************/
 /*! no static exports found */
-/***/ (function(module, exports, __nested_webpack_require_38455__) {
+/***/ (function(module, exports, __nested_webpack_require_41150__) {
 
 "use strict";
 
 
-var utils = __nested_webpack_require_38455__(/*! ./../utils */ "../node_modules/axios/lib/utils.js");
+var utils = __nested_webpack_require_41150__(/*! ./../utils */ "../node_modules/axios/lib/utils.js");
 
 /**
  * Transform the data for a request or a response
@@ -16055,13 +16589,13 @@ module.exports = function transformData(data, headers, fns) {
   !*** ../node_modules/axios/lib/defaults.js ***!
   \*********************************************/
 /*! no static exports found */
-/***/ (function(module, exports, __nested_webpack_require_39360__) {
+/***/ (function(module, exports, __nested_webpack_require_42055__) {
 
 "use strict";
 
 
-var utils = __nested_webpack_require_39360__(/*! ./utils */ "../node_modules/axios/lib/utils.js");
-var normalizeHeaderName = __nested_webpack_require_39360__(/*! ./helpers/normalizeHeaderName */ "../node_modules/axios/lib/helpers/normalizeHeaderName.js");
+var utils = __nested_webpack_require_42055__(/*! ./utils */ "../node_modules/axios/lib/utils.js");
+var normalizeHeaderName = __nested_webpack_require_42055__(/*! ./helpers/normalizeHeaderName */ "../node_modules/axios/lib/helpers/normalizeHeaderName.js");
 
 var DEFAULT_CONTENT_TYPE = {
   'Content-Type': 'application/x-www-form-urlencoded'
@@ -16075,13 +16609,12 @@ function setContentTypeIfUnset(headers, value) {
 
 function getDefaultAdapter() {
   var adapter;
-  // Only Node.JS has a process variable that is of [[Class]] process
-  if (typeof process !== 'undefined' && Object.prototype.toString.call(process) === '[object process]') {
-    // For node use HTTP adapter
-    adapter = __nested_webpack_require_39360__(/*! ./adapters/http */ "../node_modules/axios/lib/adapters/http.js");
-  } else if (typeof XMLHttpRequest !== 'undefined') {
+  if (typeof XMLHttpRequest !== 'undefined') {
     // For browsers use XHR adapter
-    adapter = __nested_webpack_require_39360__(/*! ./adapters/xhr */ "../node_modules/axios/lib/adapters/xhr.js");
+    adapter = __nested_webpack_require_42055__(/*! ./adapters/xhr */ "../node_modules/axios/lib/adapters/xhr.js");
+  } else if (typeof process !== 'undefined' && Object.prototype.toString.call(process) === '[object process]') {
+    // For node use HTTP adapter
+    adapter = __nested_webpack_require_42055__(/*! ./adapters/http */ "../node_modules/axios/lib/adapters/http.js");
   }
   return adapter;
 }
@@ -16165,7 +16698,7 @@ module.exports = defaults;
   !*** ../node_modules/axios/lib/helpers/bind.js ***!
   \*************************************************/
 /*! no static exports found */
-/***/ (function(module, exports, __nested_webpack_require_42542__) {
+/***/ (function(module, exports, __nested_webpack_require_45167__) {
 
 "use strict";
 
@@ -16188,12 +16721,12 @@ module.exports = function bind(fn, thisArg) {
   !*** ../node_modules/axios/lib/helpers/buildURL.js ***!
   \*****************************************************/
 /*! no static exports found */
-/***/ (function(module, exports, __nested_webpack_require_43131__) {
+/***/ (function(module, exports, __nested_webpack_require_45756__) {
 
 "use strict";
 
 
-var utils = __nested_webpack_require_43131__(/*! ./../utils */ "../node_modules/axios/lib/utils.js");
+var utils = __nested_webpack_require_45756__(/*! ./../utils */ "../node_modules/axios/lib/utils.js");
 
 function encode(val) {
   return encodeURIComponent(val).
@@ -16271,7 +16804,7 @@ module.exports = function buildURL(url, params, paramsSerializer) {
   !*** ../node_modules/axios/lib/helpers/combineURLs.js ***!
   \********************************************************/
 /*! no static exports found */
-/***/ (function(module, exports, __nested_webpack_require_45201__) {
+/***/ (function(module, exports, __nested_webpack_require_47826__) {
 
 "use strict";
 
@@ -16297,12 +16830,12 @@ module.exports = function combineURLs(baseURL, relativeURL) {
   !*** ../node_modules/axios/lib/helpers/cookies.js ***!
   \****************************************************/
 /*! no static exports found */
-/***/ (function(module, exports, __nested_webpack_require_45910__) {
+/***/ (function(module, exports, __nested_webpack_require_48535__) {
 
 "use strict";
 
 
-var utils = __nested_webpack_require_45910__(/*! ./../utils */ "../node_modules/axios/lib/utils.js");
+var utils = __nested_webpack_require_48535__(/*! ./../utils */ "../node_modules/axios/lib/utils.js");
 
 module.exports = (
   utils.isStandardBrowserEnv() ?
@@ -16362,7 +16895,7 @@ module.exports = (
   !*** ../node_modules/axios/lib/helpers/isAbsoluteURL.js ***!
   \**********************************************************/
 /*! no static exports found */
-/***/ (function(module, exports, __nested_webpack_require_47752__) {
+/***/ (function(module, exports, __nested_webpack_require_50377__) {
 
 "use strict";
 
@@ -16388,12 +16921,12 @@ module.exports = function isAbsoluteURL(url) {
   !*** ../node_modules/axios/lib/helpers/isURLSameOrigin.js ***!
   \************************************************************/
 /*! no static exports found */
-/***/ (function(module, exports, __nested_webpack_require_48676__) {
+/***/ (function(module, exports, __nested_webpack_require_51301__) {
 
 "use strict";
 
 
-var utils = __nested_webpack_require_48676__(/*! ./../utils */ "../node_modules/axios/lib/utils.js");
+var utils = __nested_webpack_require_51301__(/*! ./../utils */ "../node_modules/axios/lib/utils.js");
 
 module.exports = (
   utils.isStandardBrowserEnv() ?
@@ -16468,12 +17001,12 @@ module.exports = (
   !*** ../node_modules/axios/lib/helpers/normalizeHeaderName.js ***!
   \****************************************************************/
 /*! no static exports found */
-/***/ (function(module, exports, __nested_webpack_require_51412__) {
+/***/ (function(module, exports, __nested_webpack_require_54037__) {
 
 "use strict";
 
 
-var utils = __nested_webpack_require_51412__(/*! ../utils */ "../node_modules/axios/lib/utils.js");
+var utils = __nested_webpack_require_54037__(/*! ../utils */ "../node_modules/axios/lib/utils.js");
 
 module.exports = function normalizeHeaderName(headers, normalizedName) {
   utils.forEach(headers, function processHeader(value, name) {
@@ -16492,12 +17025,12 @@ module.exports = function normalizeHeaderName(headers, normalizedName) {
   !*** ../node_modules/axios/lib/helpers/parseHeaders.js ***!
   \*********************************************************/
 /*! no static exports found */
-/***/ (function(module, exports, __nested_webpack_require_52172__) {
+/***/ (function(module, exports, __nested_webpack_require_54797__) {
 
 "use strict";
 
 
-var utils = __nested_webpack_require_52172__(/*! ./../utils */ "../node_modules/axios/lib/utils.js");
+var utils = __nested_webpack_require_54797__(/*! ./../utils */ "../node_modules/axios/lib/utils.js");
 
 // Headers whose duplicates are ignored by node
 // c.f. https://nodejs.org/api/http.html#http_message_headers
@@ -16557,7 +17090,7 @@ module.exports = function parseHeaders(headers) {
   !*** ../node_modules/axios/lib/helpers/spread.js ***!
   \***************************************************/
 /*! no static exports found */
-/***/ (function(module, exports, __nested_webpack_require_53944__) {
+/***/ (function(module, exports, __nested_webpack_require_56569__) {
 
 "use strict";
 
@@ -16596,13 +17129,12 @@ module.exports = function spread(callback) {
   !*** ../node_modules/axios/lib/utils.js ***!
   \******************************************/
 /*! no static exports found */
-/***/ (function(module, exports, __nested_webpack_require_54797__) {
+/***/ (function(module, exports, __nested_webpack_require_57422__) {
 
 "use strict";
 
 
-var bind = __nested_webpack_require_54797__(/*! ./helpers/bind */ "../node_modules/axios/lib/helpers/bind.js");
-var isBuffer = __nested_webpack_require_54797__(/*! is-buffer */ "../node_modules/is-buffer/index.js");
+var bind = __nested_webpack_require_57422__(/*! ./helpers/bind */ "../node_modules/axios/lib/helpers/bind.js");
 
 /*global toString:true*/
 
@@ -16618,6 +17150,27 @@ var toString = Object.prototype.toString;
  */
 function isArray(val) {
   return toString.call(val) === '[object Array]';
+}
+
+/**
+ * Determine if a value is undefined
+ *
+ * @param {Object} val The value to test
+ * @returns {boolean} True if the value is undefined, otherwise false
+ */
+function isUndefined(val) {
+  return typeof val === 'undefined';
+}
+
+/**
+ * Determine if a value is a Buffer
+ *
+ * @param {Object} val The value to test
+ * @returns {boolean} True if value is a Buffer, otherwise false
+ */
+function isBuffer(val) {
+  return val !== null && !isUndefined(val) && val.constructor !== null && !isUndefined(val.constructor)
+    && typeof val.constructor.isBuffer === 'function' && val.constructor.isBuffer(val);
 }
 
 /**
@@ -16674,16 +17227,6 @@ function isString(val) {
  */
 function isNumber(val) {
   return typeof val === 'number';
-}
-
-/**
- * Determine if a value is undefined
- *
- * @param {Object} val The value to test
- * @returns {boolean} True if the value is undefined, otherwise false
- */
-function isUndefined(val) {
-  return typeof val === 'undefined';
 }
 
 /**
@@ -16944,7 +17487,7 @@ module.exports = {
 /*! exports provided: _from, _id, _inBundle, _integrity, _location, _phantomChildren, _requested, _requiredBy, _resolved, _shasum, _spec, _where, author, browser, bugs, bundleDependencies, bundlesize, dependencies, deprecated, description, devDependencies, homepage, keywords, license, main, name, repository, scripts, typings, version, default */
 /***/ (function(module) {
 
-module.exports = JSON.parse("{\"_from\":\"axios@^0.19.0\",\"_id\":\"axios@0.19.0\",\"_inBundle\":false,\"_integrity\":\"sha512-1uvKqKQta3KBxIz14F2v06AEHZ/dIoeKfbTRkK1E5oqjDnuEerLmYTgJB5AiQZHJcljpg1TuRzdjDR06qNk0DQ==\",\"_location\":\"/axios\",\"_phantomChildren\":{},\"_requested\":{\"type\":\"range\",\"registry\":true,\"raw\":\"axios@^0.19.0\",\"name\":\"axios\",\"escapedName\":\"axios\",\"rawSpec\":\"^0.19.0\",\"saveSpec\":null,\"fetchSpec\":\"^0.19.0\"},\"_requiredBy\":[\"/\",\"/github-build\"],\"_resolved\":\"https://registry.npmjs.org/axios/-/axios-0.19.0.tgz\",\"_shasum\":\"8e09bff3d9122e133f7b8101c8fbdd00ed3d2ab8\",\"_spec\":\"axios@^0.19.0\",\"_where\":\"/home/circleci/project\",\"author\":{\"name\":\"Matt Zabriskie\"},\"browser\":{\"./lib/adapters/http.js\":\"./lib/adapters/xhr.js\"},\"bugs\":{\"url\":\"https://github.com/axios/axios/issues\"},\"bundleDependencies\":false,\"bundlesize\":[{\"path\":\"./dist/axios.min.js\",\"threshold\":\"5kB\"}],\"dependencies\":{\"follow-redirects\":\"1.5.10\",\"is-buffer\":\"^2.0.2\"},\"deprecated\":false,\"description\":\"Promise based HTTP client for the browser and node.js\",\"devDependencies\":{\"bundlesize\":\"^0.17.0\",\"coveralls\":\"^3.0.0\",\"es6-promise\":\"^4.2.4\",\"grunt\":\"^1.0.2\",\"grunt-banner\":\"^0.6.0\",\"grunt-cli\":\"^1.2.0\",\"grunt-contrib-clean\":\"^1.1.0\",\"grunt-contrib-watch\":\"^1.0.0\",\"grunt-eslint\":\"^20.1.0\",\"grunt-karma\":\"^2.0.0\",\"grunt-mocha-test\":\"^0.13.3\",\"grunt-ts\":\"^6.0.0-beta.19\",\"grunt-webpack\":\"^1.0.18\",\"istanbul-instrumenter-loader\":\"^1.0.0\",\"jasmine-core\":\"^2.4.1\",\"karma\":\"^1.3.0\",\"karma-chrome-launcher\":\"^2.2.0\",\"karma-coverage\":\"^1.1.1\",\"karma-firefox-launcher\":\"^1.1.0\",\"karma-jasmine\":\"^1.1.1\",\"karma-jasmine-ajax\":\"^0.1.13\",\"karma-opera-launcher\":\"^1.0.0\",\"karma-safari-launcher\":\"^1.0.0\",\"karma-sauce-launcher\":\"^1.2.0\",\"karma-sinon\":\"^1.0.5\",\"karma-sourcemap-loader\":\"^0.3.7\",\"karma-webpack\":\"^1.7.0\",\"load-grunt-tasks\":\"^3.5.2\",\"minimist\":\"^1.2.0\",\"mocha\":\"^5.2.0\",\"sinon\":\"^4.5.0\",\"typescript\":\"^2.8.1\",\"url-search-params\":\"^0.10.0\",\"webpack\":\"^1.13.1\",\"webpack-dev-server\":\"^1.14.1\"},\"homepage\":\"https://github.com/axios/axios\",\"keywords\":[\"xhr\",\"http\",\"ajax\",\"promise\",\"node\"],\"license\":\"MIT\",\"main\":\"index.js\",\"name\":\"axios\",\"repository\":{\"type\":\"git\",\"url\":\"git+https://github.com/axios/axios.git\"},\"scripts\":{\"build\":\"NODE_ENV=production grunt build\",\"coveralls\":\"cat coverage/lcov.info | ./node_modules/coveralls/bin/coveralls.js\",\"examples\":\"node ./examples/server.js\",\"fix\":\"eslint --fix lib/**/*.js\",\"postversion\":\"git push && git push --tags\",\"preversion\":\"npm test\",\"start\":\"node ./sandbox/server.js\",\"test\":\"grunt test && bundlesize\",\"version\":\"npm run build && grunt version && git add -A dist && git add CHANGELOG.md bower.json package.json\"},\"typings\":\"./index.d.ts\",\"version\":\"0.19.0\"}");
+module.exports = JSON.parse("{\"_from\":\"axios@^0.19.0\",\"_id\":\"axios@0.19.2\",\"_inBundle\":false,\"_integrity\":\"sha512-fjgm5MvRHLhx+osE2xoekY70AhARk3a6hkN+3Io1jc00jtquGvxYlKlsFUhmUET0V5te6CcZI7lcv2Ym61mjHA==\",\"_location\":\"/axios\",\"_phantomChildren\":{},\"_requested\":{\"type\":\"range\",\"registry\":true,\"raw\":\"axios@^0.19.0\",\"name\":\"axios\",\"escapedName\":\"axios\",\"rawSpec\":\"^0.19.0\",\"saveSpec\":null,\"fetchSpec\":\"^0.19.0\"},\"_requiredBy\":[\"/\",\"/bundlesize\"],\"_resolved\":\"https://registry.npmjs.org/axios/-/axios-0.19.2.tgz\",\"_shasum\":\"3ea36c5d8818d0d5f8a8a97a6d36b86cdc00cb27\",\"_spec\":\"axios@^0.19.0\",\"_where\":\"/home/circleci/project\",\"author\":{\"name\":\"Matt Zabriskie\"},\"browser\":{\"./lib/adapters/http.js\":\"./lib/adapters/xhr.js\"},\"bugs\":{\"url\":\"https://github.com/axios/axios/issues\"},\"bundleDependencies\":false,\"bundlesize\":[{\"path\":\"./dist/axios.min.js\",\"threshold\":\"5kB\"}],\"dependencies\":{\"follow-redirects\":\"1.5.10\"},\"deprecated\":false,\"description\":\"Promise based HTTP client for the browser and node.js\",\"devDependencies\":{\"bundlesize\":\"^0.17.0\",\"coveralls\":\"^3.0.0\",\"es6-promise\":\"^4.2.4\",\"grunt\":\"^1.0.2\",\"grunt-banner\":\"^0.6.0\",\"grunt-cli\":\"^1.2.0\",\"grunt-contrib-clean\":\"^1.1.0\",\"grunt-contrib-watch\":\"^1.0.0\",\"grunt-eslint\":\"^20.1.0\",\"grunt-karma\":\"^2.0.0\",\"grunt-mocha-test\":\"^0.13.3\",\"grunt-ts\":\"^6.0.0-beta.19\",\"grunt-webpack\":\"^1.0.18\",\"istanbul-instrumenter-loader\":\"^1.0.0\",\"jasmine-core\":\"^2.4.1\",\"karma\":\"^1.3.0\",\"karma-chrome-launcher\":\"^2.2.0\",\"karma-coverage\":\"^1.1.1\",\"karma-firefox-launcher\":\"^1.1.0\",\"karma-jasmine\":\"^1.1.1\",\"karma-jasmine-ajax\":\"^0.1.13\",\"karma-opera-launcher\":\"^1.0.0\",\"karma-safari-launcher\":\"^1.0.0\",\"karma-sauce-launcher\":\"^1.2.0\",\"karma-sinon\":\"^1.0.5\",\"karma-sourcemap-loader\":\"^0.3.7\",\"karma-webpack\":\"^1.7.0\",\"load-grunt-tasks\":\"^3.5.2\",\"minimist\":\"^1.2.0\",\"mocha\":\"^5.2.0\",\"sinon\":\"^4.5.0\",\"typescript\":\"^2.8.1\",\"url-search-params\":\"^0.10.0\",\"webpack\":\"^1.13.1\",\"webpack-dev-server\":\"^1.14.1\"},\"homepage\":\"https://github.com/axios/axios\",\"keywords\":[\"xhr\",\"http\",\"ajax\",\"promise\",\"node\"],\"license\":\"MIT\",\"main\":\"index.js\",\"name\":\"axios\",\"repository\":{\"type\":\"git\",\"url\":\"git+https://github.com/axios/axios.git\"},\"scripts\":{\"build\":\"NODE_ENV=production grunt build\",\"coveralls\":\"cat coverage/lcov.info | ./node_modules/coveralls/bin/coveralls.js\",\"examples\":\"node ./examples/server.js\",\"fix\":\"eslint --fix lib/**/*.js\",\"postversion\":\"git push && git push --tags\",\"preversion\":\"npm test\",\"start\":\"node ./sandbox/server.js\",\"test\":\"grunt test && bundlesize\",\"version\":\"npm run build && grunt version && git add -A dist && git add CHANGELOG.md bower.json package.json\"},\"typings\":\"./index.d.ts\",\"version\":\"0.19.2\"}");
 
 /***/ }),
 
@@ -16953,24 +17496,24 @@ module.exports = JSON.parse("{\"_from\":\"axios@^0.19.0\",\"_id\":\"axios@0.19.0
   !*** ../node_modules/contentful-sdk-core/dist/index.es-modules.js ***!
   \********************************************************************/
 /*! exports provided: createHttpClient, createRequestConfig, enforceObjPath, freezeSys, getUserAgentHeader, toPlainObject */
-/***/ (function(module, __webpack_exports__, __nested_webpack_require_67484__) {
+/***/ (function(module, __webpack_exports__, __nested_webpack_require_70364__) {
 
 "use strict";
-__nested_webpack_require_67484__.r(__webpack_exports__);
-/* harmony export (binding) */ __nested_webpack_require_67484__.d(__webpack_exports__, "createHttpClient", function() { return createHttpClient; });
-/* harmony export (binding) */ __nested_webpack_require_67484__.d(__webpack_exports__, "createRequestConfig", function() { return createRequestConfig; });
-/* harmony export (binding) */ __nested_webpack_require_67484__.d(__webpack_exports__, "enforceObjPath", function() { return enforceObjPath; });
-/* harmony export (binding) */ __nested_webpack_require_67484__.d(__webpack_exports__, "freezeSys", function() { return freezeSys; });
-/* harmony export (binding) */ __nested_webpack_require_67484__.d(__webpack_exports__, "getUserAgentHeader", function() { return getUserAgentHeader; });
-/* harmony export (binding) */ __nested_webpack_require_67484__.d(__webpack_exports__, "toPlainObject", function() { return toPlainObject; });
-/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__ = __nested_webpack_require_67484__(/*! lodash/cloneDeep */ "../node_modules/lodash/cloneDeep.js");
-/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__nested_webpack_require_67484__.n(lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__);
-/* harmony import */ var qs__WEBPACK_IMPORTED_MODULE_1__ = __nested_webpack_require_67484__(/*! qs */ "../node_modules/qs/lib/index.js");
-/* harmony import */ var qs__WEBPACK_IMPORTED_MODULE_1___default = /*#__PURE__*/__nested_webpack_require_67484__.n(qs__WEBPACK_IMPORTED_MODULE_1__);
-/* harmony import */ var lodash_isPlainObject__WEBPACK_IMPORTED_MODULE_2__ = __nested_webpack_require_67484__(/*! lodash/isPlainObject */ "../node_modules/lodash/isPlainObject.js");
-/* harmony import */ var lodash_isPlainObject__WEBPACK_IMPORTED_MODULE_2___default = /*#__PURE__*/__nested_webpack_require_67484__.n(lodash_isPlainObject__WEBPACK_IMPORTED_MODULE_2__);
-/* harmony import */ var os__WEBPACK_IMPORTED_MODULE_3__ = __nested_webpack_require_67484__(/*! os */ "os");
-/* harmony import */ var os__WEBPACK_IMPORTED_MODULE_3___default = /*#__PURE__*/__nested_webpack_require_67484__.n(os__WEBPACK_IMPORTED_MODULE_3__);
+__nested_webpack_require_70364__.r(__webpack_exports__);
+/* harmony export (binding) */ __nested_webpack_require_70364__.d(__webpack_exports__, "createHttpClient", function() { return createHttpClient; });
+/* harmony export (binding) */ __nested_webpack_require_70364__.d(__webpack_exports__, "createRequestConfig", function() { return createRequestConfig; });
+/* harmony export (binding) */ __nested_webpack_require_70364__.d(__webpack_exports__, "enforceObjPath", function() { return enforceObjPath; });
+/* harmony export (binding) */ __nested_webpack_require_70364__.d(__webpack_exports__, "freezeSys", function() { return freezeSys; });
+/* harmony export (binding) */ __nested_webpack_require_70364__.d(__webpack_exports__, "getUserAgentHeader", function() { return getUserAgentHeader; });
+/* harmony export (binding) */ __nested_webpack_require_70364__.d(__webpack_exports__, "toPlainObject", function() { return toPlainObject; });
+/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__ = __nested_webpack_require_70364__(/*! lodash/cloneDeep */ "../node_modules/lodash/cloneDeep.js");
+/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__nested_webpack_require_70364__.n(lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__);
+/* harmony import */ var qs__WEBPACK_IMPORTED_MODULE_1__ = __nested_webpack_require_70364__(/*! qs */ "../node_modules/qs/lib/index.js");
+/* harmony import */ var qs__WEBPACK_IMPORTED_MODULE_1___default = /*#__PURE__*/__nested_webpack_require_70364__.n(qs__WEBPACK_IMPORTED_MODULE_1__);
+/* harmony import */ var lodash_isPlainObject__WEBPACK_IMPORTED_MODULE_2__ = __nested_webpack_require_70364__(/*! lodash/isPlainObject */ "../node_modules/lodash/isPlainObject.js");
+/* harmony import */ var lodash_isPlainObject__WEBPACK_IMPORTED_MODULE_2___default = /*#__PURE__*/__nested_webpack_require_70364__.n(lodash_isPlainObject__WEBPACK_IMPORTED_MODULE_2__);
+/* harmony import */ var os__WEBPACK_IMPORTED_MODULE_3__ = __nested_webpack_require_70364__(/*! os */ "os");
+/* harmony import */ var os__WEBPACK_IMPORTED_MODULE_3___default = /*#__PURE__*/__nested_webpack_require_70364__.n(os__WEBPACK_IMPORTED_MODULE_3__);
 
 
 
@@ -17010,13 +17553,13 @@ function _objectSpread2(target) {
     var source = arguments[i] != null ? arguments[i] : {};
 
     if (i % 2) {
-      ownKeys(source, true).forEach(function (key) {
+      ownKeys(Object(source), true).forEach(function (key) {
         _defineProperty(target, key, source[key]);
       });
     } else if (Object.getOwnPropertyDescriptors) {
       Object.defineProperties(target, Object.getOwnPropertyDescriptors(source));
     } else {
-      ownKeys(source).forEach(function (key) {
+      ownKeys(Object(source)).forEach(function (key) {
         Object.defineProperty(target, key, Object.getOwnPropertyDescriptor(source, key));
       });
     }
@@ -17026,7 +17569,7 @@ function _objectSpread2(target) {
 }
 
 function _slicedToArray(arr, i) {
-  return _arrayWithHoles(arr) || _iterableToArrayLimit(arr, i) || _nonIterableRest();
+  return _arrayWithHoles(arr) || _iterableToArrayLimit(arr, i) || _unsupportedIterableToArray(arr, i) || _nonIterableRest();
 }
 
 function _arrayWithHoles(arr) {
@@ -17034,10 +17577,7 @@ function _arrayWithHoles(arr) {
 }
 
 function _iterableToArrayLimit(arr, i) {
-  if (!(Symbol.iterator in Object(arr) || Object.prototype.toString.call(arr) === "[object Arguments]")) {
-    return;
-  }
-
+  if (typeof Symbol === "undefined" || !(Symbol.iterator in Object(arr))) return;
   var _arr = [];
   var _n = true;
   var _d = false;
@@ -17063,25 +17603,40 @@ function _iterableToArrayLimit(arr, i) {
   return _arr;
 }
 
+function _unsupportedIterableToArray(o, minLen) {
+  if (!o) return;
+  if (typeof o === "string") return _arrayLikeToArray(o, minLen);
+  var n = Object.prototype.toString.call(o).slice(8, -1);
+  if (n === "Object" && o.constructor) n = o.constructor.name;
+  if (n === "Map" || n === "Set") return Array.from(n);
+  if (n === "Arguments" || /^(?:Ui|I)nt(?:8|16|32)(?:Clamped)?Array$/.test(n)) return _arrayLikeToArray(o, minLen);
+}
+
+function _arrayLikeToArray(arr, len) {
+  if (len == null || len > arr.length) len = arr.length;
+
+  for (var i = 0, arr2 = new Array(len); i < len; i++) arr2[i] = arr[i];
+
+  return arr2;
+}
+
 function _nonIterableRest() {
-  throw new TypeError("Invalid attempt to destructure non-iterable instance");
+  throw new TypeError("Invalid attempt to destructure non-iterable instance.\nIn order to be iterable, non-array objects must have a [Symbol.iterator]() method.");
 }
 
 var attempts = {};
-var defaultsByInstance = new Map();
 var networkErrorAttempts = 0;
-function rateLimit(instance, defaults) {
-  var maxRetry = arguments.length > 2 && arguments[2] !== undefined ? arguments[2] : 5;
-  defaultsByInstance.set(instance, defaults);
-  var instanceDefaults = defaultsByInstance.get(instance);
-  var _instanceDefaults$res = instanceDefaults.responseLogger,
-      responseLogger = _instanceDefaults$res === void 0 ? function () {
+function rateLimit(instance) {
+  var maxRetry = arguments.length > 1 && arguments[1] !== undefined ? arguments[1] : 5;
+  var _instance$defaults = instance.defaults,
+      _instance$defaults$re = _instance$defaults.responseLogger,
+      responseLogger = _instance$defaults$re === void 0 ? function () {
     return undefined;
-  } : _instanceDefaults$res,
-      _instanceDefaults$req = instanceDefaults.requestLogger,
-      requestLogger = _instanceDefaults$req === void 0 ? function () {
+  } : _instance$defaults$re,
+      _instance$defaults$re2 = _instance$defaults.requestLogger,
+      requestLogger = _instance$defaults$re2 === void 0 ? function () {
     return undefined;
-  } : _instanceDefaults$req;
+  } : _instance$defaults$re2;
   instance.interceptors.request.use(function (config) {
     requestLogger(config);
     return config;
@@ -17096,7 +17651,7 @@ function rateLimit(instance, defaults) {
     var response = error.response,
         config = error.config; // Do not retry if it is disabled or no request config exists (not an axios error)
 
-    if (!config || !instanceDefaults.retryOnError) {
+    if (!config || !instance.defaults.retryOnError) {
       return Promise.reject(error);
     }
 
@@ -17150,7 +17705,7 @@ function rateLimit(instance, defaults) {
     if (retryErrorType) {
       // convert to ms and add jitter
       wait = Math.floor(wait * 1000 + Math.random() * 200 + 500);
-      instanceDefaults.logHandler('warning', "".concat(retryErrorType, " error occurred. Waiting for ").concat(wait, " ms before retrying..."));
+      instance.defaults.logHandler('warning', "".concat(retryErrorType, " error occurred. Waiting for ").concat(wait, " ms before retrying..."));
       /* Somehow between the interceptor and retrying the request the httpAgent/httpsAgent gets transformed from an Agent-like object
          to a regular object, causing failures on retries after rate limits. Removing these properties here fixes the error, but retry
          requests still use the original http/httpsAgent property */
@@ -17177,12 +17732,12 @@ function isNode() {
   return typeof process !== 'undefined' && !process.browser;
 }
 function getNodeVersion() {
-  return process.versions.node ? "v".concat(process.versions.node) : process.version;
+  return process.versions && process.versions.node ? "v".concat(process.versions.node) : process.version;
 }
 
 // Also enforces toplevel domain specified, no spaces and no protocol
 
-var HOST_REGEX = /^(?!\w+:\/\/)([^\s:]+\.[^\s:]+)(?::(\d+))?(?!:)$/;
+var HOST_REGEX = /^(?!\w+:\/\/)([^\s:]+\.?[^\s:]+)(?::(\d+))?(?!:)$/;
 /**
  * Create pre configured axios instance
  * @private
@@ -17245,7 +17800,7 @@ function createHttpClient(axios, options) {
   var hostname = config.defaultHostname;
   var port = config.insecure ? 80 : 443;
 
-  if (HOST_REGEX.test(config.host)) {
+  if (config.host && HOST_REGEX.test(config.host)) {
     var parsed = config.host.split(':');
 
     if (parsed.length === 2) {
@@ -17311,7 +17866,7 @@ function createHttpClient(axios, options) {
     return createHttpClient(axios, _objectSpread2({}, lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0___default()(options), {}, newParams));
   };
 
-  rateLimit(instance, axiosOptions, config.retryLimit);
+  rateLimit(instance, config.retryLimit);
   return instance;
 }
 
@@ -17479,7 +18034,7 @@ function toPlainObject(data) {
   !*** ../node_modules/debug/src/browser.js ***!
   \********************************************/
 /*! no static exports found */
-/***/ (function(module, exports, __nested_webpack_require_84965__) {
+/***/ (function(module, exports, __nested_webpack_require_88488__) {
 
 /**
  * This is the web browser implementation of `debug()`.
@@ -17487,7 +18042,7 @@ function toPlainObject(data) {
  * Expose `debug()` as the module.
  */
 
-exports = module.exports = __nested_webpack_require_84965__(/*! ./debug */ "../node_modules/debug/src/debug.js");
+exports = module.exports = __nested_webpack_require_88488__(/*! ./debug */ "../node_modules/debug/src/debug.js");
 exports.log = log;
 exports.formatArgs = formatArgs;
 exports.save = save;
@@ -17685,7 +18240,7 @@ function localstorage() {
   !*** ../node_modules/debug/src/debug.js ***!
   \******************************************/
 /*! no static exports found */
-/***/ (function(module, exports, __nested_webpack_require_91014__) {
+/***/ (function(module, exports, __nested_webpack_require_94537__) {
 
 
 /**
@@ -17700,7 +18255,7 @@ exports.coerce = coerce;
 exports.disable = disable;
 exports.enable = enable;
 exports.enabled = enabled;
-exports.humanize = __nested_webpack_require_91014__(/*! ms */ "../node_modules/ms/index.js");
+exports.humanize = __nested_webpack_require_94537__(/*! ms */ "../node_modules/ms/index.js");
 
 /**
  * Active `debug` instances.
@@ -17921,7 +18476,7 @@ function coerce(val) {
   !*** ../node_modules/debug/src/index.js ***!
   \******************************************/
 /*! no static exports found */
-/***/ (function(module, exports, __nested_webpack_require_96238__) {
+/***/ (function(module, exports, __nested_webpack_require_99761__) {
 
 /**
  * Detect Electron renderer process, which is node, but we should
@@ -17929,9 +18484,9 @@ function coerce(val) {
  */
 
 if (typeof process === 'undefined' || process.type === 'renderer') {
-  module.exports = __nested_webpack_require_96238__(/*! ./browser.js */ "../node_modules/debug/src/browser.js");
+  module.exports = __nested_webpack_require_99761__(/*! ./browser.js */ "../node_modules/debug/src/browser.js");
 } else {
-  module.exports = __nested_webpack_require_96238__(/*! ./node.js */ "../node_modules/debug/src/node.js");
+  module.exports = __nested_webpack_require_99761__(/*! ./node.js */ "../node_modules/debug/src/node.js");
 }
 
 
@@ -17942,14 +18497,14 @@ if (typeof process === 'undefined' || process.type === 'renderer') {
   !*** ../node_modules/debug/src/node.js ***!
   \*****************************************/
 /*! no static exports found */
-/***/ (function(module, exports, __nested_webpack_require_96894__) {
+/***/ (function(module, exports, __nested_webpack_require_100417__) {
 
 /**
  * Module dependencies.
  */
 
-var tty = __nested_webpack_require_96894__(/*! tty */ "tty");
-var util = __nested_webpack_require_96894__(/*! util */ "util");
+var tty = __nested_webpack_require_100417__(/*! tty */ "tty");
+var util = __nested_webpack_require_100417__(/*! util */ "util");
 
 /**
  * This is the Node.js implementation of `debug()`.
@@ -17957,7 +18512,7 @@ var util = __nested_webpack_require_96894__(/*! util */ "util");
  * Expose `debug()` as the module.
  */
 
-exports = module.exports = __nested_webpack_require_96894__(/*! ./debug */ "../node_modules/debug/src/debug.js");
+exports = module.exports = __nested_webpack_require_100417__(/*! ./debug */ "../node_modules/debug/src/debug.js");
 exports.init = init;
 exports.log = log;
 exports.formatArgs = formatArgs;
@@ -17972,7 +18527,7 @@ exports.useColors = useColors;
 exports.colors = [ 6, 2, 3, 4, 5, 1 ];
 
 try {
-  var supportsColor = __nested_webpack_require_96894__(/*! supports-color */ "../node_modules/supports-color/index.js");
+  var supportsColor = __nested_webpack_require_100417__(/*! supports-color */ "../node_modules/supports-color/index.js");
   if (supportsColor && supportsColor.level >= 2) {
     exports.colors = [
       20, 21, 26, 27, 32, 33, 38, 39, 40, 41, 42, 43, 44, 45, 56, 57, 62, 63, 68,
@@ -18139,14 +18694,14 @@ exports.enable(load());
   !*** ../node_modules/follow-redirects/index.js ***!
   \*************************************************/
 /*! no static exports found */
-/***/ (function(module, exports, __nested_webpack_require_101709__) {
+/***/ (function(module, exports, __nested_webpack_require_105232__) {
 
-var url = __nested_webpack_require_101709__(/*! url */ "url");
-var http = __nested_webpack_require_101709__(/*! http */ "http");
-var https = __nested_webpack_require_101709__(/*! https */ "https");
-var assert = __nested_webpack_require_101709__(/*! assert */ "assert");
-var Writable = __nested_webpack_require_101709__(/*! stream */ "stream").Writable;
-var debug = __nested_webpack_require_101709__(/*! debug */ "../node_modules/debug/src/index.js")("follow-redirects");
+var url = __nested_webpack_require_105232__(/*! url */ "url");
+var http = __nested_webpack_require_105232__(/*! http */ "http");
+var https = __nested_webpack_require_105232__(/*! https */ "https");
+var assert = __nested_webpack_require_105232__(/*! assert */ "assert");
+var Writable = __nested_webpack_require_105232__(/*! stream */ "stream").Writable;
+var debug = __nested_webpack_require_105232__(/*! debug */ "../node_modules/debug/src/index.js")("follow-redirects");
 
 // RFC7231§4.2.1: Of the request methods defined by this specification,
 // the GET, HEAD, OPTIONS, and TRACE methods are defined to be safe.
@@ -18467,40 +19022,18 @@ module.exports.wrap = wrap;
 
 /***/ }),
 
-/***/ "../node_modules/is-buffer/index.js":
-/*!******************************************!*\
-  !*** ../node_modules/is-buffer/index.js ***!
-  \******************************************/
-/*! no static exports found */
-/***/ (function(module, exports) {
-
-/*!
- * Determine if an object is a Buffer
- *
- * @author   Feross Aboukhadijeh <https://feross.org>
- * @license  MIT
- */
-
-module.exports = function isBuffer (obj) {
-  return obj != null && obj.constructor != null &&
-    typeof obj.constructor.isBuffer === 'function' && obj.constructor.isBuffer(obj)
-}
-
-
-/***/ }),
-
 /***/ "../node_modules/lodash/_Hash.js":
 /*!***************************************!*\
   !*** ../node_modules/lodash/_Hash.js ***!
   \***************************************/
 /*! no static exports found */
-/***/ (function(module, exports, __nested_webpack_require_113285__) {
+/***/ (function(module, exports, __nested_webpack_require_116240__) {
 
-var hashClear = __nested_webpack_require_113285__(/*! ./_hashClear */ "../node_modules/lodash/_hashClear.js"),
-    hashDelete = __nested_webpack_require_113285__(/*! ./_hashDelete */ "../node_modules/lodash/_hashDelete.js"),
-    hashGet = __nested_webpack_require_113285__(/*! ./_hashGet */ "../node_modules/lodash/_hashGet.js"),
-    hashHas = __nested_webpack_require_113285__(/*! ./_hashHas */ "../node_modules/lodash/_hashHas.js"),
-    hashSet = __nested_webpack_require_113285__(/*! ./_hashSet */ "../node_modules/lodash/_hashSet.js");
+var hashClear = __nested_webpack_require_116240__(/*! ./_hashClear */ "../node_modules/lodash/_hashClear.js"),
+    hashDelete = __nested_webpack_require_116240__(/*! ./_hashDelete */ "../node_modules/lodash/_hashDelete.js"),
+    hashGet = __nested_webpack_require_116240__(/*! ./_hashGet */ "../node_modules/lodash/_hashGet.js"),
+    hashHas = __nested_webpack_require_116240__(/*! ./_hashHas */ "../node_modules/lodash/_hashHas.js"),
+    hashSet = __nested_webpack_require_116240__(/*! ./_hashSet */ "../node_modules/lodash/_hashSet.js");
 
 /**
  * Creates a hash object.
@@ -18537,13 +19070,13 @@ module.exports = Hash;
   !*** ../node_modules/lodash/_ListCache.js ***!
   \********************************************/
 /*! no static exports found */
-/***/ (function(module, exports, __nested_webpack_require_114603__) {
+/***/ (function(module, exports, __nested_webpack_require_117558__) {
 
-var listCacheClear = __nested_webpack_require_114603__(/*! ./_listCacheClear */ "../node_modules/lodash/_listCacheClear.js"),
-    listCacheDelete = __nested_webpack_require_114603__(/*! ./_listCacheDelete */ "../node_modules/lodash/_listCacheDelete.js"),
-    listCacheGet = __nested_webpack_require_114603__(/*! ./_listCacheGet */ "../node_modules/lodash/_listCacheGet.js"),
-    listCacheHas = __nested_webpack_require_114603__(/*! ./_listCacheHas */ "../node_modules/lodash/_listCacheHas.js"),
-    listCacheSet = __nested_webpack_require_114603__(/*! ./_listCacheSet */ "../node_modules/lodash/_listCacheSet.js");
+var listCacheClear = __nested_webpack_require_117558__(/*! ./_listCacheClear */ "../node_modules/lodash/_listCacheClear.js"),
+    listCacheDelete = __nested_webpack_require_117558__(/*! ./_listCacheDelete */ "../node_modules/lodash/_listCacheDelete.js"),
+    listCacheGet = __nested_webpack_require_117558__(/*! ./_listCacheGet */ "../node_modules/lodash/_listCacheGet.js"),
+    listCacheHas = __nested_webpack_require_117558__(/*! ./_listCacheHas */ "../node_modules/lodash/_listCacheHas.js"),
+    listCacheSet = __nested_webpack_require_117558__(/*! ./_listCacheSet */ "../node_modules/lodash/_listCacheSet.js");
 
 /**
  * Creates an list cache object.
@@ -18580,10 +19113,10 @@ module.exports = ListCache;
   !*** ../node_modules/lodash/_Map.js ***!
   \**************************************/
 /*! no static exports found */
-/***/ (function(module, exports, __nested_webpack_require_116044__) {
+/***/ (function(module, exports, __nested_webpack_require_118999__) {
 
-var getNative = __nested_webpack_require_116044__(/*! ./_getNative */ "../node_modules/lodash/_getNative.js"),
-    root = __nested_webpack_require_116044__(/*! ./_root */ "../node_modules/lodash/_root.js");
+var getNative = __nested_webpack_require_118999__(/*! ./_getNative */ "../node_modules/lodash/_getNative.js"),
+    root = __nested_webpack_require_118999__(/*! ./_root */ "../node_modules/lodash/_root.js");
 
 /* Built-in method references that are verified to be native. */
 var Map = getNative(root, 'Map');
@@ -18598,13 +19131,13 @@ module.exports = Map;
   !*** ../node_modules/lodash/_MapCache.js ***!
   \*******************************************/
 /*! no static exports found */
-/***/ (function(module, exports, __nested_webpack_require_116638__) {
+/***/ (function(module, exports, __nested_webpack_require_119593__) {
 
-var mapCacheClear = __nested_webpack_require_116638__(/*! ./_mapCacheClear */ "../node_modules/lodash/_mapCacheClear.js"),
-    mapCacheDelete = __nested_webpack_require_116638__(/*! ./_mapCacheDelete */ "../node_modules/lodash/_mapCacheDelete.js"),
-    mapCacheGet = __nested_webpack_require_116638__(/*! ./_mapCacheGet */ "../node_modules/lodash/_mapCacheGet.js"),
-    mapCacheHas = __nested_webpack_require_116638__(/*! ./_mapCacheHas */ "../node_modules/lodash/_mapCacheHas.js"),
-    mapCacheSet = __nested_webpack_require_116638__(/*! ./_mapCacheSet */ "../node_modules/lodash/_mapCacheSet.js");
+var mapCacheClear = __nested_webpack_require_119593__(/*! ./_mapCacheClear */ "../node_modules/lodash/_mapCacheClear.js"),
+    mapCacheDelete = __nested_webpack_require_119593__(/*! ./_mapCacheDelete */ "../node_modules/lodash/_mapCacheDelete.js"),
+    mapCacheGet = __nested_webpack_require_119593__(/*! ./_mapCacheGet */ "../node_modules/lodash/_mapCacheGet.js"),
+    mapCacheHas = __nested_webpack_require_119593__(/*! ./_mapCacheHas */ "../node_modules/lodash/_mapCacheHas.js"),
+    mapCacheSet = __nested_webpack_require_119593__(/*! ./_mapCacheSet */ "../node_modules/lodash/_mapCacheSet.js");
 
 /**
  * Creates a map cache object to store key-value pairs.
@@ -18641,14 +19174,14 @@ module.exports = MapCache;
   !*** ../node_modules/lodash/_Stack.js ***!
   \****************************************/
 /*! no static exports found */
-/***/ (function(module, exports, __nested_webpack_require_118082__) {
+/***/ (function(module, exports, __nested_webpack_require_121037__) {
 
-var ListCache = __nested_webpack_require_118082__(/*! ./_ListCache */ "../node_modules/lodash/_ListCache.js"),
-    stackClear = __nested_webpack_require_118082__(/*! ./_stackClear */ "../node_modules/lodash/_stackClear.js"),
-    stackDelete = __nested_webpack_require_118082__(/*! ./_stackDelete */ "../node_modules/lodash/_stackDelete.js"),
-    stackGet = __nested_webpack_require_118082__(/*! ./_stackGet */ "../node_modules/lodash/_stackGet.js"),
-    stackHas = __nested_webpack_require_118082__(/*! ./_stackHas */ "../node_modules/lodash/_stackHas.js"),
-    stackSet = __nested_webpack_require_118082__(/*! ./_stackSet */ "../node_modules/lodash/_stackSet.js");
+var ListCache = __nested_webpack_require_121037__(/*! ./_ListCache */ "../node_modules/lodash/_ListCache.js"),
+    stackClear = __nested_webpack_require_121037__(/*! ./_stackClear */ "../node_modules/lodash/_stackClear.js"),
+    stackDelete = __nested_webpack_require_121037__(/*! ./_stackDelete */ "../node_modules/lodash/_stackDelete.js"),
+    stackGet = __nested_webpack_require_121037__(/*! ./_stackGet */ "../node_modules/lodash/_stackGet.js"),
+    stackHas = __nested_webpack_require_121037__(/*! ./_stackHas */ "../node_modules/lodash/_stackHas.js"),
+    stackSet = __nested_webpack_require_121037__(/*! ./_stackSet */ "../node_modules/lodash/_stackSet.js");
 
 /**
  * Creates a stack cache object to store key-value pairs.
@@ -18712,10 +19245,10 @@ module.exports = arrayEach;
   !*** ../node_modules/lodash/_assignValue.js ***!
   \**********************************************/
 /*! no static exports found */
-/***/ (function(module, exports, __nested_webpack_require_120268__) {
+/***/ (function(module, exports, __nested_webpack_require_123223__) {
 
-var baseAssignValue = __nested_webpack_require_120268__(/*! ./_baseAssignValue */ "../node_modules/lodash/_baseAssignValue.js"),
-    eq = __nested_webpack_require_120268__(/*! ./eq */ "../node_modules/lodash/eq.js");
+var baseAssignValue = __nested_webpack_require_123223__(/*! ./_baseAssignValue */ "../node_modules/lodash/_baseAssignValue.js"),
+    eq = __nested_webpack_require_123223__(/*! ./eq */ "../node_modules/lodash/eq.js");
 
 /** Used for built-in method references. */
 var objectProto = Object.prototype;
@@ -18751,9 +19284,9 @@ module.exports = assignValue;
   !*** ../node_modules/lodash/_assocIndexOf.js ***!
   \***********************************************/
 /*! no static exports found */
-/***/ (function(module, exports, __nested_webpack_require_121585__) {
+/***/ (function(module, exports, __nested_webpack_require_124540__) {
 
-var eq = __nested_webpack_require_121585__(/*! ./eq */ "../node_modules/lodash/eq.js");
+var eq = __nested_webpack_require_124540__(/*! ./eq */ "../node_modules/lodash/eq.js");
 
 /**
  * Gets the index at which the `key` is found in `array` of key-value pairs.
@@ -18783,10 +19316,10 @@ module.exports = assocIndexOf;
   !*** ../node_modules/lodash/_baseAssign.js ***!
   \*********************************************/
 /*! no static exports found */
-/***/ (function(module, exports, __nested_webpack_require_122420__) {
+/***/ (function(module, exports, __nested_webpack_require_125375__) {
 
-var copyObject = __nested_webpack_require_122420__(/*! ./_copyObject */ "../node_modules/lodash/_copyObject.js"),
-    keys = __nested_webpack_require_122420__(/*! ./keys */ "../node_modules/lodash/keys.js");
+var copyObject = __nested_webpack_require_125375__(/*! ./_copyObject */ "../node_modules/lodash/_copyObject.js"),
+    keys = __nested_webpack_require_125375__(/*! ./keys */ "../node_modules/lodash/keys.js");
 
 /**
  * The base implementation of `_.assign` without support for multiple sources
@@ -18811,10 +19344,10 @@ module.exports = baseAssign;
   !*** ../node_modules/lodash/_baseAssignIn.js ***!
   \***********************************************/
 /*! no static exports found */
-/***/ (function(module, exports, __nested_webpack_require_123305__) {
+/***/ (function(module, exports, __nested_webpack_require_126260__) {
 
-var copyObject = __nested_webpack_require_123305__(/*! ./_copyObject */ "../node_modules/lodash/_copyObject.js"),
-    keysIn = __nested_webpack_require_123305__(/*! ./keysIn */ "../node_modules/lodash/keysIn.js");
+var copyObject = __nested_webpack_require_126260__(/*! ./_copyObject */ "../node_modules/lodash/_copyObject.js"),
+    keysIn = __nested_webpack_require_126260__(/*! ./keysIn */ "../node_modules/lodash/keysIn.js");
 
 /**
  * The base implementation of `_.assignIn` without support for multiple sources
@@ -18839,9 +19372,9 @@ module.exports = baseAssignIn;
   !*** ../node_modules/lodash/_baseAssignValue.js ***!
   \**************************************************/
 /*! no static exports found */
-/***/ (function(module, exports, __nested_webpack_require_124216__) {
+/***/ (function(module, exports, __nested_webpack_require_127171__) {
 
-var defineProperty = __nested_webpack_require_124216__(/*! ./_defineProperty */ "../node_modules/lodash/_defineProperty.js");
+var defineProperty = __nested_webpack_require_127171__(/*! ./_defineProperty */ "../node_modules/lodash/_defineProperty.js");
 
 /**
  * The base implementation of `assignValue` and `assignMergeValue` without
@@ -18875,29 +19408,29 @@ module.exports = baseAssignValue;
   !*** ../node_modules/lodash/_baseClone.js ***!
   \********************************************/
 /*! no static exports found */
-/***/ (function(module, exports, __nested_webpack_require_125198__) {
+/***/ (function(module, exports, __nested_webpack_require_128153__) {
 
-var Stack = __nested_webpack_require_125198__(/*! ./_Stack */ "../node_modules/lodash/_Stack.js"),
-    arrayEach = __nested_webpack_require_125198__(/*! ./_arrayEach */ "../node_modules/lodash/_arrayEach.js"),
-    assignValue = __nested_webpack_require_125198__(/*! ./_assignValue */ "../node_modules/lodash/_assignValue.js"),
-    baseAssign = __nested_webpack_require_125198__(/*! ./_baseAssign */ "../node_modules/lodash/_baseAssign.js"),
-    baseAssignIn = __nested_webpack_require_125198__(/*! ./_baseAssignIn */ "../node_modules/lodash/_baseAssignIn.js"),
-    cloneBuffer = __nested_webpack_require_125198__(/*! ./_cloneBuffer */ "../node_modules/lodash/_cloneBuffer.js"),
-    copyArray = __nested_webpack_require_125198__(/*! ./_copyArray */ "../node_modules/lodash/_copyArray.js"),
-    copySymbols = __nested_webpack_require_125198__(/*! ./_copySymbols */ "../node_modules/lodash/_copySymbols.js"),
-    copySymbolsIn = __nested_webpack_require_125198__(/*! ./_copySymbolsIn */ "../node_modules/lodash/_copySymbolsIn.js"),
-    getAllKeys = __nested_webpack_require_125198__(/*! ./_getAllKeys */ "../node_modules/lodash/_getAllKeys.js"),
-    getAllKeysIn = __nested_webpack_require_125198__(/*! ./_getAllKeysIn */ "../node_modules/lodash/_getAllKeysIn.js"),
-    getTag = __nested_webpack_require_125198__(/*! ./_getTag */ "../node_modules/lodash/_getTag.js"),
-    initCloneArray = __nested_webpack_require_125198__(/*! ./_initCloneArray */ "../node_modules/lodash/_initCloneArray.js"),
-    initCloneByTag = __nested_webpack_require_125198__(/*! ./_initCloneByTag */ "../node_modules/lodash/_initCloneByTag.js"),
-    initCloneObject = __nested_webpack_require_125198__(/*! ./_initCloneObject */ "../node_modules/lodash/_initCloneObject.js"),
-    isArray = __nested_webpack_require_125198__(/*! ./isArray */ "../node_modules/lodash/isArray.js"),
-    isBuffer = __nested_webpack_require_125198__(/*! ./isBuffer */ "../node_modules/lodash/isBuffer.js"),
-    isMap = __nested_webpack_require_125198__(/*! ./isMap */ "../node_modules/lodash/isMap.js"),
-    isObject = __nested_webpack_require_125198__(/*! ./isObject */ "../node_modules/lodash/isObject.js"),
-    isSet = __nested_webpack_require_125198__(/*! ./isSet */ "../node_modules/lodash/isSet.js"),
-    keys = __nested_webpack_require_125198__(/*! ./keys */ "../node_modules/lodash/keys.js");
+var Stack = __nested_webpack_require_128153__(/*! ./_Stack */ "../node_modules/lodash/_Stack.js"),
+    arrayEach = __nested_webpack_require_128153__(/*! ./_arrayEach */ "../node_modules/lodash/_arrayEach.js"),
+    assignValue = __nested_webpack_require_128153__(/*! ./_assignValue */ "../node_modules/lodash/_assignValue.js"),
+    baseAssign = __nested_webpack_require_128153__(/*! ./_baseAssign */ "../node_modules/lodash/_baseAssign.js"),
+    baseAssignIn = __nested_webpack_require_128153__(/*! ./_baseAssignIn */ "../node_modules/lodash/_baseAssignIn.js"),
+    cloneBuffer = __nested_webpack_require_128153__(/*! ./_cloneBuffer */ "../node_modules/lodash/_cloneBuffer.js"),
+    copyArray = __nested_webpack_require_128153__(/*! ./_copyArray */ "../node_modules/lodash/_copyArray.js"),
+    copySymbols = __nested_webpack_require_128153__(/*! ./_copySymbols */ "../node_modules/lodash/_copySymbols.js"),
+    copySymbolsIn = __nested_webpack_require_128153__(/*! ./_copySymbolsIn */ "../node_modules/lodash/_copySymbolsIn.js"),
+    getAllKeys = __nested_webpack_require_128153__(/*! ./_getAllKeys */ "../node_modules/lodash/_getAllKeys.js"),
+    getAllKeysIn = __nested_webpack_require_128153__(/*! ./_getAllKeysIn */ "../node_modules/lodash/_getAllKeysIn.js"),
+    getTag = __nested_webpack_require_128153__(/*! ./_getTag */ "../node_modules/lodash/_getTag.js"),
+    initCloneArray = __nested_webpack_require_128153__(/*! ./_initCloneArray */ "../node_modules/lodash/_initCloneArray.js"),
+    initCloneByTag = __nested_webpack_require_128153__(/*! ./_initCloneByTag */ "../node_modules/lodash/_initCloneByTag.js"),
+    initCloneObject = __nested_webpack_require_128153__(/*! ./_initCloneObject */ "../node_modules/lodash/_initCloneObject.js"),
+    isArray = __nested_webpack_require_128153__(/*! ./isArray */ "../node_modules/lodash/isArray.js"),
+    isBuffer = __nested_webpack_require_128153__(/*! ./isBuffer */ "../node_modules/lodash/isBuffer.js"),
+    isMap = __nested_webpack_require_128153__(/*! ./isMap */ "../node_modules/lodash/isMap.js"),
+    isObject = __nested_webpack_require_128153__(/*! ./isObject */ "../node_modules/lodash/isObject.js"),
+    isSet = __nested_webpack_require_128153__(/*! ./isSet */ "../node_modules/lodash/isSet.js"),
+    keys = __nested_webpack_require_128153__(/*! ./keys */ "../node_modules/lodash/keys.js");
 
 /** Used to compose bitmasks for cloning. */
 var CLONE_DEEP_FLAG = 1,
@@ -19051,9 +19584,9 @@ module.exports = baseClone;
   !*** ../node_modules/lodash/_baseCreate.js ***!
   \*********************************************/
 /*! no static exports found */
-/***/ (function(module, exports, __nested_webpack_require_132253__) {
+/***/ (function(module, exports, __nested_webpack_require_135208__) {
 
-var isObject = __nested_webpack_require_132253__(/*! ./isObject */ "../node_modules/lodash/isObject.js");
+var isObject = __nested_webpack_require_135208__(/*! ./isObject */ "../node_modules/lodash/isObject.js");
 
 /** Built-in value references. */
 var objectCreate = Object.create;
@@ -19083,6 +19616,30 @@ var baseCreate = (function() {
 }());
 
 module.exports = baseCreate;
+
+
+/***/ }),
+
+/***/ "../node_modules/lodash/_baseGet.js":
+/*!******************************************!*\
+  !*** ../node_modules/lodash/_baseGet.js ***!
+  \******************************************/
+/*! no static exports found */
+/***/ (function(module, exports) {
+
+/**
+ * Gets the value at `key` of `object`.
+ *
+ * @private
+ * @param {Object} [object] The object to query.
+ * @param {string} key The key of the property to get.
+ * @returns {*} Returns the property value.
+ */
+function getValue(object, key) {
+  return object == null ? undefined : object[key];
+}
+
+module.exports = getValue;
 
 
 /***/ }),
@@ -19125,9 +19682,9 @@ module.exports = objectToString;
   !*** ../node_modules/lodash/_cloneBuffer.js ***!
   \**********************************************/
 /*! no static exports found */
-/***/ (function(module, exports, __nested_webpack_require_134141__) {
+/***/ (function(module, exports, __nested_webpack_require_137688__) {
 
-/* WEBPACK VAR INJECTION */(function(module) {var root = __nested_webpack_require_134141__(/*! ./_root */ "../node_modules/lodash/_root.js");
+/* WEBPACK VAR INJECTION */(function(module) {var root = __nested_webpack_require_137688__(/*! ./_root */ "../node_modules/lodash/_root.js");
 
 /** Detect free variable `exports`. */
 var freeExports =   true && exports && !exports.nodeType && exports;
@@ -19163,7 +19720,7 @@ function cloneBuffer(buffer, isDeep) {
 
 module.exports = cloneBuffer;
 
-/* WEBPACK VAR INJECTION */}.call(this, __nested_webpack_require_134141__(/*! ./../webpack/buildin/module.js */ "../node_modules/webpack/buildin/module.js")(module)))
+/* WEBPACK VAR INJECTION */}.call(this, __nested_webpack_require_137688__(/*! ./../webpack/buildin/module.js */ "../node_modules/webpack/buildin/module.js")(module)))
 
 /***/ }),
 
@@ -19203,10 +19760,10 @@ module.exports = copyArray;
   !*** ../node_modules/lodash/_copyObject.js ***!
   \*********************************************/
 /*! no static exports found */
-/***/ (function(module, exports, __nested_webpack_require_136455__) {
+/***/ (function(module, exports, __nested_webpack_require_140002__) {
 
-var assignValue = __nested_webpack_require_136455__(/*! ./_assignValue */ "../node_modules/lodash/_assignValue.js"),
-    baseAssignValue = __nested_webpack_require_136455__(/*! ./_baseAssignValue */ "../node_modules/lodash/_baseAssignValue.js");
+var assignValue = __nested_webpack_require_140002__(/*! ./_assignValue */ "../node_modules/lodash/_assignValue.js"),
+    baseAssignValue = __nested_webpack_require_140002__(/*! ./_baseAssignValue */ "../node_modules/lodash/_baseAssignValue.js");
 
 /**
  * Copies properties of `source` to `object`.
@@ -19254,10 +19811,10 @@ module.exports = copyObject;
   !*** ../node_modules/lodash/_copySymbols.js ***!
   \**********************************************/
 /*! no static exports found */
-/***/ (function(module, exports, __nested_webpack_require_137923__) {
+/***/ (function(module, exports, __nested_webpack_require_141470__) {
 
-var copyObject = __nested_webpack_require_137923__(/*! ./_copyObject */ "../node_modules/lodash/_copyObject.js"),
-    getSymbols = __nested_webpack_require_137923__(/*! ./_getSymbols */ "../node_modules/lodash/_getSymbols.js");
+var copyObject = __nested_webpack_require_141470__(/*! ./_copyObject */ "../node_modules/lodash/_copyObject.js"),
+    getSymbols = __nested_webpack_require_141470__(/*! ./_getSymbols */ "../node_modules/lodash/_getSymbols.js");
 
 /**
  * Copies own symbols of `source` to `object`.
@@ -19281,10 +19838,10 @@ module.exports = copySymbols;
   !*** ../node_modules/lodash/_copySymbolsIn.js ***!
   \************************************************/
 /*! no static exports found */
-/***/ (function(module, exports, __nested_webpack_require_138795__) {
+/***/ (function(module, exports, __nested_webpack_require_142342__) {
 
-var copyObject = __nested_webpack_require_138795__(/*! ./_copyObject */ "../node_modules/lodash/_copyObject.js"),
-    getSymbolsIn = __nested_webpack_require_138795__(/*! ./_getSymbolsIn */ "../node_modules/lodash/_getSymbolsIn.js");
+var copyObject = __nested_webpack_require_142342__(/*! ./_copyObject */ "../node_modules/lodash/_copyObject.js"),
+    getSymbolsIn = __nested_webpack_require_142342__(/*! ./_getSymbolsIn */ "../node_modules/lodash/_getSymbolsIn.js");
 
 /**
  * Copies own and inherited symbols of `source` to `object`.
@@ -19308,9 +19865,9 @@ module.exports = copySymbolsIn;
   !*** ../node_modules/lodash/_defineProperty.js ***!
   \*************************************************/
 /*! no static exports found */
-/***/ (function(module, exports, __nested_webpack_require_139697__) {
+/***/ (function(module, exports, __nested_webpack_require_143244__) {
 
-var getNative = __nested_webpack_require_139697__(/*! ./_getNative */ "../node_modules/lodash/_getNative.js");
+var getNative = __nested_webpack_require_143244__(/*! ./_getNative */ "../node_modules/lodash/_getNative.js");
 
 var defineProperty = (function() {
   try {
@@ -19345,9 +19902,9 @@ module.exports = freeGlobal;
   !*** ../node_modules/lodash/_getAllKeys.js ***!
   \*********************************************/
 /*! no static exports found */
-/***/ (function(module, exports, __nested_webpack_require_140738__) {
+/***/ (function(module, exports, __nested_webpack_require_144285__) {
 
-var overArg = __nested_webpack_require_140738__(/*! ./_overArg */ "../node_modules/lodash/_overArg.js");
+var overArg = __nested_webpack_require_144285__(/*! ./_overArg */ "../node_modules/lodash/_overArg.js");
 
 /* Built-in method references for those with the same name as other `lodash` methods. */
 var nativeKeys = overArg(Object.keys, Object);
@@ -19393,9 +19950,9 @@ module.exports = nativeKeysIn;
   !*** ../node_modules/lodash/_getMapData.js ***!
   \*********************************************/
 /*! no static exports found */
-/***/ (function(module, exports, __nested_webpack_require_142073__) {
+/***/ (function(module, exports, __nested_webpack_require_145620__) {
 
-var isKeyable = __nested_webpack_require_142073__(/*! ./_isKeyable */ "../node_modules/lodash/_isKeyable.js");
+var isKeyable = __nested_webpack_require_145620__(/*! ./_isKeyable */ "../node_modules/lodash/_isKeyable.js");
 
 /**
  * Gets the data for `map`.
@@ -19446,9 +20003,9 @@ module.exports = getValue;
   !*** ../node_modules/lodash/_getPrototype.js ***!
   \***********************************************/
 /*! no static exports found */
-/***/ (function(module, exports, __nested_webpack_require_143437__) {
+/***/ (function(module, exports, __nested_webpack_require_146984__) {
 
-var overArg = __nested_webpack_require_143437__(/*! ./_overArg */ "../node_modules/lodash/_overArg.js");
+var overArg = __nested_webpack_require_146984__(/*! ./_overArg */ "../node_modules/lodash/_overArg.js");
 
 /** Built-in value references. */
 var getPrototype = overArg(Object.getPrototypeOf, Object);
@@ -19564,9 +20121,9 @@ module.exports = objectToString;
   !*** ../node_modules/lodash/_hashClear.js ***!
   \********************************************/
 /*! no static exports found */
-/***/ (function(module, exports, __nested_webpack_require_146124__) {
+/***/ (function(module, exports, __nested_webpack_require_149671__) {
 
-var nativeCreate = __nested_webpack_require_146124__(/*! ./_nativeCreate */ "../node_modules/lodash/_nativeCreate.js");
+var nativeCreate = __nested_webpack_require_149671__(/*! ./_nativeCreate */ "../node_modules/lodash/_nativeCreate.js");
 
 /**
  * Removes all key-value entries from the hash.
@@ -19618,9 +20175,9 @@ module.exports = hashDelete;
   !*** ../node_modules/lodash/_hashGet.js ***!
   \******************************************/
 /*! no static exports found */
-/***/ (function(module, exports, __nested_webpack_require_147476__) {
+/***/ (function(module, exports, __nested_webpack_require_151023__) {
 
-var nativeCreate = __nested_webpack_require_147476__(/*! ./_nativeCreate */ "../node_modules/lodash/_nativeCreate.js");
+var nativeCreate = __nested_webpack_require_151023__(/*! ./_nativeCreate */ "../node_modules/lodash/_nativeCreate.js");
 
 /** Used to stand-in for `undefined` hash values. */
 var HASH_UNDEFINED = '__lodash_hash_undefined__';
@@ -19659,9 +20216,9 @@ module.exports = hashGet;
   !*** ../node_modules/lodash/_hashHas.js ***!
   \******************************************/
 /*! no static exports found */
-/***/ (function(module, exports, __nested_webpack_require_148595__) {
+/***/ (function(module, exports, __nested_webpack_require_152142__) {
 
-var nativeCreate = __nested_webpack_require_148595__(/*! ./_nativeCreate */ "../node_modules/lodash/_nativeCreate.js");
+var nativeCreate = __nested_webpack_require_152142__(/*! ./_nativeCreate */ "../node_modules/lodash/_nativeCreate.js");
 
 /** Used for built-in method references. */
 var objectProto = Object.prototype;
@@ -19693,9 +20250,9 @@ module.exports = hashHas;
   !*** ../node_modules/lodash/_hashSet.js ***!
   \******************************************/
 /*! no static exports found */
-/***/ (function(module, exports, __nested_webpack_require_149568__) {
+/***/ (function(module, exports, __nested_webpack_require_153115__) {
 
-var nativeCreate = __nested_webpack_require_149568__(/*! ./_nativeCreate */ "../node_modules/lodash/_nativeCreate.js");
+var nativeCreate = __nested_webpack_require_153115__(/*! ./_nativeCreate */ "../node_modules/lodash/_nativeCreate.js");
 
 /** Used to stand-in for `undefined` hash values. */
 var HASH_UNDEFINED = '__lodash_hash_undefined__';
@@ -19796,11 +20353,11 @@ module.exports = identity;
   !*** ../node_modules/lodash/_initCloneObject.js ***!
   \**************************************************/
 /*! no static exports found */
-/***/ (function(module, exports, __nested_webpack_require_152197__) {
+/***/ (function(module, exports, __nested_webpack_require_155744__) {
 
-var baseCreate = __nested_webpack_require_152197__(/*! ./_baseCreate */ "../node_modules/lodash/_baseCreate.js"),
-    getPrototype = __nested_webpack_require_152197__(/*! ./_getPrototype */ "../node_modules/lodash/_getPrototype.js"),
-    isPrototype = __nested_webpack_require_152197__(/*! ./_isPrototype */ "../node_modules/lodash/_isPrototype.js");
+var baseCreate = __nested_webpack_require_155744__(/*! ./_baseCreate */ "../node_modules/lodash/_baseCreate.js"),
+    getPrototype = __nested_webpack_require_155744__(/*! ./_getPrototype */ "../node_modules/lodash/_getPrototype.js"),
+    isPrototype = __nested_webpack_require_155744__(/*! ./_isPrototype */ "../node_modules/lodash/_isPrototype.js");
 
 /**
  * Initializes an object clone.
@@ -19904,9 +20461,9 @@ module.exports = listCacheClear;
   !*** ../node_modules/lodash/_listCacheDelete.js ***!
   \**************************************************/
 /*! no static exports found */
-/***/ (function(module, exports, __nested_webpack_require_154958__) {
+/***/ (function(module, exports, __nested_webpack_require_158505__) {
 
-var assocIndexOf = __nested_webpack_require_154958__(/*! ./_assocIndexOf */ "../node_modules/lodash/_assocIndexOf.js");
+var assocIndexOf = __nested_webpack_require_158505__(/*! ./_assocIndexOf */ "../node_modules/lodash/_assocIndexOf.js");
 
 /** Used for built-in method references. */
 var arrayProto = Array.prototype;
@@ -19950,9 +20507,9 @@ module.exports = listCacheDelete;
   !*** ../node_modules/lodash/_listCacheGet.js ***!
   \***********************************************/
 /*! no static exports found */
-/***/ (function(module, exports, __nested_webpack_require_156100__) {
+/***/ (function(module, exports, __nested_webpack_require_159647__) {
 
-var assocIndexOf = __nested_webpack_require_156100__(/*! ./_assocIndexOf */ "../node_modules/lodash/_assocIndexOf.js");
+var assocIndexOf = __nested_webpack_require_159647__(/*! ./_assocIndexOf */ "../node_modules/lodash/_assocIndexOf.js");
 
 /**
  * Gets the list cache value for `key`.
@@ -19980,9 +20537,9 @@ module.exports = listCacheGet;
   !*** ../node_modules/lodash/_listCacheHas.js ***!
   \***********************************************/
 /*! no static exports found */
-/***/ (function(module, exports, __nested_webpack_require_156887__) {
+/***/ (function(module, exports, __nested_webpack_require_160434__) {
 
-var assocIndexOf = __nested_webpack_require_156887__(/*! ./_assocIndexOf */ "../node_modules/lodash/_assocIndexOf.js");
+var assocIndexOf = __nested_webpack_require_160434__(/*! ./_assocIndexOf */ "../node_modules/lodash/_assocIndexOf.js");
 
 /**
  * Checks if a list cache value for `key` exists.
@@ -20007,9 +20564,9 @@ module.exports = listCacheHas;
   !*** ../node_modules/lodash/_listCacheSet.js ***!
   \***********************************************/
 /*! no static exports found */
-/***/ (function(module, exports, __nested_webpack_require_157657__) {
+/***/ (function(module, exports, __nested_webpack_require_161204__) {
 
-var assocIndexOf = __nested_webpack_require_157657__(/*! ./_assocIndexOf */ "../node_modules/lodash/_assocIndexOf.js");
+var assocIndexOf = __nested_webpack_require_161204__(/*! ./_assocIndexOf */ "../node_modules/lodash/_assocIndexOf.js");
 
 /**
  * Sets the list cache `key` to `value`.
@@ -20044,11 +20601,11 @@ module.exports = listCacheSet;
   !*** ../node_modules/lodash/_mapCacheClear.js ***!
   \************************************************/
 /*! no static exports found */
-/***/ (function(module, exports, __nested_webpack_require_158581__) {
+/***/ (function(module, exports, __nested_webpack_require_162128__) {
 
-var Hash = __nested_webpack_require_158581__(/*! ./_Hash */ "../node_modules/lodash/_Hash.js"),
-    ListCache = __nested_webpack_require_158581__(/*! ./_ListCache */ "../node_modules/lodash/_ListCache.js"),
-    Map = __nested_webpack_require_158581__(/*! ./_Map */ "../node_modules/lodash/_Map.js");
+var Hash = __nested_webpack_require_162128__(/*! ./_Hash */ "../node_modules/lodash/_Hash.js"),
+    ListCache = __nested_webpack_require_162128__(/*! ./_ListCache */ "../node_modules/lodash/_ListCache.js"),
+    Map = __nested_webpack_require_162128__(/*! ./_Map */ "../node_modules/lodash/_Map.js");
 
 /**
  * Removes all key-value entries from the map.
@@ -20076,9 +20633,9 @@ module.exports = mapCacheClear;
   !*** ../node_modules/lodash/_mapCacheDelete.js ***!
   \*************************************************/
 /*! no static exports found */
-/***/ (function(module, exports, __nested_webpack_require_159447__) {
+/***/ (function(module, exports, __nested_webpack_require_162994__) {
 
-var getMapData = __nested_webpack_require_159447__(/*! ./_getMapData */ "../node_modules/lodash/_getMapData.js");
+var getMapData = __nested_webpack_require_162994__(/*! ./_getMapData */ "../node_modules/lodash/_getMapData.js");
 
 /**
  * Removes `key` and its value from the map.
@@ -20105,9 +20662,9 @@ module.exports = mapCacheDelete;
   !*** ../node_modules/lodash/_mapCacheGet.js ***!
   \**********************************************/
 /*! no static exports found */
-/***/ (function(module, exports, __nested_webpack_require_160258__) {
+/***/ (function(module, exports, __nested_webpack_require_163805__) {
 
-var getMapData = __nested_webpack_require_160258__(/*! ./_getMapData */ "../node_modules/lodash/_getMapData.js");
+var getMapData = __nested_webpack_require_163805__(/*! ./_getMapData */ "../node_modules/lodash/_getMapData.js");
 
 /**
  * Gets the map value for `key`.
@@ -20132,9 +20689,9 @@ module.exports = mapCacheGet;
   !*** ../node_modules/lodash/_mapCacheHas.js ***!
   \**********************************************/
 /*! no static exports found */
-/***/ (function(module, exports, __nested_webpack_require_160949__) {
+/***/ (function(module, exports, __nested_webpack_require_164496__) {
 
-var getMapData = __nested_webpack_require_160949__(/*! ./_getMapData */ "../node_modules/lodash/_getMapData.js");
+var getMapData = __nested_webpack_require_164496__(/*! ./_getMapData */ "../node_modules/lodash/_getMapData.js");
 
 /**
  * Checks if a map value for `key` exists.
@@ -20159,9 +20716,9 @@ module.exports = mapCacheHas;
   !*** ../node_modules/lodash/_mapCacheSet.js ***!
   \**********************************************/
 /*! no static exports found */
-/***/ (function(module, exports, __nested_webpack_require_161692__) {
+/***/ (function(module, exports, __nested_webpack_require_165239__) {
 
-var getMapData = __nested_webpack_require_161692__(/*! ./_getMapData */ "../node_modules/lodash/_getMapData.js");
+var getMapData = __nested_webpack_require_165239__(/*! ./_getMapData */ "../node_modules/lodash/_getMapData.js");
 
 /**
  * Sets the map `key` to `value`.
@@ -20192,9 +20749,9 @@ module.exports = mapCacheSet;
   !*** ../node_modules/lodash/_nativeCreate.js ***!
   \***********************************************/
 /*! no static exports found */
-/***/ (function(module, exports, __nested_webpack_require_162546__) {
+/***/ (function(module, exports, __nested_webpack_require_166093__) {
 
-var getNative = __nested_webpack_require_162546__(/*! ./_getNative */ "../node_modules/lodash/_getNative.js");
+var getNative = __nested_webpack_require_166093__(/*! ./_getNative */ "../node_modules/lodash/_getNative.js");
 
 /* Built-in method references that are verified to be native. */
 var nativeCreate = getNative(Object, 'create');
@@ -20235,9 +20792,9 @@ module.exports = overArg;
   !*** ../node_modules/lodash/_root.js ***!
   \***************************************/
 /*! no static exports found */
-/***/ (function(module, exports, __nested_webpack_require_163714__) {
+/***/ (function(module, exports, __nested_webpack_require_167261__) {
 
-var freeGlobal = __nested_webpack_require_163714__(/*! ./_freeGlobal */ "../node_modules/lodash/_freeGlobal.js");
+var freeGlobal = __nested_webpack_require_167261__(/*! ./_freeGlobal */ "../node_modules/lodash/_freeGlobal.js");
 
 /** Detect free variable `self`. */
 var freeSelf = typeof self == 'object' && self && self.Object === Object && self;
@@ -20255,9 +20812,9 @@ module.exports = root;
   !*** ../node_modules/lodash/_stackClear.js ***!
   \*********************************************/
 /*! no static exports found */
-/***/ (function(module, exports, __nested_webpack_require_164371__) {
+/***/ (function(module, exports, __nested_webpack_require_167918__) {
 
-var ListCache = __nested_webpack_require_164371__(/*! ./_ListCache */ "../node_modules/lodash/_ListCache.js");
+var ListCache = __nested_webpack_require_167918__(/*! ./_ListCache */ "../node_modules/lodash/_ListCache.js");
 
 /**
  * Removes all key-value entries from the stack.
@@ -20360,11 +20917,11 @@ module.exports = stackHas;
   !*** ../node_modules/lodash/_stackSet.js ***!
   \*******************************************/
 /*! no static exports found */
-/***/ (function(module, exports, __nested_webpack_require_166797__) {
+/***/ (function(module, exports, __nested_webpack_require_170344__) {
 
-var ListCache = __nested_webpack_require_166797__(/*! ./_ListCache */ "../node_modules/lodash/_ListCache.js"),
-    Map = __nested_webpack_require_166797__(/*! ./_Map */ "../node_modules/lodash/_Map.js"),
-    MapCache = __nested_webpack_require_166797__(/*! ./_MapCache */ "../node_modules/lodash/_MapCache.js");
+var ListCache = __nested_webpack_require_170344__(/*! ./_ListCache */ "../node_modules/lodash/_ListCache.js"),
+    Map = __nested_webpack_require_170344__(/*! ./_Map */ "../node_modules/lodash/_Map.js"),
+    MapCache = __nested_webpack_require_170344__(/*! ./_MapCache */ "../node_modules/lodash/_MapCache.js");
 
 /** Used as the size to enable large array optimizations. */
 var LARGE_ARRAY_SIZE = 200;
@@ -20405,9 +20962,9 @@ module.exports = stackSet;
   !*** ../node_modules/lodash/cloneDeep.js ***!
   \*******************************************/
 /*! no static exports found */
-/***/ (function(module, exports, __nested_webpack_require_168103__) {
+/***/ (function(module, exports, __nested_webpack_require_171650__) {
 
-var baseClone = __nested_webpack_require_168103__(/*! ./_baseClone */ "../node_modules/lodash/_baseClone.js");
+var baseClone = __nested_webpack_require_171650__(/*! ./_baseClone */ "../node_modules/lodash/_baseClone.js");
 
 /** Used to compose bitmasks for cloning. */
 var CLONE_DEEP_FLAG = 1,
@@ -20484,6 +21041,50 @@ function eq(value, other) {
 }
 
 module.exports = eq;
+
+
+/***/ }),
+
+/***/ "../node_modules/lodash/get.js":
+/*!*************************************!*\
+  !*** ../node_modules/lodash/get.js ***!
+  \*************************************/
+/*! no static exports found */
+/***/ (function(module, exports, __nested_webpack_require_173695__) {
+
+var baseGet = __nested_webpack_require_173695__(/*! ./_baseGet */ "../node_modules/lodash/_baseGet.js");
+
+/**
+ * Gets the value at `path` of `object`. If the resolved value is
+ * `undefined`, the `defaultValue` is returned in its place.
+ *
+ * @static
+ * @memberOf _
+ * @since 3.7.0
+ * @category Object
+ * @param {Object} object The object to query.
+ * @param {Array|string} path The path of the property to get.
+ * @param {*} [defaultValue] The value returned for `undefined` resolved values.
+ * @returns {*} Returns the resolved value.
+ * @example
+ *
+ * var object = { 'a': [{ 'b': { 'c': 3 } }] };
+ *
+ * _.get(object, 'a[0].b.c');
+ * // => 3
+ *
+ * _.get(object, ['a', '0', 'b', 'c']);
+ * // => 3
+ *
+ * _.get(object, 'a.b.c', 'default');
+ * // => 'default'
+ */
+function get(object, path, defaultValue) {
+  var result = object == null ? undefined : baseGet(object, path);
+  return result === undefined ? defaultValue : result;
+}
+
+module.exports = get;
 
 
 /***/ }),
@@ -20670,11 +21271,11 @@ module.exports = isObjectLike;
   !*** ../node_modules/lodash/isPlainObject.js ***!
   \***********************************************/
 /*! no static exports found */
-/***/ (function(module, exports, __nested_webpack_require_173918__) {
+/***/ (function(module, exports, __nested_webpack_require_178671__) {
 
-var baseGetTag = __nested_webpack_require_173918__(/*! ./_baseGetTag */ "../node_modules/lodash/_baseGetTag.js"),
-    getPrototype = __nested_webpack_require_173918__(/*! ./_getPrototype */ "../node_modules/lodash/_getPrototype.js"),
-    isObjectLike = __nested_webpack_require_173918__(/*! ./isObjectLike */ "../node_modules/lodash/isObjectLike.js");
+var baseGetTag = __nested_webpack_require_178671__(/*! ./_baseGetTag */ "../node_modules/lodash/_baseGetTag.js"),
+    getPrototype = __nested_webpack_require_178671__(/*! ./_getPrototype */ "../node_modules/lodash/_getPrototype.js"),
+    isObjectLike = __nested_webpack_require_178671__(/*! ./isObjectLike */ "../node_modules/lodash/isObjectLike.js");
 
 /** `Object#toString` result references. */
 var objectTag = '[object Object]';
@@ -20772,9 +21373,9 @@ module.exports = stubFalse;
   !*** ../node_modules/lodash/keys.js ***!
   \**************************************/
 /*! no static exports found */
-/***/ (function(module, exports, __nested_webpack_require_176549__) {
+/***/ (function(module, exports, __nested_webpack_require_181302__) {
 
-var overArg = __nested_webpack_require_176549__(/*! ./_overArg */ "../node_modules/lodash/_overArg.js");
+var overArg = __nested_webpack_require_181302__(/*! ./_overArg */ "../node_modules/lodash/_overArg.js");
 
 /* Built-in method references for those with the same name as other `lodash` methods. */
 var nativeKeys = overArg(Object.keys, Object);
@@ -20983,7 +21584,7 @@ function plural(ms, n, name) {
   !*** ../node_modules/qs/lib/formats.js ***!
   \*****************************************/
 /*! no static exports found */
-/***/ (function(module, exports, __nested_webpack_require_180843__) {
+/***/ (function(module, exports, __nested_webpack_require_185596__) {
 
 "use strict";
 
@@ -20991,7 +21592,7 @@ function plural(ms, n, name) {
 var replace = String.prototype.replace;
 var percentTwenties = /%20/g;
 
-var util = __nested_webpack_require_180843__(/*! ./utils */ "../node_modules/qs/lib/utils.js");
+var util = __nested_webpack_require_185596__(/*! ./utils */ "../node_modules/qs/lib/utils.js");
 
 var Format = {
     RFC1738: 'RFC1738',
@@ -21021,14 +21622,14 @@ module.exports = util.assign(
   !*** ../node_modules/qs/lib/index.js ***!
   \***************************************/
 /*! no static exports found */
-/***/ (function(module, exports, __nested_webpack_require_181692__) {
+/***/ (function(module, exports, __nested_webpack_require_186445__) {
 
 "use strict";
 
 
-var stringify = __nested_webpack_require_181692__(/*! ./stringify */ "../node_modules/qs/lib/stringify.js");
-var parse = __nested_webpack_require_181692__(/*! ./parse */ "../node_modules/qs/lib/parse.js");
-var formats = __nested_webpack_require_181692__(/*! ./formats */ "../node_modules/qs/lib/formats.js");
+var stringify = __nested_webpack_require_186445__(/*! ./stringify */ "../node_modules/qs/lib/stringify.js");
+var parse = __nested_webpack_require_186445__(/*! ./parse */ "../node_modules/qs/lib/parse.js");
+var formats = __nested_webpack_require_186445__(/*! ./formats */ "../node_modules/qs/lib/formats.js");
 
 module.exports = {
     formats: formats,
@@ -21044,14 +21645,15 @@ module.exports = {
   !*** ../node_modules/qs/lib/parse.js ***!
   \***************************************/
 /*! no static exports found */
-/***/ (function(module, exports, __nested_webpack_require_182339__) {
+/***/ (function(module, exports, __nested_webpack_require_187092__) {
 
 "use strict";
 
 
-var utils = __nested_webpack_require_182339__(/*! ./utils */ "../node_modules/qs/lib/utils.js");
+var utils = __nested_webpack_require_187092__(/*! ./utils */ "../node_modules/qs/lib/utils.js");
 
 var has = Object.prototype.hasOwnProperty;
+var isArray = Array.isArray;
 
 var defaults = {
     allowDots: false,
@@ -21075,6 +21677,14 @@ var interpretNumericEntities = function (str) {
     return str.replace(/&#(\d+);/g, function ($0, numberStr) {
         return String.fromCharCode(parseInt(numberStr, 10));
     });
+};
+
+var parseArrayValue = function (val, options) {
+    if (val && typeof val === 'string' && options.comma && val.indexOf(',') > -1) {
+        return val.split(',');
+    }
+
+    return val;
 };
 
 // This is what browsers will submit when the ✓ character occurs in an
@@ -21125,15 +21735,20 @@ var parseValues = function parseQueryStringValues(str, options) {
             val = options.strictNullHandling ? null : '';
         } else {
             key = options.decoder(part.slice(0, pos), defaults.decoder, charset, 'key');
-            val = options.decoder(part.slice(pos + 1), defaults.decoder, charset, 'value');
+            val = utils.maybeMap(
+                parseArrayValue(part.slice(pos + 1), options),
+                function (encodedVal) {
+                    return options.decoder(encodedVal, defaults.decoder, charset, 'value');
+                }
+            );
         }
 
         if (val && options.interpretNumericEntities && charset === 'iso-8859-1') {
             val = interpretNumericEntities(val);
         }
 
-        if (val && options.comma && val.indexOf(',') > -1) {
-            val = val.split(',');
+        if (part.indexOf('[]=') > -1) {
+            val = isArray(val) ? [val] : val;
         }
 
         if (has.call(obj, key)) {
@@ -21146,8 +21761,8 @@ var parseValues = function parseQueryStringValues(str, options) {
     return obj;
 };
 
-var parseObject = function (chain, val, options) {
-    var leaf = val;
+var parseObject = function (chain, val, options, valuesParsed) {
+    var leaf = valuesParsed ? val : parseArrayValue(val, options);
 
     for (var i = chain.length - 1; i >= 0; --i) {
         var obj;
@@ -21175,13 +21790,13 @@ var parseObject = function (chain, val, options) {
             }
         }
 
-        leaf = obj;
+        leaf = obj; // eslint-disable-line no-param-reassign
     }
 
     return leaf;
 };
 
-var parseKeys = function parseQueryStringKeys(givenKey, val, options) {
+var parseKeys = function parseQueryStringKeys(givenKey, val, options, valuesParsed) {
     if (!givenKey) {
         return;
     }
@@ -21232,7 +21847,7 @@ var parseKeys = function parseQueryStringKeys(givenKey, val, options) {
         keys.push('[' + key.slice(segment.index) + ']');
     }
 
-    return parseObject(keys, val, options);
+    return parseObject(keys, val, options, valuesParsed);
 };
 
 var normalizeParseOptions = function normalizeParseOptions(opts) {
@@ -21245,7 +21860,7 @@ var normalizeParseOptions = function normalizeParseOptions(opts) {
     }
 
     if (typeof opts.charset !== 'undefined' && opts.charset !== 'utf-8' && opts.charset !== 'iso-8859-1') {
-        throw new Error('The charset option must be either utf-8, iso-8859-1, or undefined');
+        throw new TypeError('The charset option must be either utf-8, iso-8859-1, or undefined');
     }
     var charset = typeof opts.charset === 'undefined' ? defaults.charset : opts.charset;
 
@@ -21284,7 +21899,7 @@ module.exports = function (str, opts) {
     var keys = Object.keys(tempObj);
     for (var i = 0; i < keys.length; ++i) {
         var key = keys[i];
-        var newObj = parseKeys(key, tempObj[key], options);
+        var newObj = parseKeys(key, tempObj[key], options, typeof str === 'string');
         obj = utils.merge(obj, newObj, options);
     }
 
@@ -21299,13 +21914,13 @@ module.exports = function (str, opts) {
   !*** ../node_modules/qs/lib/stringify.js ***!
   \*******************************************/
 /*! no static exports found */
-/***/ (function(module, exports, __nested_webpack_require_191335__) {
+/***/ (function(module, exports, __nested_webpack_require_196627__) {
 
 "use strict";
 
 
-var utils = __nested_webpack_require_191335__(/*! ./utils */ "../node_modules/qs/lib/utils.js");
-var formats = __nested_webpack_require_191335__(/*! ./formats */ "../node_modules/qs/lib/formats.js");
+var utils = __nested_webpack_require_196627__(/*! ./utils */ "../node_modules/qs/lib/utils.js");
+var formats = __nested_webpack_require_196627__(/*! ./formats */ "../node_modules/qs/lib/formats.js");
 var has = Object.prototype.hasOwnProperty;
 
 var arrayPrefixGenerators = {
@@ -21379,7 +21994,12 @@ var stringify = function stringify(
     } else if (obj instanceof Date) {
         obj = serializeDate(obj);
     } else if (generateArrayPrefix === 'comma' && isArray(obj)) {
-        obj = obj.join(',');
+        obj = utils.maybeMap(obj, function (value) {
+            if (value instanceof Date) {
+                return serializeDate(value);
+            }
+            return value;
+        }).join(',');
     }
 
     if (obj === null) {
@@ -21414,44 +22034,31 @@ var stringify = function stringify(
 
     for (var i = 0; i < objKeys.length; ++i) {
         var key = objKeys[i];
+        var value = obj[key];
 
-        if (skipNulls && obj[key] === null) {
+        if (skipNulls && value === null) {
             continue;
         }
 
-        if (isArray(obj)) {
-            pushToArray(values, stringify(
-                obj[key],
-                typeof generateArrayPrefix === 'function' ? generateArrayPrefix(prefix, key) : prefix,
-                generateArrayPrefix,
-                strictNullHandling,
-                skipNulls,
-                encoder,
-                filter,
-                sort,
-                allowDots,
-                serializeDate,
-                formatter,
-                encodeValuesOnly,
-                charset
-            ));
-        } else {
-            pushToArray(values, stringify(
-                obj[key],
-                prefix + (allowDots ? '.' + key : '[' + key + ']'),
-                generateArrayPrefix,
-                strictNullHandling,
-                skipNulls,
-                encoder,
-                filter,
-                sort,
-                allowDots,
-                serializeDate,
-                formatter,
-                encodeValuesOnly,
-                charset
-            ));
-        }
+        var keyPrefix = isArray(obj)
+            ? typeof generateArrayPrefix === 'function' ? generateArrayPrefix(prefix, key) : prefix
+            : prefix + (allowDots ? '.' + key : '[' + key + ']');
+
+        pushToArray(values, stringify(
+            value,
+            keyPrefix,
+            generateArrayPrefix,
+            strictNullHandling,
+            skipNulls,
+            encoder,
+            filter,
+            sort,
+            allowDots,
+            serializeDate,
+            formatter,
+            encodeValuesOnly,
+            charset
+        ));
     }
 
     return values;
@@ -21590,7 +22197,7 @@ module.exports = function (object, opts) {
   !*** ../node_modules/qs/lib/utils.js ***!
   \***************************************/
 /*! no static exports found */
-/***/ (function(module, exports, __nested_webpack_require_200002__) {
+/***/ (function(module, exports, __nested_webpack_require_205036__) {
 
 "use strict";
 
@@ -21638,6 +22245,7 @@ var arrayToObject = function arrayToObject(source, options) {
 };
 
 var merge = function merge(target, source, options) {
+    /* eslint no-param-reassign: 0 */
     if (!source) {
         return target;
     }
@@ -21817,6 +22425,17 @@ var combine = function combine(a, b) {
     return [].concat(a, b);
 };
 
+var maybeMap = function maybeMap(val, fn) {
+    if (isArray(val)) {
+        var mapped = [];
+        for (var i = 0; i < val.length; i += 1) {
+            mapped.push(fn(val[i]));
+        }
+        return mapped;
+    }
+    return fn(val);
+};
+
 module.exports = {
     arrayToObject: arrayToObject,
     assign: assign,
@@ -21826,6 +22445,7 @@ module.exports = {
     encode: encode,
     isBuffer: isBuffer,
     isRegExp: isRegExp,
+    maybeMap: maybeMap,
     merge: merge
 };
 
@@ -21837,7 +22457,7 @@ module.exports = {
   !*** ../node_modules/supports-color/index.js ***!
   \***********************************************/
 /*! no static exports found */
-/***/ (function(module, exports, __nested_webpack_require_206642__) {
+/***/ (function(module, exports, __nested_webpack_require_211981__) {
 
 "use strict";
 
@@ -21932,17 +22552,17 @@ module.exports = function(module) {
   !*** ./contentful-management.js ***!
   \**********************************/
 /*! exports provided: createClient */
-/***/ (function(module, __webpack_exports__, __nested_webpack_require_208611__) {
+/***/ (function(module, __webpack_exports__, __nested_webpack_require_213950__) {
 
 "use strict";
-__nested_webpack_require_208611__.r(__webpack_exports__);
-/* harmony export (binding) */ __nested_webpack_require_208611__.d(__webpack_exports__, "createClient", function() { return createClient; });
-/* harmony import */ var axios__WEBPACK_IMPORTED_MODULE_0__ = __nested_webpack_require_208611__(/*! axios */ "../node_modules/axios/index.js");
-/* harmony import */ var axios__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__nested_webpack_require_208611__.n(axios__WEBPACK_IMPORTED_MODULE_0__);
-/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_1__ = __nested_webpack_require_208611__(/*! lodash/cloneDeep */ "../node_modules/lodash/cloneDeep.js");
-/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_1___default = /*#__PURE__*/__nested_webpack_require_208611__.n(lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_1__);
-/* harmony import */ var contentful_sdk_core__WEBPACK_IMPORTED_MODULE_2__ = __nested_webpack_require_208611__(/*! contentful-sdk-core */ "../node_modules/contentful-sdk-core/dist/index.es-modules.js");
-/* harmony import */ var _create_contentful_api__WEBPACK_IMPORTED_MODULE_3__ = __nested_webpack_require_208611__(/*! ./create-contentful-api */ "./create-contentful-api.js");
+__nested_webpack_require_213950__.r(__webpack_exports__);
+/* harmony export (binding) */ __nested_webpack_require_213950__.d(__webpack_exports__, "createClient", function() { return createClient; });
+/* harmony import */ var axios__WEBPACK_IMPORTED_MODULE_0__ = __nested_webpack_require_213950__(/*! axios */ "../node_modules/axios/index.js");
+/* harmony import */ var axios__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__nested_webpack_require_213950__.n(axios__WEBPACK_IMPORTED_MODULE_0__);
+/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_1__ = __nested_webpack_require_213950__(/*! lodash/cloneDeep */ "../node_modules/lodash/cloneDeep.js");
+/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_1___default = /*#__PURE__*/__nested_webpack_require_213950__.n(lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_1__);
+/* harmony import */ var contentful_sdk_core__WEBPACK_IMPORTED_MODULE_2__ = __nested_webpack_require_213950__(/*! contentful-sdk-core */ "../node_modules/contentful-sdk-core/dist/index.es-modules.js");
+/* harmony import */ var _create_contentful_api__WEBPACK_IMPORTED_MODULE_3__ = __nested_webpack_require_213950__(/*! ./create-contentful-api */ "./create-contentful-api.js");
 var _extends = Object.assign || function (target) { for (var i = 1; i < arguments.length; i++) { var source = arguments[i]; for (var key in source) { if (Object.prototype.hasOwnProperty.call(source, key)) { target[key] = source[key]; } } } return target; };
 
 /**
@@ -21988,7 +22608,7 @@ function createClient(params) {
     defaultHostname: 'api.contentful.com',
     defaultHostnameUpload: 'upload.contentful.com'
   };
-  var userAgentHeader = Object(contentful_sdk_core__WEBPACK_IMPORTED_MODULE_2__["getUserAgentHeader"])('contentful-management.js/' + '5.2.1', params.application, params.integration, params.feature);
+  var userAgentHeader = Object(contentful_sdk_core__WEBPACK_IMPORTED_MODULE_2__["getUserAgentHeader"])('contentful-management.js/' + '5.26.1', params.application, params.integration, params.feature);
 
   var requiredHeaders = {
     'Content-Type': 'application/vnd.contentful.management.v1+json',
@@ -22018,14 +22638,14 @@ function createClient(params) {
   !*** ./create-contentful-api.js ***!
   \**********************************/
 /*! exports provided: default */
-/***/ (function(module, __webpack_exports__, __nested_webpack_require_213840__) {
+/***/ (function(module, __webpack_exports__, __nested_webpack_require_219180__) {
 
 "use strict";
-__nested_webpack_require_213840__.r(__webpack_exports__);
-/* harmony export (binding) */ __nested_webpack_require_213840__.d(__webpack_exports__, "default", function() { return createClientApi; });
-/* harmony import */ var contentful_sdk_core__WEBPACK_IMPORTED_MODULE_0__ = __nested_webpack_require_213840__(/*! contentful-sdk-core */ "../node_modules/contentful-sdk-core/dist/index.es-modules.js");
-/* harmony import */ var _error_handler__WEBPACK_IMPORTED_MODULE_1__ = __nested_webpack_require_213840__(/*! ./error-handler */ "./error-handler.js");
-/* harmony import */ var _entities__WEBPACK_IMPORTED_MODULE_2__ = __nested_webpack_require_213840__(/*! ./entities */ "./entities/index.js");
+__nested_webpack_require_219180__.r(__webpack_exports__);
+/* harmony export (binding) */ __nested_webpack_require_219180__.d(__webpack_exports__, "default", function() { return createClientApi; });
+/* harmony import */ var contentful_sdk_core__WEBPACK_IMPORTED_MODULE_0__ = __nested_webpack_require_219180__(/*! contentful-sdk-core */ "../node_modules/contentful-sdk-core/dist/index.es-modules.js");
+/* harmony import */ var _error_handler__WEBPACK_IMPORTED_MODULE_1__ = __nested_webpack_require_219180__(/*! ./error-handler */ "./error-handler.js");
+/* harmony import */ var _entities__WEBPACK_IMPORTED_MODULE_2__ = __nested_webpack_require_219180__(/*! ./entities */ "./entities/index.js");
 /**
  * Contentful Management API Client. Contains methods which allow access to
  * any operations that can be performed with a management token.
@@ -22061,6 +22681,8 @@ __nested_webpack_require_213840__.r(__webpack_exports__);
 /**
  * @memberof ContentfulClientAPI
  * @typedef {Object} ClientAPI
+ * @prop {function} getOrganization
+ * @prop {function} getOrganizations
  * @prop {function} getSpace
  * @prop {function} getSpaces
  * @prop {function} createSpace
@@ -22068,11 +22690,11 @@ __nested_webpack_require_213840__.r(__webpack_exports__);
  * @prop {function} getCurrentUser
  * @prop {function} getPersonalAccessTokens
  * @prop {function} getPersonalAccessToken
- * @prop {function} getOrganizations
  * @prop {function} rawRequest
- * @prop {function} getUsagePeriods
- * @prop {function} getUsages
+ * @prop {function} getOrganizationUsage
+ * @prop {function} getSpaceUsage
  */
+
 
 
 
@@ -22095,9 +22717,65 @@ function createClientApi(_ref) {
   var _entities$personalAcc = _entities__WEBPACK_IMPORTED_MODULE_2__["default"].personalAccessToken,
       wrapPersonalAccessToken = _entities$personalAcc.wrapPersonalAccessToken,
       wrapPersonalAccessTokenCollection = _entities$personalAcc.wrapPersonalAccessTokenCollection;
-  var wrapOrganizationCollection = _entities__WEBPACK_IMPORTED_MODULE_2__["default"].organization.wrapOrganizationCollection;
-  var wrapUsagePeriodCollection = _entities__WEBPACK_IMPORTED_MODULE_2__["default"].usagePeriod.wrapUsagePeriodCollection;
+  var _entities$organizatio = _entities__WEBPACK_IMPORTED_MODULE_2__["default"].organization,
+      wrapOrganization = _entities$organizatio.wrapOrganization,
+      wrapOrganizationCollection = _entities$organizatio.wrapOrganizationCollection;
   var wrapUsageCollection = _entities__WEBPACK_IMPORTED_MODULE_2__["default"].usage.wrapUsageCollection;
+
+  /**
+   * Gets a collection of Organizations
+   * @memberof ContentfulClientAPI
+   * @return {Promise<OrganizationCollection>} Promise for a collection of Organizations
+   * @example
+   * const contentful = require('contentful-management')
+   *
+   * const client = contentful.createClient({
+   *   accessToken: '<content_management_api_key>'
+   * })
+   *
+   * client.getOrganizations()
+   * .then(result => console.log(result.items))
+   * .catch(console.error)
+   */
+
+  function getOrganizations() {
+    var baseURL = http.defaults.baseURL.replace('/spaces/', '/organizations/');
+    return http.get('', { baseURL: baseURL }).then(function (response) {
+      return wrapOrganizationCollection(http, response.data);
+    }, _error_handler__WEBPACK_IMPORTED_MODULE_1__["default"]);
+  }
+
+  /**
+   * Gets an organization
+   * @memberof ContentfulClientAPI
+   * @param {string} id - Organization ID
+   * @return {Promise<Organization.Organization>} Promise for a Organization
+   * @example
+   * const contentful = require('contentful-management')
+   *
+   * const client = contentful.createClient({
+   *   accessToken: '<content_management_api_key>'
+   * })
+   *
+   * client.getOrganization('<org_id>')
+   * .then((org) => console.log(org))
+   * .catch(console.error)
+   */
+  function getOrganization(id) {
+    var baseURL = http.defaults.baseURL.replace('/spaces/', '/organizations/');
+    return http.get('', { baseURL: baseURL }).then(function (response) {
+      var org = response.data.items.find(function (org) {
+        return org.sys.id === id;
+      });
+      if (!org) {
+        var error = new Error('No organization was found with the ID ' + id + ' instead got ' + JSON.stringify(response));
+        error.status = 404;
+        error.statusText = 'Not Found';
+        return Promise.reject(error);
+      }
+      return wrapOrganization(http, org);
+    }, _error_handler__WEBPACK_IMPORTED_MODULE_1__["default"]);
+  }
 
   /**
    * Gets all spaces
@@ -22114,7 +22792,6 @@ function createClientApi(_ref) {
    * .then((response) => console.log(response.items))
    * .catch(console.error)
    */
-
   function getSpaces() {
     var query = arguments.length > 0 && arguments[0] !== undefined ? arguments[0] : {};
 
@@ -22174,68 +22851,45 @@ function createClientApi(_ref) {
   }
 
   /**
-   * Gets a collection of Organizations
+   * Get organization usage grouped by {@link Usage.UsageMetricEnum metric}
+   *
    * @memberof ContentfulClientAPI
-   * @return {Promise<OrganizationCollection>} Promise for a collection of Organizations
+   * @param {string} organizationId - Id of an organization
+   * @param {Usage.UsageQuery} query - Query parameters
+   * @return {Promise<Usage.UsageCollection>} Promise of a collection of usages
    * @example
+   *
    * const contentful = require('contentful-management')
    *
    * const client = contentful.createClient({
    *   accessToken: '<content_management_api_key>'
    * })
    *
-   * client.getOrganizations()
+   * client.getOrganizationUsage('<organizationId>', {
+   *    'metric[in]': 'cma,gql',
+   *    'dateRange.startAt': '2019-10-22',
+   *    'dateRange.endAt': '2019-11-10'
+   *    }
+   * })
    * .then(result => console.log(result.items))
    * .catch(console.error)
    */
-  function getOrganizations() {
-    var baseURL = http.defaults.baseURL.replace('/spaces/', '/organizations/');
-    return http.get('', {
-      baseURL: baseURL
-    }).then(function (response) {
-      return wrapOrganizationCollection(http, response.data);
+  function getOrganizationUsage(organizationId) {
+    var query = arguments.length > 1 && arguments[1] !== undefined ? arguments[1] : {};
+
+    var baseURL = http.defaults.baseURL.replace('/spaces/', '/organizations/' + organizationId + '/organization_periodic_usages');
+    return http.get('', { baseURL: baseURL, params: query }).then(function (response) {
+      return wrapUsageCollection(http, response.data);
     }, _error_handler__WEBPACK_IMPORTED_MODULE_1__["default"]);
   }
 
   /**
-   * Gets a collection of usage periods for the organization.
-   * @memberof ContentfulClientAPI
-   * @param {string} organizationId - id of organization
-   * @return {Promise<UsagePeriod.UsagePeriodCollection>} Promise for a collection of usage periods
-   * @example
-   * const contentful = require('contentful-management')
+   * Get organization usage grouped by space and metric
    *
-   * const client = contentful.createClient({
-   *   accessToken: '<content_management_api_key>'
-   * })
-   *
-   * client.getUsagePeriods('<organizationId>')
-   * .then(result => console.log(result.items))
-   * .catch(console.error)
-   */
-  function getUsagePeriods(organizationId) {
-    var baseURL = http.defaults.baseURL.replace('/spaces/', '/organizations/' + organizationId + '/usage_periods');
-    var headers = {
-      'x-contentful-enable-alpha-feature': 'usage-insights'
-    };
-    return http.get('', {
-      baseURL: baseURL,
-      headers: headers
-    }).then(function (response) {
-      return wrapUsagePeriodCollection(http, response.data);
-    }, _error_handler__WEBPACK_IMPORTED_MODULE_1__["default"]);
-  }
-
-  /**
-   * Gets a collection of usages for the organization.
    * @memberof ContentfulClientAPI
-   * @param {string} organizationId
-   * @param {string} type - either 'organization' or 'space', type of usages to be returned
-   * @param {Object<{filters:{metric: string, usagePeriod: string}, orderBy:{metricUsage: string}}>} query - Object with search params.
-   * 'filters[metric]' is a required field, possible values are one of 'cda', 'cma', 'cpa', 'all_apis'.
-   * 'filters[usagePeriod]' is also required, it's the ID of the usage period.
-   * 'orderBy[metricUsage]' is optional, value can be asc or desc. It orders resources in response's 'items' array by total usage
-   * @return {Promise<Usage.UsageCollection>} Promise for a collection of usage
+   * @param {string} organizationId - Id of an organization
+   * @param {Usage.UsageQuery} query - Query parameters
+   * @return {Promise<Usage.UsageCollection>} Promise of a collection of usages
    * @example
    *
    * const contentful = require('contentful-management')
@@ -22244,25 +22898,23 @@ function createClientApi(_ref) {
    *   accessToken: '<content_management_api_key>'
    * })
    *
-   * client.getUsages('<organizationId>', 'space', {
-   *    'filters[metric]': 'cda', // required
-   *    'filters[usagePeriod]': '1234', // required
-   *    'orderBy[metricUsage]': 'asc'
+   * client.getSpaceUsage('<organizationId>', {
+   *    skip: 0,
+   *    limit: 10,
+   *    'metric[in]': 'cda,cpa,gql',
+   *    'dateRange.startAt': '2019-10-22',
+   *    'dateRange.endAt': '2020-11-30'
+   *    }
    * })
    * .then(result => console.log(result.items))
    * .catch(console.error)
+   *
    */
-  function getUsages(organizationId, type) {
-    var query = arguments.length > 2 && arguments[2] !== undefined ? arguments[2] : {};
+  function getSpaceUsage(organizationId) {
+    var query = arguments.length > 1 && arguments[1] !== undefined ? arguments[1] : {};
 
-    if (!(query['filters[metric]'] && query['filters[usagePeriod]'])) {
-      return Promise.reject(new Error('Missing either filters[metric] or filters[usagePeriod] in usages query.'));
-    }
-    var baseURL = http.defaults.baseURL.replace('/spaces/', '/organizations/' + organizationId + '/usages/' + type);
-    var headers = {
-      'x-contentful-enable-alpha-feature': 'usage-insights'
-    };
-    return http.get('', { baseURL: baseURL, headers: headers, params: Object(contentful_sdk_core__WEBPACK_IMPORTED_MODULE_0__["createRequestConfig"])({ query: query }).params }).then(function (response) {
+    var baseURL = http.defaults.baseURL.replace('/spaces/', '/organizations/' + organizationId + '/space_periodic_usages');
+    return http.get('', { baseURL: baseURL, params: query }).then(function (response) {
       return wrapUsageCollection(http, response.data);
     }, _error_handler__WEBPACK_IMPORTED_MODULE_1__["default"]);
   }
@@ -22401,14 +23053,15 @@ function createClientApi(_ref) {
     getSpaces: getSpaces,
     getSpace: getSpace,
     createSpace: createSpace,
+    getOrganization: getOrganization,
     getOrganizations: getOrganizations,
     getCurrentUser: getCurrentUser,
     createPersonalAccessToken: createPersonalAccessToken,
     getPersonalAccessToken: getPersonalAccessToken,
     getPersonalAccessTokens: getPersonalAccessTokens,
     rawRequest: rawRequest,
-    getUsagePeriods: getUsagePeriods,
-    getUsages: getUsages
+    getOrganizationUsage: getOrganizationUsage,
+    getSpaceUsage: getSpaceUsage
   };
 }
 
@@ -22419,16 +23072,16 @@ function createClientApi(_ref) {
   !*** ./create-environment-api.js ***!
   \***********************************/
 /*! exports provided: default */
-/***/ (function(module, __webpack_exports__, __nested_webpack_require_228487__) {
+/***/ (function(module, __webpack_exports__, __nested_webpack_require_234435__) {
 
 "use strict";
-__nested_webpack_require_228487__.r(__webpack_exports__);
-/* harmony export (binding) */ __nested_webpack_require_228487__.d(__webpack_exports__, "default", function() { return createEnvironmentApi; });
-/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__ = __nested_webpack_require_228487__(/*! lodash/cloneDeep */ "../node_modules/lodash/cloneDeep.js");
-/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__nested_webpack_require_228487__.n(lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__);
-/* harmony import */ var contentful_sdk_core__WEBPACK_IMPORTED_MODULE_1__ = __nested_webpack_require_228487__(/*! contentful-sdk-core */ "../node_modules/contentful-sdk-core/dist/index.es-modules.js");
-/* harmony import */ var _error_handler__WEBPACK_IMPORTED_MODULE_2__ = __nested_webpack_require_228487__(/*! ./error-handler */ "./error-handler.js");
-/* harmony import */ var _entities__WEBPACK_IMPORTED_MODULE_3__ = __nested_webpack_require_228487__(/*! ./entities */ "./entities/index.js");
+__nested_webpack_require_234435__.r(__webpack_exports__);
+/* harmony export (binding) */ __nested_webpack_require_234435__.d(__webpack_exports__, "default", function() { return createEnvironmentApi; });
+/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__ = __nested_webpack_require_234435__(/*! lodash/cloneDeep */ "../node_modules/lodash/cloneDeep.js");
+/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__nested_webpack_require_234435__.n(lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__);
+/* harmony import */ var contentful_sdk_core__WEBPACK_IMPORTED_MODULE_1__ = __nested_webpack_require_234435__(/*! contentful-sdk-core */ "../node_modules/contentful-sdk-core/dist/index.es-modules.js");
+/* harmony import */ var _error_handler__WEBPACK_IMPORTED_MODULE_2__ = __nested_webpack_require_234435__(/*! ./error-handler */ "./error-handler.js");
+/* harmony import */ var _entities__WEBPACK_IMPORTED_MODULE_3__ = __nested_webpack_require_234435__(/*! ./entities */ "./entities/index.js");
 var _extends = Object.assign || function (target) { for (var i = 1; i < arguments.length; i++) { var source = arguments[i]; for (var key in source) { if (Object.prototype.hasOwnProperty.call(source, key)) { target[key] = source[key]; } } } return target; };
 
 function _defineProperty(obj, key, value) { if (key in obj) { Object.defineProperty(obj, key, { value: value, enumerable: true, configurable: true, writable: true }); } else { obj[key] = value; } return obj; }
@@ -22467,6 +23120,9 @@ function _defineProperty(obj, key, value) { if (key in obj) { Object.definePrope
  * @prop {function} getUiExtensions
  * @prop {function} createUiExtension
  * @prop {function} createUiExtensionWithId
+ * @prop {function} getAppInstallation
+ * @prop {function} getAppInstallations
+ * @prop {function} createAppInstallation
  * @prop {function} getEntrySnapshots
  * @prop {function} getContentTypeSnapshots
  */
@@ -22501,6 +23157,9 @@ function createEnvironmentApi(_ref) {
   var _entities$uiExtension = _entities__WEBPACK_IMPORTED_MODULE_3__["default"].uiExtension,
       wrapUiExtension = _entities$uiExtension.wrapUiExtension,
       wrapUiExtensionCollection = _entities$uiExtension.wrapUiExtensionCollection;
+  var _entities$appInstalla = _entities__WEBPACK_IMPORTED_MODULE_3__["default"].appInstallation,
+      wrapAppInstallation = _entities$appInstalla.wrapAppInstallation,
+      wrapAppInstallationCollection = _entities$appInstalla.wrapAppInstallationCollection;
   /**
    * Environment instances.
    * @namespace Environment
@@ -23300,6 +23959,82 @@ function createEnvironmentApi(_ref) {
   }
 
   /**
+   * Gets an App Installation
+   * @memberof ContentfulEnvironmentAPI
+   * @param {string} id - AppDefinition ID
+   * @return {Promise<AppInstallation.AppInstallation>} Promise for an App Installation
+   * @example
+   * const contentful = require('contentful-management')
+   *
+   * const client = contentful.createClient({
+   *   accessToken: '<content_management_api_key>'
+   * })
+   *
+   * client.getSpace('<space_id>')
+   *  .then((space) => space.getEnvironment('<environment-id>'))
+   *  .then((environment) => environment.createAppInstallation('<app_definition_id>', {
+   *    parameters: {
+   *      someParameter: someValue
+   *    }
+   *   })
+   *  .then((appInstallation) => console.log(appInstallation))
+   *  .catch(console.error)
+   */
+  function createAppInstallation(appDefinitionId, parameters) {
+    return http.put('app_installations/' + appDefinitionId, parameters).then(function (response) {
+      return wrapAppInstallation(http, response.data);
+    }, _error_handler__WEBPACK_IMPORTED_MODULE_2__["default"]);
+  }
+
+  /**
+   * Gets an App Installation
+   * @memberof ContentfulEnvironmentAPI
+   * @param {string} id - AppDefintion ID
+   * @return {Promise<AppInstallation.AppInstallation>} Promise for an App Installation
+   * @example
+   * const contentful = require('contentful-management')
+   *
+   * const client = contentful.createClient({
+   *   accessToken: '<content_management_api_key>'
+   * })
+   *
+   * client.getSpace('<space_id>')
+   *  .then((space) => space.getEnvironment('<environment-id>'))
+   *  .then((environment) => environment.getAppInstallation('<app-definition-id>'))
+   *  .then((appInstallation) => console.log(appInstallation))
+   *  .catch(console.error)
+   */
+
+  function getAppInstallation(id) {
+    return http.get('app_installations/' + id).then(function (response) {
+      return wrapAppInstallation(http, response.data);
+    }, _error_handler__WEBPACK_IMPORTED_MODULE_2__["default"]);
+  }
+
+  /**
+   * Gets a collection of App Installation
+   * @memberof ContentfulEnvironmentAPI
+   * @return {Promise<AppInstallation.AppInstallationCollection>} Promise for a collection of App Installations
+   * @example
+   * const contentful = require('contentful-management')
+   *
+   * const client = contentful.createClient({
+   *   accessToken: '<content_management_api_key>'
+   * })
+   *
+   * client.getSpace('<space_id>')
+   *  .then((space) => space.getEnvironment('<environment-id>'))
+   *  .then((environment) => environment.getAppInstallations()
+   *  .then((response) => console.log(response.items))
+   *  .catch(console.error)
+   */
+  function getAppInstallations() {
+    return http.get('app_installations').then(function (response) {
+      return wrapAppInstallationCollection(http, response.data);
+    }, _error_handler__WEBPACK_IMPORTED_MODULE_2__["default"]);
+  }
+
+  /**
    * Gets all snapshots of an entry
    * @memberof ContentfulEnvironmentAPI
    * @func getEntrySnapshots
@@ -23372,7 +24107,78 @@ function createEnvironmentApi(_ref) {
     }
   }
 
+  /**
+   * Creates SDK Entry object (locally) from entry data
+   * @memberof ContentfulEnvironmentAPI
+   * @param {object} entryData - Entry Data
+   * @return {Entry.Entry} Entry
+   * @example
+   * environment.getEntry('entryId').then(entry => {
+   *
+   *   // Build a plainObject in order to make it usable for React (saving in state or redux)
+   *   const plainObject = entry.toPlainObject();
+   *
+   *   // The entry is being updated in some way as plainObject:
+   *   const updatedPlainObject = {
+   *     ...plainObject,
+   *     fields: {
+   *       ...plainObject.fields,
+   *       title: {
+   *         'en-US': 'updatedTitle'
+   *       }
+   *     }
+   *   };
+   *
+   *   // Rebuild an sdk object out of the updated plainObject:
+   *   const entryWithMethodsAgain = environment.getEntryFromData(updatedPlainObject);
+   *
+   *   // Update with help of the sdk method:
+   *   entryWithMethodsAgain.update();
+   *
+   * });
+   **/
+  function getEntryFromData(entryData) {
+    return wrapEntry(http, entryData);
+  }
+
+  /**
+   * Creates SDK Asset object (locally) from entry data
+   * @memberof ContentfulEnvironmentAPI
+   * @param {object} entryData - Asset ID
+   * @return {Asset.Asset} Asset
+   * @example
+   * environment.getAsset('asset_id').then(asset => {
+   *
+   *   // Build a plainObject in order to make it usable for React (saving in state or redux)
+   *   const plainObject = asset.toPlainObject();
+   *
+   *   // The asset is being updated in some way as plainObject:
+   *   const updatedPlainObject = {
+   *     ...plainObject,
+   *     fields: {
+   *       ...plainObject.fields,
+   *       title: {
+   *         'en-US': 'updatedTitle'
+   *       }
+   *     }
+   *   };
+   *
+   *   // Rebuild an sdk object out of the updated plainObject:
+   *   const assetWithMethodsAgain = environment.getAssetFromData(updatedPlainObject);
+   *
+   *   // Update with help of the sdk method:
+   *   assetWithMethodsAgain.update();
+   *
+   * });
+  */
+
+  function getAssetFromData(assetData) {
+    return wrapAsset(http, assetData);
+  }
+
   return {
+    getEntryFromData: getEntryFromData,
+    getAssetFromData: getAssetFromData,
     delete: deleteEnvironment,
     update: updateEnvironment,
     getContentType: getContentType,
@@ -23398,8 +24204,564 @@ function createEnvironmentApi(_ref) {
     getUiExtensions: getUiExtensions,
     createUiExtension: createUiExtension,
     createUiExtensionWithId: createUiExtensionWithId,
+    createAppInstallation: createAppInstallation,
+    getAppInstallation: getAppInstallation,
+    getAppInstallations: getAppInstallations,
     getEntrySnapshots: getEntrySnapshots,
     getContentTypeSnapshots: getContentTypeSnapshots
+  };
+}
+
+/***/ }),
+
+/***/ "./create-organization-api.js":
+/*!************************************!*\
+  !*** ./create-organization-api.js ***!
+  \************************************/
+/*! exports provided: default */
+/***/ (function(module, __webpack_exports__, __nested_webpack_require_278559__) {
+
+"use strict";
+__nested_webpack_require_278559__.r(__webpack_exports__);
+/* harmony export (binding) */ __nested_webpack_require_278559__.d(__webpack_exports__, "default", function() { return createOrganizationApi; });
+/* harmony import */ var lodash_get__WEBPACK_IMPORTED_MODULE_0__ = __nested_webpack_require_278559__(/*! lodash/get */ "../node_modules/lodash/get.js");
+/* harmony import */ var lodash_get__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__nested_webpack_require_278559__.n(lodash_get__WEBPACK_IMPORTED_MODULE_0__);
+/* harmony import */ var contentful_sdk_core__WEBPACK_IMPORTED_MODULE_1__ = __nested_webpack_require_278559__(/*! contentful-sdk-core */ "../node_modules/contentful-sdk-core/dist/index.es-modules.js");
+/* harmony import */ var _error_handler__WEBPACK_IMPORTED_MODULE_2__ = __nested_webpack_require_278559__(/*! ./error-handler */ "./error-handler.js");
+/* harmony import */ var _entities__WEBPACK_IMPORTED_MODULE_3__ = __nested_webpack_require_278559__(/*! ./entities */ "./entities/index.js");
+ /**
+                                * Contentful Organization API. Contains methods to access any operations at a organization level.
+                                * @namespace ContentfulOrganizationAPI
+                                */
+
+
+
+
+
+/**
+ * @memberof ContentfulOrganizationAPI
+ * @typedef {object} ContentfulOrganizationAPI
+ * @prop {function} createAppDefinition
+ * @prop {function} getAppDefinition
+ * @prop {function} getAppDefinitions
+ * @prop {function} getUser
+ * @prop {function} getUsers
+ * @prop {function} getOrganizationMembership
+ * @prop {function} getOrganizationMemberships
+ * @prop {function} createTeam
+ * @prop {function} getTeam
+ * @prop {function} getTeams
+ * @prop {function} createTeamMembership
+ * @prop {function} getTeamMembership
+ * @prop {function} getTeamMemberships
+ * @prop {function} getTeamSpaceMembership
+ * @prop {function} getTeamSpaceMemberships
+ * @prop {function} getOrganizationInvitation
+ * @prop {function} createOrganizationInvitation
+ */
+
+/**
+ * Creates API object with methods to access the Organization API
+ * @private
+ * @param {object} params - API initialization params
+ * @prop {object} http - HTTP client instance
+ * @prop {object} entities - Object with wrapper methods for each kind of entity
+ * @return {ContentfulOrganizationAPI}
+ */
+function createOrganizationApi(_ref) {
+  var http = _ref.http;
+  var _entities$appDefiniti = _entities__WEBPACK_IMPORTED_MODULE_3__["default"].appDefinition,
+      wrapAppDefinition = _entities$appDefiniti.wrapAppDefinition,
+      wrapAppDefinitionCollection = _entities$appDefiniti.wrapAppDefinitionCollection;
+  var _entities$user = _entities__WEBPACK_IMPORTED_MODULE_3__["default"].user,
+      wrapUser = _entities$user.wrapUser,
+      wrapUserCollection = _entities$user.wrapUserCollection;
+  var _entities$organizatio = _entities__WEBPACK_IMPORTED_MODULE_3__["default"].organizationMembership,
+      wrapOrganizationMembership = _entities$organizatio.wrapOrganizationMembership,
+      wrapOrganizationMembershipCollection = _entities$organizatio.wrapOrganizationMembershipCollection;
+  var _entities$teamMembers = _entities__WEBPACK_IMPORTED_MODULE_3__["default"].teamMembership,
+      wrapTeamMembership = _entities$teamMembers.wrapTeamMembership,
+      wrapTeamMembershipCollection = _entities$teamMembers.wrapTeamMembershipCollection;
+  var _entities$teamSpaceMe = _entities__WEBPACK_IMPORTED_MODULE_3__["default"].teamSpaceMembership,
+      wrapTeamSpaceMembership = _entities$teamSpaceMe.wrapTeamSpaceMembership,
+      wrapTeamSpaceMembershipCollection = _entities$teamSpaceMe.wrapTeamSpaceMembershipCollection;
+  var _entities$team = _entities__WEBPACK_IMPORTED_MODULE_3__["default"].team,
+      wrapTeam = _entities$team.wrapTeam,
+      wrapTeamCollection = _entities$team.wrapTeamCollection;
+  var _entities$spaceMember = _entities__WEBPACK_IMPORTED_MODULE_3__["default"].spaceMembership,
+      wrapSpaceMembership = _entities$spaceMember.wrapSpaceMembership,
+      wrapSpaceMembershipCollection = _entities$spaceMember.wrapSpaceMembershipCollection;
+  var wrapOrganizationInvitation = _entities__WEBPACK_IMPORTED_MODULE_3__["default"].organizationInvitation.wrapOrganizationInvitation;
+
+
+  var headers = { 'x-contentful-enable-alpha-feature': 'organization-user-management-api'
+
+    /**
+     * Organization instances.
+     * @namespace Organization
+     */
+
+    /**
+     * Gets an Organization Membership
+     * @memberof ContentfulOrganizationAPI
+     * @param {string} id - Organization Membership ID
+     * @return {Promise<OrganizationMembership.OrganizationMembership>} Promise for an Organization Membership
+     * @example
+     * const contentful = require('contentful-management')
+     *
+     * client.getOrganization('organization_id')
+     * .then((organization) => organization.getOrganizationMembership('organizationMembership_id'))
+     * .then((organizationMembership) => console.log(organizationMembership))
+     * .catch(console.error)
+     */
+  };function getOrganizationMembership(id) {
+    return http.get('organization_memberships/' + id).then(function (response) {
+      return wrapOrganizationMembership(http, response.data);
+    }, _error_handler__WEBPACK_IMPORTED_MODULE_2__["default"]);
+  }
+
+  /**
+   * Gets a collection of Organization Memberships
+   * @memberof ContentfulOrganizationAPI
+   * @param {object=} query - Object with search parameters. Check the <a href="https://www.contentful.com/developers/docs/javascript/tutorials/using-js-cda-sdk/#retrieving-entries-with-search-parameters">JS SDK tutorial</a> and the <a href="https://www.contentful.com/developers/docs/references/content-delivery-api/#/reference/search-parameters">REST API reference</a> for more details.
+   * @return {Promise<OrganizationMembership.OrganizationMembershipCollection>} Promise for a collection of Organization Memberships
+   * @example
+   * const contentful = require('contentful-management')
+   *
+   * client.getOrganization('organization_id')
+   * .then((organization) => organization.getOrganizationMemberships({'limit': 100})) // you can add more queries as 'key': 'value'
+   * .then((response) => console.log(response.items))
+   * .catch(console.error)
+   */
+  function getOrganizationMemberships() {
+    var query = arguments.length > 0 && arguments[0] !== undefined ? arguments[0] : {};
+
+    return http.get('organization_memberships', Object(contentful_sdk_core__WEBPACK_IMPORTED_MODULE_1__["createRequestConfig"])({ query: query })).then(function (response) {
+      return wrapOrganizationMembershipCollection(http, response.data);
+    }, _error_handler__WEBPACK_IMPORTED_MODULE_2__["default"]);
+  }
+
+  /**
+   * Gets an Space Membership in Organization
+   * @memberof ContentfulOrganizationAPI
+   * @param {string} id - Organiztion Space Membership ID
+   * @return {Promise<SpaceMembership>} Promise for a Space Membership in an organization
+   * @example
+   * const contentful = require('contentful-management')
+   *
+   * client.getOrganization('organization_id')
+   * .then((organization) => organization.getOrganizationSpaceMembership('organizationSpaceMembership_id'))
+   * .then((organizationMembership) => console.log(organizationMembership))
+   * .catch(console.error)
+   */
+  function getOrganizationSpaceMembership(id) {
+    return http.get('space_memberships/' + id).then(function (response) {
+      return wrapSpaceMembership(http, response.data);
+    }, _error_handler__WEBPACK_IMPORTED_MODULE_2__["default"]);
+  }
+
+  /**
+   * Gets a collection Space Memberships in organization
+   * @memberof ContentfulOrganizationAPI
+   * @param {object=} query - Object with search parameters. Check the <a href="https://www.contentful.com/developers/docs/javascript/tutorials/using-js-cda-sdk/#retrieving-entries-with-search-parameters">JS SDK tutorial</a> and the <a href="https://www.contentful.com/developers/docs/references/content-delivery-api/#/reference/search-parameters">REST API reference</a> for more details.
+   * @return {Promise<SpaceMembership[]>} Promise for a Space Membership collection across all spaces in the organization
+   * @example
+   * const contentful = require('contentful-management')
+   *
+   * client.getOrganization('organization_id')
+   * .then((organization) => organization.getOrganizationSpaceMemberships()) // you can add queries like 'limit': 100
+   * .then((response) => console.log(response.items))
+   * .catch(console.error)
+   */
+  function getOrganizationSpaceMemberships() {
+    var query = arguments.length > 0 && arguments[0] !== undefined ? arguments[0] : {};
+
+    return http.get('space_memberships', Object(contentful_sdk_core__WEBPACK_IMPORTED_MODULE_1__["createRequestConfig"])({ query: query })).then(function (response) {
+      return wrapSpaceMembershipCollection(http, response.data);
+    }, _error_handler__WEBPACK_IMPORTED_MODULE_2__["default"]);
+  }
+
+  /**
+   * Creates a Team membership
+   * @memberof ContentfulOrganizationAPI
+   * @see {TeamMembership}
+   * @param {object=} data - Object representation of the Team Membership to be created
+   * @return {Promise<TeamMembership.TeamMembership>} Promise for the newly created TeamMembership
+   * @example
+   * const contentful = require('contentful-management')
+   *
+   * const client = contentful.createClient({
+   *   accessToken: '<content_management_api_key>'
+   * })
+   *
+   * client.getOrganization('organizationId')
+   * .then((org) => org.createTeamMembership('teamId', {
+   *    admin: true,
+   *    organizationMembershipId: "3ugleZJgHKk89I1P5MSDuY"
+   *  }))
+   * .then((teamMembership) => console.log(teamMembership))
+   * .catch(console.error)
+   */
+  function createTeamMembership(teamId) {
+    var data = arguments.length > 1 && arguments[1] !== undefined ? arguments[1] : {};
+
+    return http.post('teams/' + teamId + '/team_memberships', data).then(function (response) {
+      return wrapTeamMembership(http, response.data);
+    }, _error_handler__WEBPACK_IMPORTED_MODULE_2__["default"]);
+  }
+
+  /**
+   * Gets an Team Membership from the team with given teamId
+   * @memberof ContentfulOrganizationAPI
+   * @param {string} teamId - Team ID
+   * @param {string} id - Team Membership ID
+   * @return {Promise<TeamMembership>} Promise for an Team Membership
+   * @example
+   * const contentful = require('contentful-management')
+   *
+   * client.getOrganization('organizationId')
+   * .then((organization) => organization.getTeamMembership('teamId', 'teamMembership_id'))
+   * .then((teamMembership) => console.log(teamMembership))
+   * .catch(console.error)
+   */
+  function getTeamMembership(teamId, teamMembershipId) {
+    return http.get('teams/' + teamId + '/team_memberships/' + teamMembershipId).then(function (response) {
+      return wrapTeamMembership(http, response.data);
+    }, _error_handler__WEBPACK_IMPORTED_MODULE_2__["default"]);
+  }
+
+  /**
+   * Get all Team Memberships. If teamID is provided in the optional config object, it will return all Team Memberships in that team. By default, returns all team memberships for the organization.
+   * @memberof ContentfulOrganizationAPI
+   * @param {object=} opts
+   * @param {string} opts.teamId
+   * @param {object=} opts.query - Object with search parameters. Check the <a href="https://www.contentful.com/developers/docs/javascript/tutorials/using-js-cda-sdk/#retrieving-entries-with-search-parameters">JS SDK tutorial</a> and the <a href="https://www.contentful.com/developers/docs/references/content-delivery-api/#/reference/search-parameters">REST API reference</a> for more details.
+   * @return {Promise<TeamMembership[]>} Promise for a Team Membership Collection
+   * @example
+   * const contentful = require('contentful-management')
+   *
+   * client.getOrganization('organizationId')
+   * .then((organization) => organization.getTeamMemberships('teamId'))
+   * .then((teamMemberships) => console.log(teamMemberships))
+   * .catch(console.error)
+   */
+  function getTeamMemberships() {
+    var opts = arguments.length > 0 && arguments[0] !== undefined ? arguments[0] : {};
+
+    var query = lodash_get__WEBPACK_IMPORTED_MODULE_0___default()(opts, 'query', {});
+    if (opts.teamId) {
+      return http.get('teams/' + opts.teamId + '/team_memberships', Object(contentful_sdk_core__WEBPACK_IMPORTED_MODULE_1__["createRequestConfig"])({ query: query })).then(function (response) {
+        return wrapTeamMembershipCollection(http, response.data);
+      }, _error_handler__WEBPACK_IMPORTED_MODULE_2__["default"]);
+    }
+    return http.get('team_memberships', Object(contentful_sdk_core__WEBPACK_IMPORTED_MODULE_1__["createRequestConfig"])({ query: query })).then(function (response) {
+      return wrapTeamMembershipCollection(http, response.data);
+    }, _error_handler__WEBPACK_IMPORTED_MODULE_2__["default"]);
+  }
+
+  /**
+   * Get a Team Space Membership with given teamSpaceMembershipId
+   * @memberof ContentfulOrganizationAPI
+   * @param {string} teamSpaceMembershipId
+   * @return {Promise<TeamMembership>} Promise for a Team Space Membership
+   * @example
+   * const contentful = require('contentful-management')
+   *
+   * client.getOrganization('organizationId')
+   * .then((organization) => organization.getTeamSpaceMembership('teamSpaceMembershipId'))
+   * .then((teamSpaceMembership) => console.log(teamSpaceMembership))
+   * .catch(console.error)
+   */
+  function getTeamSpaceMembership(teamSpaceMembershipId) {
+    return http.get('team_space_memberships/' + teamSpaceMembershipId).then(function (response) {
+      return wrapTeamSpaceMembership(http, response.data);
+    }, _error_handler__WEBPACK_IMPORTED_MODULE_2__["default"]);
+  }
+
+  /**
+   * Get all Team Space Memberships. If teamID is provided in the optional config object, it will return all Team Space Memberships in that team. By default, returns all team space memberships across all teams in the organization.
+   * @memberof ContentfulOrganizationAPI
+   * @param {object=} opts
+   * @param {string} opts.teamId
+   * @param {object=} opts.query - Object with search parameters. Check the <a href="https://www.contentful.com/developers/docs/javascript/tutorials/using-js-cda-sdk/#retrieving-entries-with-search-parameters">JS SDK tutorial</a> and the <a href="https://www.contentful.com/developers/docs/references/content-delivery-api/#/reference/search-parameters">REST API reference</a> for more details.
+   * @return {Promise<TeamSpaceMembership[]>} Promise for a Team Space Membership Collection
+   * @example
+   * const contentful = require('contentful-management')
+   *
+   * client.getOrganization('organizationId')
+   * .then((organization) => organization.getTeamSpaceMemberships('teamId'))
+   * .then((teamSpaceMemberships) => console.log(teamSpaceMemberships))
+   * .catch(console.error)
+   */
+  function getTeamSpaceMemberships() {
+    var opts = arguments.length > 0 && arguments[0] !== undefined ? arguments[0] : {};
+
+    var query = lodash_get__WEBPACK_IMPORTED_MODULE_0___default()(opts, 'query', {});
+    if (opts.teamId) {
+      query['sys.team.sys.id'] = opts.teamId;
+    }
+    return http.get('team_space_memberships', Object(contentful_sdk_core__WEBPACK_IMPORTED_MODULE_1__["createRequestConfig"])({ query: query })).then(function (response) {
+      return wrapTeamSpaceMembershipCollection(http, response.data);
+    }, _error_handler__WEBPACK_IMPORTED_MODULE_2__["default"]);
+  }
+
+  /**
+   * Creates a Team
+   * @memberof ContentfulOrganizationAPI
+   * @see {Team}
+   * @param {object=} data - Object representation of the Team to be created
+   * @return {Promise<TeamMembership.TeamMembership>} Promise for the newly created Team
+   * @example
+   * const contentful = require('contentful-management')
+   *
+   * const client = contentful.createClient({
+   *   accessToken: '<content_management_api_key>'
+   * })
+   *
+   * client.getOrganization('<org_id>')
+   * .then((org) => org.createTeam({
+   *    name: 'new team',
+   *    description: 'new team description'
+   *  }))
+   * .then((team) => console.log(team))
+   * .catch(console.error)
+   */
+  function createTeam() {
+    var data = arguments.length > 0 && arguments[0] !== undefined ? arguments[0] : {};
+
+    return http.post('teams', data).then(function (response) {
+      return wrapTeam(http, response.data);
+    }, _error_handler__WEBPACK_IMPORTED_MODULE_2__["default"]);
+  }
+
+  /**
+   * Gets an Team
+   * @memberof ContentfulOrganizationAPI
+   * @param {string} id - Team ID
+   * @return {Promise<Team>} Promise for an Team
+   * @example
+   * const contentful = require('contentful-management')
+   *
+   * client.getOrganizations()
+   * .then((organization) => organization.getTeam('teamId'))
+   * .then((team) => console.log(team))
+   * .catch(console.error)
+   */
+  function getTeam(teamId) {
+    return http.get('teams/' + teamId).then(function (response) {
+      return wrapTeam(http, response.data, teamId);
+    }, _error_handler__WEBPACK_IMPORTED_MODULE_2__["default"]);
+  }
+
+  /**
+   * Gets all Teams in an organization
+   * @memberof ContentfulOrganizationAPI
+   * @param {string} id - Team ID
+   * @return {Promise<Team[]>} Promise for a Team Collection
+   * @example
+   * const contentful = require('contentful-management')
+   *
+   * client.getOrganizations()
+   * .then((organization) => organization.getTeams())
+   * .then((teams) => console.log(teams))
+   * .catch(console.error)
+   */
+  function getTeams() {
+    var query = arguments.length > 0 && arguments[0] !== undefined ? arguments[0] : {};
+
+    return http.get('teams', Object(contentful_sdk_core__WEBPACK_IMPORTED_MODULE_1__["createRequestConfig"])({ query: query })).then(function (response) {
+      return wrapTeamCollection(http, response.data);
+    }, _error_handler__WEBPACK_IMPORTED_MODULE_2__["default"]);
+  }
+
+  /**
+   * Gets an Invitation in Organization
+   * @memberof ContentfulOrganizationAPI
+   * @param {string} id - Invitation ID
+   * @return {Promise<OrganizationInvitation>} Promise for a OrganizationInvitation in an organization
+   * @example
+   * const contentful = require('contentful-management')
+   *
+   * client.getOrganization('<org_id>')
+   * .then((organization) => organization.getOrganizationInvitation('invitation_id'))
+   * .then((invitation) => console.log(invitation))
+   * .catch(console.error)
+   */
+  function getOrganizationInvitation(id) {
+    return http.get('invitations/' + id, {
+      headers: headers
+    }).then(function (response) {
+      return wrapOrganizationInvitation(http, response.data);
+    }, _error_handler__WEBPACK_IMPORTED_MODULE_2__["default"]);
+  }
+
+  /**
+   * Create an Invitation in Organization
+   * @memberof ContentfulOrganizationAPI
+   * @param {string} id - Invitation ID
+   * @return {Promise<OrganizationInvitation>} Promise for a OrganizationInvitation in an organization
+   * @example
+   * const contentful = require('contentful-management')
+   *
+   * const client = contentful.createClient({
+   *   accessToken: '<content_management_api_key>'
+   * })
+   *
+   * client.getOrganization('<org_id>')
+   *  .then((organization) => organization.createOrganizationInvitation({
+   *    email: 'user.email@example.com'
+   *    firstName: 'User First Name'
+   *    lastName: 'User Last Name'
+   *    role: 'developer'
+   *  })
+   * .catch(console.error)
+   */
+  function createOrganizationInvitation(data) {
+    var invitationAlphaHeaders = {
+      'x-contentful-enable-alpha-feature': 'pending-org-membership'
+    };
+
+    return http.post('invitations', data, { headers: invitationAlphaHeaders }).then(function (response) {
+      return wrapOrganizationInvitation(http, response.data);
+    }, _error_handler__WEBPACK_IMPORTED_MODULE_2__["default"]);
+  }
+
+  /**
+   * Gets all app definitions
+   * @memberof ContentfulOrganizationAPI
+   * @return {Promise<AppDefinition.AppDefinitionCollection>} Promise for a collection of App Definitions
+   * @example
+   * const contentful = require('contentful-management')
+   *
+   * const client = contentful.createClient({
+   *   accessToken: '<content_management_api_key>'
+   * })
+   *
+   * client.getOrganization('<org_id>')
+   * .then((org) => org.getAppDefinitions())
+   * .then((response) => console.log(response.items))
+   * .catch(console.error)
+   */
+  function getAppDefinitions() {
+    var query = arguments.length > 0 && arguments[0] !== undefined ? arguments[0] : {};
+
+    return http.get('app_definitions', Object(contentful_sdk_core__WEBPACK_IMPORTED_MODULE_1__["createRequestConfig"])({ query: query })).then(function (response) {
+      return wrapAppDefinitionCollection(http, response.data);
+    }, _error_handler__WEBPACK_IMPORTED_MODULE_2__["default"]);
+  }
+
+  /**
+   * Gets an app definition
+   * @memberof ContentfulOrganizationAPI
+   * @return {Promise<AppDefinition.AppDefinition>} Promise for an App Definition
+   * @example
+   * const contentful = require('contentful-management')
+   *
+   * const client = contentful.createClient({
+   *   accessToken: '<content_management_api_key>'
+   * })
+   *
+   * client.getOrganization('<org_id>')
+   * .then((org) => org.getAppDefinition('<app_definition_id>'))
+   * .then((appDefinition) => console.log(appDefinition))
+   * .catch(console.error)
+   */
+  function getAppDefinition(id) {
+    return http.get('app_definitions/' + id).then(function (response) {
+      return wrapAppDefinition(http, response.data);
+    }, _error_handler__WEBPACK_IMPORTED_MODULE_2__["default"]);
+  }
+
+  /**
+   * Creates an app definition
+   * @memberof ContentfulOrganizationAPI
+   * @see {AppDefinition}
+   * @param {object=} data - Object representation of the App Definition to be created
+   * @return {Promise<AppDefinition.AppDefinition>} Promise for the newly created AppDefinition
+   * @example
+   * const contentful = require('contentful-management')
+   *
+   * const client = contentful.createClient({
+   *   accessToken: '<content_management_api_key>'
+   * })
+   *
+   * client.getOrganization('<org_id>')
+   * .then((org) => org.createAppDefinition({
+   *    name: 'Example app',
+   *    locations: [{ location: 'app-config' }],
+   *    src: "http://my-app-host.com/my-app"
+   *  }))
+   * .then((appDefinition) => console.log(appDefinition))
+   * .catch(console.error)
+   */
+  function createAppDefinition() {
+    var data = arguments.length > 0 && arguments[0] !== undefined ? arguments[0] : {};
+
+    return http.post('app_definitions', data).then(function (response) {
+      return wrapAppDefinition(http, response.data);
+    }, _error_handler__WEBPACK_IMPORTED_MODULE_2__["default"]);
+  }
+
+  /**
+   * Gets a User
+   * @memberof ContentfulOrganizationAPI
+   * @param {string} id - User ID
+   * @return {Promise<User.User>} Promise for a User
+   * @example
+   * const contentful = require('contentful-management')
+   *
+   * client.getOrganization('<organization_id>')
+   * .then((organization) => organization.getUser('id'))
+   * .then((user) => console.log(user))
+   * .catch(console.error)
+   */
+  function getUser(id) {
+    return http.get('users/' + id).then(function (response) {
+      return wrapUser(http, response.data);
+    }, _error_handler__WEBPACK_IMPORTED_MODULE_2__["default"]);
+  }
+
+  /**
+   * Gets a collection of Users in organization
+   * @memberof ContentfulOrganizationAPI
+   * @param {object=} query - Object with search parameters. Check the <a href="https://www.contentful.com/developers/docs/javascript/tutorials/using-js-cda-sdk/#retrieving-entries-with-search-parameters">JS SDK tutorial</a> and the <a href="https://www.contentful.com/developers/docs/references/content-delivery-api/#/reference/search-parameters">REST API reference</a> for more details.
+   * @return {Promise<User.UserCollection>} Promise a collection of Users in organization
+   * @example
+   * const contentful = require('contentful-management')
+   *
+   * client.getOrganization('<organization_id>')
+   * .then((organization) => organization.getUsers())
+   * .then((user) => console.log(user))
+   * .catch(console.error)
+   */
+  function getUsers() {
+    var query = arguments.length > 0 && arguments[0] !== undefined ? arguments[0] : {};
+
+    return http.get('users', Object(contentful_sdk_core__WEBPACK_IMPORTED_MODULE_1__["createRequestConfig"])({ query: query })).then(function (response) {
+      return wrapUserCollection(http, response.data);
+    }, _error_handler__WEBPACK_IMPORTED_MODULE_2__["default"]);
+  }
+
+  return {
+    getAppDefinition: getAppDefinition,
+    getAppDefinitions: getAppDefinitions,
+    getUser: getUser,
+    getUsers: getUsers,
+    createAppDefinition: createAppDefinition,
+    getOrganizationMembership: getOrganizationMembership,
+    getOrganizationMemberships: getOrganizationMemberships,
+    createTeam: createTeam,
+    getTeam: getTeam,
+    getTeams: getTeams,
+    createTeamMembership: createTeamMembership,
+    getTeamMembership: getTeamMembership,
+    getTeamMemberships: getTeamMemberships,
+    getTeamSpaceMemberships: getTeamSpaceMemberships,
+    getTeamSpaceMembership: getTeamSpaceMembership,
+    getOrganizationSpaceMembership: getOrganizationSpaceMembership,
+    getOrganizationSpaceMemberships: getOrganizationSpaceMemberships,
+    getOrganizationInvitation: getOrganizationInvitation,
+    createOrganizationInvitation: createOrganizationInvitation
   };
 }
 
@@ -23410,16 +24772,16 @@ function createEnvironmentApi(_ref) {
   !*** ./create-space-api.js ***!
   \*****************************/
 /*! exports provided: default */
-/***/ (function(module, __webpack_exports__, __nested_webpack_require_267115__) {
+/***/ (function(module, __webpack_exports__, __nested_webpack_require_303848__) {
 
 "use strict";
-__nested_webpack_require_267115__.r(__webpack_exports__);
-/* harmony export (binding) */ __nested_webpack_require_267115__.d(__webpack_exports__, "default", function() { return createSpaceApi; });
-/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__ = __nested_webpack_require_267115__(/*! lodash/cloneDeep */ "../node_modules/lodash/cloneDeep.js");
-/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__nested_webpack_require_267115__.n(lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__);
-/* harmony import */ var contentful_sdk_core__WEBPACK_IMPORTED_MODULE_1__ = __nested_webpack_require_267115__(/*! contentful-sdk-core */ "../node_modules/contentful-sdk-core/dist/index.es-modules.js");
-/* harmony import */ var _error_handler__WEBPACK_IMPORTED_MODULE_2__ = __nested_webpack_require_267115__(/*! ./error-handler */ "./error-handler.js");
-/* harmony import */ var _entities__WEBPACK_IMPORTED_MODULE_3__ = __nested_webpack_require_267115__(/*! ./entities */ "./entities/index.js");
+__nested_webpack_require_303848__.r(__webpack_exports__);
+/* harmony export (binding) */ __nested_webpack_require_303848__.d(__webpack_exports__, "default", function() { return createSpaceApi; });
+/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__ = __nested_webpack_require_303848__(/*! lodash/cloneDeep */ "../node_modules/lodash/cloneDeep.js");
+/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__nested_webpack_require_303848__.n(lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__);
+/* harmony import */ var contentful_sdk_core__WEBPACK_IMPORTED_MODULE_1__ = __nested_webpack_require_303848__(/*! contentful-sdk-core */ "../node_modules/contentful-sdk-core/dist/index.es-modules.js");
+/* harmony import */ var _error_handler__WEBPACK_IMPORTED_MODULE_2__ = __nested_webpack_require_303848__(/*! ./error-handler */ "./error-handler.js");
+/* harmony import */ var _entities__WEBPACK_IMPORTED_MODULE_3__ = __nested_webpack_require_303848__(/*! ./entities */ "./entities/index.js");
 var _extends = Object.assign || function (target) { for (var i = 1; i < arguments.length; i++) { var source = arguments[i]; for (var key in source) { if (Object.prototype.hasOwnProperty.call(source, key)) { target[key] = source[key]; } } } return target; };
 
 function _defineProperty(obj, key, value) { if (key in obj) { Object.defineProperty(obj, key, { value: value, enumerable: true, configurable: true, writable: true }); } else { obj[key] = value; } return obj; }
@@ -23467,10 +24829,17 @@ function _defineProperty(obj, key, value) { if (key in obj) { Object.definePrope
  * @prop {function} getRoles
  * @prop {function} createRole
  * @prop {function} createRoleWithId
+ * @prop {function} getSpaceUser
+ * @prop {function} getSpaceUsers
+ * @prop {function} getSpaceMember
+ * @prop {function} getSpaceMembers
  * @prop {function} getSpaceMembership
  * @prop {function} getSpaceMemberships
  * @prop {function} createSpaceMembership
  * @prop {function} createSpaceMembershipWithId
+ * @prop {function} createTeamSpaceMembership
+ * @prop {function} getTeamSpaceMembership
+ * @prop {function} getTeamSpaceMemberships
  * @prop {function} getApiKey
  * @prop {function} getApiKeys
  * @prop {function} createApiKey
@@ -23481,10 +24850,16 @@ function _defineProperty(obj, key, value) { if (key in obj) { Object.definePrope
  * @prop {function} createUiExtensionWithId
  * @prop {function} getEntrySnapshots
  * @prop {function} getContentTypeSnapshots
+ * @prop {function} getEnvironmentAliases
+ * @prop {function} getEnvironmentAlias
  */
 
 function raiseDeprecationWarning(method) {
   console.warn(['Deprecated: Space.' + method + '() will be removed in future major versions.', null, 'Please migrate your code to use Environment.' + method + '():', 'https://contentful.github.io/contentful-management.js/contentful-management/latest/ContentfulEnvironmentAPI.html#.' + method, null].join('\n'));
+}
+
+function spaceMembershipDeprecationWarning() {
+  console.warn('The user attribute in the space membership root is deprecated. The attribute has been moved inside the sys  object (i.e. sys.user)');
 }
 
 /**
@@ -23520,9 +24895,18 @@ function createSpaceApi(_ref) {
   var _entities$role = _entities__WEBPACK_IMPORTED_MODULE_3__["default"].role,
       wrapRole = _entities$role.wrapRole,
       wrapRoleCollection = _entities$role.wrapRoleCollection;
-  var _entities$spaceMember = _entities__WEBPACK_IMPORTED_MODULE_3__["default"].spaceMembership,
-      wrapSpaceMembership = _entities$spaceMember.wrapSpaceMembership,
-      wrapSpaceMembershipCollection = _entities$spaceMember.wrapSpaceMembershipCollection;
+  var _entities$user = _entities__WEBPACK_IMPORTED_MODULE_3__["default"].user,
+      wrapUser = _entities$user.wrapUser,
+      wrapUserCollection = _entities$user.wrapUserCollection;
+  var _entities$spaceMember = _entities__WEBPACK_IMPORTED_MODULE_3__["default"].spaceMember,
+      wrapSpaceMember = _entities$spaceMember.wrapSpaceMember,
+      wrapSpaceMemberCollection = _entities$spaceMember.wrapSpaceMemberCollection;
+  var _entities$spaceMember2 = _entities__WEBPACK_IMPORTED_MODULE_3__["default"].spaceMembership,
+      wrapSpaceMembership = _entities$spaceMember2.wrapSpaceMembership,
+      wrapSpaceMembershipCollection = _entities$spaceMember2.wrapSpaceMembershipCollection;
+  var _entities$teamSpaceMe = _entities__WEBPACK_IMPORTED_MODULE_3__["default"].teamSpaceMembership,
+      wrapTeamSpaceMembership = _entities$teamSpaceMe.wrapTeamSpaceMembership,
+      wrapTeamSpaceMembershipCollection = _entities$teamSpaceMe.wrapTeamSpaceMembershipCollection;
   var _entities$apiKey = _entities__WEBPACK_IMPORTED_MODULE_3__["default"].apiKey,
       wrapApiKey = _entities$apiKey.wrapApiKey,
       wrapApiKeyCollection = _entities$apiKey.wrapApiKeyCollection;
@@ -23535,6 +24919,9 @@ function createSpaceApi(_ref) {
   var _entities$uiExtension = _entities__WEBPACK_IMPORTED_MODULE_3__["default"].uiExtension,
       wrapUiExtension = _entities$uiExtension.wrapUiExtension,
       wrapUiExtensionCollection = _entities$uiExtension.wrapUiExtensionCollection;
+  var _entities$environment2 = _entities__WEBPACK_IMPORTED_MODULE_3__["default"].environmentAlias,
+      wrapEnvironmentAlias = _entities$environment2.wrapEnvironmentAlias,
+      wrapEnvironmentAliasCollection = _entities$environment2.wrapEnvironmentAliasCollection;
 
   /**
    * Space instances.
@@ -24428,7 +25815,88 @@ function createSpaceApi(_ref) {
   }
 
   /**
+   * Gets a User
+   * @memberof ContentfulSpaceAPI
+   * @param {string} id - User ID
+   * @return {Promise<User.User>} Promise for a User
+   * @example
+   * const contentful = require('contentful-management')
+   *
+   * client.getSpace('<space_id>')
+   * .then((space) => space.getSpaceUser('id'))
+   * .then((user) => console.log(user))
+   * .catch(console.error)
+   */
+  function getSpaceUser(id) {
+    return http.get('users/' + id).then(function (response) {
+      return wrapUser(http, response.data);
+    }, _error_handler__WEBPACK_IMPORTED_MODULE_2__["default"]);
+  }
+
+  /**
+   * Gets a collection of Users in a space
+   * @memberof ContentfulSpaceAPI
+   * @param {object=} query - Object with search parameters. Check the <a href="https://www.contentful.com/developers/docs/javascript/tutorials/using-js-cda-sdk/#retrieving-entries-with-search-parameters">JS SDK tutorial</a> and the <a href="https://www.contentful.com/developers/docs/references/content-delivery-api/#/reference/search-parameters">REST API reference</a> for more details.
+   * @return {Promise<User.UserCollection>} Promise a collection of Users in a space
+   * @example
+   * const contentful = require('contentful-management')
+   *
+   * client.getSpace('<space_id>')
+   * .then((space) => space.getSpaceUsers(query))
+   * .then((data) => console.log(data))
+   * .catch(console.error)
+   */
+  function getSpaceUsers() {
+    var query = arguments.length > 0 && arguments[0] !== undefined ? arguments[0] : {};
+
+    return http.get('users/', Object(contentful_sdk_core__WEBPACK_IMPORTED_MODULE_1__["createRequestConfig"])({ query: query })).then(function (response) {
+      return wrapUserCollection(http, response.data);
+    }, _error_handler__WEBPACK_IMPORTED_MODULE_2__["default"]);
+  }
+
+  /**
+   * Gets a Space Member
+   * @memberof ContentfulSpaceAPI
+   * @param {object=} id Get Space Member by user_id
+   * @return {Promise<SpaceMember.SpaceMember>} Promise for a Space Member
+   * @example
+   * const contentful = require('contentful-management')
+   *
+   * client.getSpace('<space_id>')
+   * .then((space) => space.getSpaceMember(id))
+   * .then((spaceMember) => console.log(spaceMember))
+   * .catch(console.error)
+   */
+  function getSpaceMember(id) {
+    return http.get('space_members/' + id).then(function (response) {
+      return wrapSpaceMember(http, response.data);
+    }, _error_handler__WEBPACK_IMPORTED_MODULE_2__["default"]);
+  }
+
+  /**
+   * Gets a collection of Space Members
+   * @memberof ContentfulSpaceAPI
+   * @param {object=} query
+   * @return {Promise<SpaceMember.SpaceMemberCollection>} Promise for a collection of Space Members
+   * @example
+   * const contentful = require('contentful-management')
+   *
+   * client.getSpace('<space_id>')
+   * .then((space) => space.getSpaceMembers({'limit': 100}))
+   * .then((spaceMemberCollection) => console.log(spaceMemberCollection))
+   * .catch(console.error)
+   */
+  function getSpaceMembers() {
+    var query = arguments.length > 0 && arguments[0] !== undefined ? arguments[0] : {};
+
+    return http.get('space_members', Object(contentful_sdk_core__WEBPACK_IMPORTED_MODULE_1__["createRequestConfig"])({ query: query })).then(function (response) {
+      return wrapSpaceMemberCollection(http, response.data);
+    }, _error_handler__WEBPACK_IMPORTED_MODULE_2__["default"]);
+  }
+
+  /**
    * Gets a Space Membership
+   * Warning: the user attribute in the space membership root is deprecated. The attribute has been moved inside the sys  object (i.e. sys.user).
    * @memberof ContentfulSpaceAPI
    * @param {string} id - Space Membership ID
    * @return {Promise<SpaceMembership.SpaceMembership>} Promise for a Space Membership
@@ -24441,6 +25909,7 @@ function createSpaceApi(_ref) {
    * .catch(console.error)
    */
   function getSpaceMembership(id) {
+    spaceMembershipDeprecationWarning();
     return http.get('space_memberships/' + id).then(function (response) {
       return wrapSpaceMembership(http, response.data);
     }, _error_handler__WEBPACK_IMPORTED_MODULE_2__["default"]);
@@ -24448,6 +25917,7 @@ function createSpaceApi(_ref) {
 
   /**
    * Gets a collection of Space Memberships
+   * Warning: the user attribute in the space membership root is deprecated. The attribute has been moved inside the sys  object (i.e. sys.user).
    * @memberof ContentfulSpaceAPI
    * @param {object=} query - Object with search parameters. Check the <a href="https://www.contentful.com/developers/docs/javascript/tutorials/using-js-cda-sdk/#retrieving-entries-with-search-parameters">JS SDK tutorial</a> and the <a href="https://www.contentful.com/developers/docs/references/content-delivery-api/#/reference/search-parameters">REST API reference</a> for more details.
    * @return {Promise<SpaceMembership.SpaceMembershipCollection>} Promise for a collection of Space Memberships
@@ -24462,14 +25932,96 @@ function createSpaceApi(_ref) {
   function getSpaceMemberships() {
     var query = arguments.length > 0 && arguments[0] !== undefined ? arguments[0] : {};
 
+    spaceMembershipDeprecationWarning();
     return http.get('space_memberships', Object(contentful_sdk_core__WEBPACK_IMPORTED_MODULE_1__["createRequestConfig"])({ query: query })).then(function (response) {
       return wrapSpaceMembershipCollection(http, response.data);
     }, _error_handler__WEBPACK_IMPORTED_MODULE_2__["default"]);
   }
 
   /**
+   * Creates a Team Space Membership
+   * @memberof ContentfulSpaceAPI
+   * @see {TeamSpaceMembership.TeamSpaceMembership}
+   * @param {string} id - Team ID
+   * @param {object} data - Object representation of the Team Space Membership to be created
+   * @return {Promise<TeamSpaceMembership.TeamSpaceMembership>} Promise for the newly created Team Space Membership
+   * @example
+   * const contentful = require('contentful-management')
+   *
+   * const client = contentful.createClient({
+   *   accessToken: '<content_management_api_key>'
+   * })
+   *
+   * client.getSpace('<space_id>')
+   * .then((space) => space.createTeamSpaceMembership('team_id', {
+   *   admin: false,
+   *   roles: [
+   *     {
+   *       type: 'Link',
+   *       linkType: 'Role',
+   *       id: '<role_id>'
+   *     }
+   *   ],
+   * }))
+   * .then((teamSpaceMembership) => console.log(teamSpaceMembership))
+   * .catch(console.error)
+   */
+  function createTeamSpaceMembership(teamId) {
+    var data = arguments.length > 1 && arguments[1] !== undefined ? arguments[1] : {};
+
+    return http.post('team_space_memberships', data, {
+      headers: {
+        'x-contentful-team': teamId
+      }
+    }).then(function (response) {
+      return wrapTeamSpaceMembership(http, response.data);
+    }, _error_handler__WEBPACK_IMPORTED_MODULE_2__["default"]);
+  }
+
+  /**
+   * Gets a Team Space Membership
+   * @memberof ContentfulSpaceAPI
+   * @param {string} id - Team Space Membership ID
+   * @return {Promise<TeamSpaceMembership.TeamSpaceMembership>} Promise for a Team Space Membership
+   * @example
+   * const contentful = require('contentful-management')
+   *
+   * client.getSpace('<space_id>')
+   * .then((space) => space.getTeamSpaceMembership('team_space_membership_id'))
+   * .then((teamSpaceMembership) => console.log(teamSpaceMembership))
+   * .catch(console.error)
+   */
+  function getTeamSpaceMembership(teamSpaceMembershipId) {
+    return http.get('team_space_memberships/' + teamSpaceMembershipId).then(function (response) {
+      return wrapTeamSpaceMembership(http, response.data);
+    }, _error_handler__WEBPACK_IMPORTED_MODULE_2__["default"]);
+  }
+
+  /**
+   * Gets a collection of Team Space Memberships
+   * @memberof ContentfulSpaceAPI
+   * @param {object=} query - Object with search parameters. Check the <a href="https://www.contentful.com/developers/docs/javascript/tutorials/using-js-cda-sdk/#retrieving-entries-with-search-parameters">JS SDK tutorial</a> and the <a href="https://www.contentful.com/developers/docs/references/content-delivery-api/#/reference/search-parameters">REST API reference</a> for more details.
+   * @return {Promise<TeamSpaceMembership.TeamSpaceMembershipCollection>} Promise for a collection of Team Space Memberships
+   * @example
+   * const contentful = require('contentful-management')
+   *
+   * client.getSpace('<space_id>')
+   * .then((space) => space.getTeamSpaceMemberships())
+   * .then((response) => console.log(response.items))
+   * .catch(console.error)
+   */
+  function getTeamSpaceMemberships() {
+    var query = arguments.length > 0 && arguments[0] !== undefined ? arguments[0] : {};
+
+    return http.get('team_space_memberships', { query: query }).then(function (response) {
+      return wrapTeamSpaceMembershipCollection(http, response.data);
+    }, _error_handler__WEBPACK_IMPORTED_MODULE_2__["default"]);
+  }
+
+  /**
    * Creates a Space Membership
    * @memberof ContentfulSpaceAPI
+   * Warning: the user attribute in the space membership root is deprecated. The attribute has been moved inside the sys  object (i.e. sys.user).
    * @see {SpaceMembership.SpaceMembership}
    * @param {object} data - Object representation of the Space Membership to be created
    * @return {Promise<SpaceMembership.SpaceMembership>} Promise for the newly created Space Membership
@@ -24496,6 +26048,7 @@ function createSpaceApi(_ref) {
    * .catch(console.error)
    */
   function createSpaceMembership(data) {
+    spaceMembershipDeprecationWarning();
     return http.post('space_memberships', data).then(function (response) {
       return wrapSpaceMembership(http, response.data);
     }, _error_handler__WEBPACK_IMPORTED_MODULE_2__["default"]);
@@ -24504,6 +26057,7 @@ function createSpaceApi(_ref) {
   /**
    * Creates a Space Membership with a custom ID
    * @memberof ContentfulSpaceAPI
+   * Warning: the user attribute in the space membership root is deprecated. The attribute has been moved inside the sys  object (i.e. sys.user).
    * @see {SpaceMembership.SpaceMembership}
    * @param {string} id - Space Membership ID
    * @param {object} data - Object representation of the Space Membership to be created
@@ -24531,6 +26085,7 @@ function createSpaceApi(_ref) {
    * .catch(console.error)
    */
   function createSpaceMembershipWithId(id, data) {
+    spaceMembershipDeprecationWarning();
     return http.put('space_memberships/' + id, data).then(function (response) {
       return wrapSpaceMembership(http, response.data);
     }, _error_handler__WEBPACK_IMPORTED_MODULE_2__["default"]);
@@ -25044,6 +26599,51 @@ function createSpaceApi(_ref) {
     }, _error_handler__WEBPACK_IMPORTED_MODULE_2__["default"]);
   }
 
+  /**
+   * Gets an Environment Alias
+   * @memberof ContentfulSpaceAPI
+   * @param {string} id - Environment Alias ID
+   * @return {Promise<EnvironmentAlias.EnvironmentAlias>} Promise for an Environment Alias
+   * @example
+   * const contentful = require('contentful-management')
+   *
+   * const client = contentful.createClient({
+   *   accessToken: '<content_management_api_key>'
+   * })
+   *
+   * client.getSpace('<space_id>')
+   * .then((space) => space.getEnvironmentAlias('<alias-id>'))
+   * .then((alias) => console.log(alias))
+   * .catch(console.error)
+   */
+  function getEnvironmentAlias(id) {
+    return http.get('environment_aliases/' + id).then(function (response) {
+      return wrapEnvironmentAlias(http, response.data);
+    }, _error_handler__WEBPACK_IMPORTED_MODULE_2__["default"]);
+  }
+
+  /**
+   * Gets a collection of Environment Aliases
+   * @memberof ContentfulSpaceAPI
+   * @return {Promise<EnvironmentAlias.EnvironmentAliasCollection>} Promise for a collection of Environment Aliases
+   * @example
+   * const contentful = require('contentful-management')
+   *
+   * const client = contentful.createClient({
+   *   accessToken: '<content_management_api_key>'
+   * })
+   *
+   * client.getSpace('<space_id>')
+   * .then((space) => space.getEnvironmentAliases()
+   * .then((response) => console.log(response.items))
+   * .catch(console.error)
+   */
+  function getEnvironmentAliases() {
+    return http.get('environment_aliases').then(function (response) {
+      return wrapEnvironmentAliasCollection(http, response.data);
+    }, _error_handler__WEBPACK_IMPORTED_MODULE_2__["default"]);
+  }
+
   /*
    * @private
    * sdk relies heavily on sys metadata
@@ -25090,10 +26690,17 @@ function createSpaceApi(_ref) {
     getRoles: getRoles,
     createRole: createRole,
     createRoleWithId: createRoleWithId,
+    getSpaceUser: getSpaceUser,
+    getSpaceUsers: getSpaceUsers,
+    getSpaceMember: getSpaceMember,
+    getSpaceMembers: getSpaceMembers,
     getSpaceMembership: getSpaceMembership,
     getSpaceMemberships: getSpaceMemberships,
     createSpaceMembership: createSpaceMembership,
     createSpaceMembershipWithId: createSpaceMembershipWithId,
+    getTeamSpaceMembership: getTeamSpaceMembership,
+    getTeamSpaceMemberships: getTeamSpaceMemberships,
+    createTeamSpaceMembership: createTeamSpaceMembership,
     getApiKey: getApiKey,
     getApiKeys: getApiKeys,
     getPreviewApiKeys: getPreviewApiKeys,
@@ -25105,7 +26712,9 @@ function createSpaceApi(_ref) {
     createUiExtension: createUiExtension,
     createUiExtensionWithId: createUiExtensionWithId,
     getEntrySnapshots: getEntrySnapshots,
-    getContentTypeSnapshots: getContentTypeSnapshots
+    getContentTypeSnapshots: getContentTypeSnapshots,
+    getEnvironmentAlias: getEnvironmentAlias,
+    getEnvironmentAliases: getEnvironmentAliases
   };
 }
 
@@ -25116,11 +26725,11 @@ function createSpaceApi(_ref) {
   !*** ./enhance-with-methods.js ***!
   \*********************************/
 /*! exports provided: default */
-/***/ (function(module, __webpack_exports__, __nested_webpack_require_329433__) {
+/***/ (function(module, __webpack_exports__, __nested_webpack_require_377130__) {
 
 "use strict";
-__nested_webpack_require_329433__.r(__webpack_exports__);
-/* harmony export (binding) */ __nested_webpack_require_329433__.d(__webpack_exports__, "default", function() { return enhanceWithMethods; });
+__nested_webpack_require_377130__.r(__webpack_exports__);
+/* harmony export (binding) */ __nested_webpack_require_377130__.d(__webpack_exports__, "default", function() { return enhanceWithMethods; });
 /**
  * This method enhances a base object which would normally contain data, with
  * methods from another object that might work on manipulating that data.
@@ -25151,17 +26760,17 @@ function enhanceWithMethods(baseObject, methodsObject) {
   !*** ./entities/api-key.js ***!
   \*****************************/
 /*! exports provided: wrapApiKey, wrapApiKeyCollection */
-/***/ (function(module, __webpack_exports__, __nested_webpack_require_330867__) {
+/***/ (function(module, __webpack_exports__, __nested_webpack_require_378564__) {
 
 "use strict";
-__nested_webpack_require_330867__.r(__webpack_exports__);
-/* harmony export (binding) */ __nested_webpack_require_330867__.d(__webpack_exports__, "wrapApiKey", function() { return wrapApiKey; });
-/* harmony export (binding) */ __nested_webpack_require_330867__.d(__webpack_exports__, "wrapApiKeyCollection", function() { return wrapApiKeyCollection; });
-/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__ = __nested_webpack_require_330867__(/*! lodash/cloneDeep */ "../node_modules/lodash/cloneDeep.js");
-/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__nested_webpack_require_330867__.n(lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__);
-/* harmony import */ var contentful_sdk_core__WEBPACK_IMPORTED_MODULE_1__ = __nested_webpack_require_330867__(/*! contentful-sdk-core */ "../node_modules/contentful-sdk-core/dist/index.es-modules.js");
-/* harmony import */ var _enhance_with_methods__WEBPACK_IMPORTED_MODULE_2__ = __nested_webpack_require_330867__(/*! ../enhance-with-methods */ "./enhance-with-methods.js");
-/* harmony import */ var _instance_actions__WEBPACK_IMPORTED_MODULE_3__ = __nested_webpack_require_330867__(/*! ../instance-actions */ "./instance-actions.js");
+__nested_webpack_require_378564__.r(__webpack_exports__);
+/* harmony export (binding) */ __nested_webpack_require_378564__.d(__webpack_exports__, "wrapApiKey", function() { return wrapApiKey; });
+/* harmony export (binding) */ __nested_webpack_require_378564__.d(__webpack_exports__, "wrapApiKeyCollection", function() { return wrapApiKeyCollection; });
+/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__ = __nested_webpack_require_378564__(/*! lodash/cloneDeep */ "../node_modules/lodash/cloneDeep.js");
+/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__nested_webpack_require_378564__.n(lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__);
+/* harmony import */ var contentful_sdk_core__WEBPACK_IMPORTED_MODULE_1__ = __nested_webpack_require_378564__(/*! contentful-sdk-core */ "../node_modules/contentful-sdk-core/dist/index.es-modules.js");
+/* harmony import */ var _enhance_with_methods__WEBPACK_IMPORTED_MODULE_2__ = __nested_webpack_require_378564__(/*! ../enhance-with-methods */ "./enhance-with-methods.js");
+/* harmony import */ var _instance_actions__WEBPACK_IMPORTED_MODULE_3__ = __nested_webpack_require_378564__(/*! ../instance-actions */ "./instance-actions.js");
 /**
  * Api Key instances
  * @namespace ApiKey
@@ -25273,23 +26882,266 @@ function wrapApiKeyCollection(http, data) {
 
 /***/ }),
 
+/***/ "./entities/app-definition.js":
+/*!************************************!*\
+  !*** ./entities/app-definition.js ***!
+  \************************************/
+/*! exports provided: wrapAppDefinition, wrapAppDefinitionCollection */
+/***/ (function(module, __webpack_exports__, __nested_webpack_require_383430__) {
+
+"use strict";
+__nested_webpack_require_383430__.r(__webpack_exports__);
+/* harmony export (binding) */ __nested_webpack_require_383430__.d(__webpack_exports__, "wrapAppDefinition", function() { return wrapAppDefinition; });
+/* harmony export (binding) */ __nested_webpack_require_383430__.d(__webpack_exports__, "wrapAppDefinitionCollection", function() { return wrapAppDefinitionCollection; });
+/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__ = __nested_webpack_require_383430__(/*! lodash/cloneDeep */ "../node_modules/lodash/cloneDeep.js");
+/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__nested_webpack_require_383430__.n(lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__);
+/* harmony import */ var contentful_sdk_core__WEBPACK_IMPORTED_MODULE_1__ = __nested_webpack_require_383430__(/*! contentful-sdk-core */ "../node_modules/contentful-sdk-core/dist/index.es-modules.js");
+/* harmony import */ var _enhance_with_methods__WEBPACK_IMPORTED_MODULE_2__ = __nested_webpack_require_383430__(/*! ../enhance-with-methods */ "./enhance-with-methods.js");
+/* harmony import */ var _instance_actions__WEBPACK_IMPORTED_MODULE_3__ = __nested_webpack_require_383430__(/*! ../instance-actions */ "./instance-actions.js");
+/**
+ * App Definition instances
+ * @namespace AppDefinition
+ */
+
+
+
+
+
+var entityPath = 'app_definitions';
+
+/**
+ * @memberof AppDefinition
+ * @typedef AppDefinition
+ * @prop {Meta.Sys} sys - System metadata
+ * @prop {object} appDefinition - App Definition config
+ * @prop {string} app.name - App name
+ * @prop {array} app.locations - Locations where the app can be installed
+ * @prop {array} app.src - URL where the root HTML document of the app can be found
+ * @prop {function(): Object} toPlainObject() - Returns this App Definition as a plain JS object
+ */
+
+function createAppDefinitionApi(http) {
+  return {
+    /**
+     * Sends an update to the server with any changes made to the object's properties
+     * @memberof AppDefinition
+     * @func update
+     * @return {Promise<AppDefinition>} Object returned from the server with updated changes.
+     * @example
+     * const contentful = require('contentful-management')
+     *
+     * const client = contentful.createClient({
+     *   accessToken: '<content_management_api_key>'
+     * })
+     *
+     * client.getSpace('<space_id>')
+     * .then((space) => space.getAppDefinition('<ui_extension_id>'))
+     * .then((appDefinition) => {
+     *   appDefinition.extension.name = 'New App Definition name'
+     *   return appDefinition.update()
+     * })
+     * .then((appDefinition) => console.log(`App Definition ${appDefinition.sys.id} updated.`))
+     * .catch(console.error)
+     */
+    update: Object(_instance_actions__WEBPACK_IMPORTED_MODULE_3__["createUpdateEntity"])({
+      http: http,
+      entityPath: entityPath,
+      wrapperMethod: wrapAppDefinition
+    }),
+
+    /**
+     * Deletes this object on the server.
+     * @memberof AppDefinition
+     * @func delete
+     * @return {Promise} Promise for the deletion. It contains no data, but the Promise error case should be handled.
+     * @example
+     * const contentful = require('contentful-management')
+     *
+     * const client = contentful.createClient({
+     *   accessToken: '<content_management_api_key>'
+     * })
+     *
+     * client.getSpace('<space_id>')
+     * .then((space) => space.getAppDefinition('<ui_extension_id>'))
+     * .then((appDefinition) => appDefinition.delete())
+     * .then(() => console.log(`App Definition deleted.`))
+     * .catch(console.error)
+     */
+    delete: Object(_instance_actions__WEBPACK_IMPORTED_MODULE_3__["createDeleteEntity"])({
+      http: http,
+      entityPath: entityPath
+    })
+  };
+}
+
+/**
+ * @private
+ * @param {Object} http - HTTP client instance
+ * @param {Object} data - Raw App Definition data
+ * @return {AppDefinition} Wrapped App Definition data
+ */
+function wrapAppDefinition(http, data) {
+  var appDefinition = Object(contentful_sdk_core__WEBPACK_IMPORTED_MODULE_1__["toPlainObject"])(lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0___default()(data));
+  Object(_enhance_with_methods__WEBPACK_IMPORTED_MODULE_2__["default"])(appDefinition, createAppDefinitionApi(http));
+  return Object(contentful_sdk_core__WEBPACK_IMPORTED_MODULE_1__["freezeSys"])(appDefinition);
+}
+
+/**
+ * @private
+ * @param {Object} http - HTTP client instance
+ * @param {Object} data - Raw App Definition collection data
+ * @return {AppDefinitionCollection} Wrapped App Definition collection data
+ */
+function wrapAppDefinitionCollection(http, data) {
+  var appDefinitions = Object(contentful_sdk_core__WEBPACK_IMPORTED_MODULE_1__["toPlainObject"])(lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0___default()(data));
+  appDefinitions.items = appDefinitions.items.map(function (entity) {
+    return wrapAppDefinition(http, entity);
+  });
+  return Object(contentful_sdk_core__WEBPACK_IMPORTED_MODULE_1__["freezeSys"])(appDefinitions);
+}
+
+/***/ }),
+
+/***/ "./entities/app-installation.js":
+/*!**************************************!*\
+  !*** ./entities/app-installation.js ***!
+  \**************************************/
+/*! exports provided: wrapAppInstallation, wrapAppInstallationCollection */
+/***/ (function(module, __webpack_exports__, __nested_webpack_require_388604__) {
+
+"use strict";
+__nested_webpack_require_388604__.r(__webpack_exports__);
+/* harmony export (binding) */ __nested_webpack_require_388604__.d(__webpack_exports__, "wrapAppInstallation", function() { return wrapAppInstallation; });
+/* harmony export (binding) */ __nested_webpack_require_388604__.d(__webpack_exports__, "wrapAppInstallationCollection", function() { return wrapAppInstallationCollection; });
+/* harmony import */ var contentful_sdk_core__WEBPACK_IMPORTED_MODULE_0__ = __nested_webpack_require_388604__(/*! contentful-sdk-core */ "../node_modules/contentful-sdk-core/dist/index.es-modules.js");
+/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_1__ = __nested_webpack_require_388604__(/*! lodash/cloneDeep */ "../node_modules/lodash/cloneDeep.js");
+/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_1___default = /*#__PURE__*/__nested_webpack_require_388604__.n(lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_1__);
+/* harmony import */ var _error_handler__WEBPACK_IMPORTED_MODULE_2__ = __nested_webpack_require_388604__(/*! ../error-handler */ "./error-handler.js");
+/* harmony import */ var _enhance_with_methods__WEBPACK_IMPORTED_MODULE_3__ = __nested_webpack_require_388604__(/*! ../enhance-with-methods */ "./enhance-with-methods.js");
+/* harmony import */ var _instance_actions__WEBPACK_IMPORTED_MODULE_4__ = __nested_webpack_require_388604__(/*! ../instance-actions */ "./instance-actions.js");
+/**
+ * UI Extension instances
+ * @namespace AppInstallation
+ */
+
+
+
+
+
+
+
+/**
+ * @memberof AppInstallation
+ * @typedef AppInstallation
+ * @prop {Meta.Sys} sys - System metadata
+ * @prop {object} parameters - App Installation specific configuration variables
+ * @prop {function(): Object} toPlainObject() - Returns this App Installation as a plain JS object
+ *
+ */
+
+function createAppInstallationApi(http) {
+  return {
+    /**
+     * Sends an update to the server with any changes made to the object's properties
+     * @memberof AppInstallation
+     * @func update
+     * @return {Promise<AppInstallation>} Object returned from the server with updated changes.
+     * @example
+     * const contentful = require('contentful-management')
+     *
+     * const client = contentful.createClient({
+     *   accessToken: '<content_management_api_key>'
+     * })
+     *
+     * client.getSpace('<space_id>')
+     * .then((space) => space.getEnvironment('<environment_id>'))
+     * .then((environment) => environment.getAppInstallation('<app_definition_id>'))
+     * .then((appInstallation) => {
+     *    appInstallation.parameters.someParameter = 'New Value'
+     *    return appInstallation.update()
+     * })
+     * .then((appInstallation) => console.log(`App installation ${appInstallation.sys.id} was updated`))
+     * .catch(console.error)
+     */
+    update: function update() {
+      var raw = this.toPlainObject();
+      var data = lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_1___default()(raw);
+      delete data.sys;
+      return http.put('app_installations/' + this.sys.appDefinition.sys.id, data).then(function (response) {
+        return wrapAppInstallation(http, response.data);
+      }, _error_handler__WEBPACK_IMPORTED_MODULE_2__["default"]);
+    },
+
+    /**
+     * Deletes this object on the server.
+     * @memberof AppInstallation
+     * @func delete
+     * @return {Promise} Promise for the deletion. It contains no data, but the Promise error case should be handled.
+     * @example
+     * const contentful = require('contentful-management')
+     *
+     * const client = contentful.createClient({
+     *   accessToken: '<content_management_api_key>'
+     * })
+     *
+     * client.getSpace('<space_id>')
+     * .then((space) => space.getEnvironment('<environment_id>'))
+     * .then((environment) => environment.delete())
+     * .then(() => console.log(`App installation deleted.`))
+     * .catch(console.error)
+     */
+    delete: Object(_instance_actions__WEBPACK_IMPORTED_MODULE_4__["createDeleteEntity"])({
+      http: http,
+      entityPath: 'app_installations'
+    })
+  };
+}
+
+/**
+ * @private
+ * @param {Object} http - HTTP client instance
+ * @param {Object} data - Raw App Installation data
+ * @return {AppInstallation} Wrapped App installation data
+ */
+function wrapAppInstallation(http, data) {
+  var appInstallation = Object(contentful_sdk_core__WEBPACK_IMPORTED_MODULE_0__["toPlainObject"])(lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_1___default()(data));
+  Object(_enhance_with_methods__WEBPACK_IMPORTED_MODULE_3__["default"])(appInstallation, createAppInstallationApi(http));
+  return Object(contentful_sdk_core__WEBPACK_IMPORTED_MODULE_0__["freezeSys"])(appInstallation);
+}
+
+/**
+ * @private
+ * @param {Object} http - HTTP client instance
+ * @param {Object} data - Raw App installation collection data
+ * @return {AppInstallationCollection} Wrapped App installation collection data
+ */
+function wrapAppInstallationCollection(http, data) {
+  var appInstallations = Object(contentful_sdk_core__WEBPACK_IMPORTED_MODULE_0__["toPlainObject"])(lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_1___default()(data));
+  appInstallations.items = appInstallations.items.map(function (appInstallationEntity) {
+    return wrapAppInstallation(http, appInstallationEntity);
+  });
+  return Object(contentful_sdk_core__WEBPACK_IMPORTED_MODULE_0__["freezeSys"])(appInstallations);
+}
+
+/***/ }),
+
 /***/ "./entities/asset.js":
 /*!***************************!*\
   !*** ./entities/asset.js ***!
   \***************************/
 /*! exports provided: wrapAsset, wrapAssetCollection */
-/***/ (function(module, __webpack_exports__, __nested_webpack_require_335681__) {
+/***/ (function(module, __webpack_exports__, __nested_webpack_require_394059__) {
 
 "use strict";
-__nested_webpack_require_335681__.r(__webpack_exports__);
-/* harmony export (binding) */ __nested_webpack_require_335681__.d(__webpack_exports__, "wrapAsset", function() { return wrapAsset; });
-/* harmony export (binding) */ __nested_webpack_require_335681__.d(__webpack_exports__, "wrapAssetCollection", function() { return wrapAssetCollection; });
-/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__ = __nested_webpack_require_335681__(/*! lodash/cloneDeep */ "../node_modules/lodash/cloneDeep.js");
-/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__nested_webpack_require_335681__.n(lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__);
-/* harmony import */ var contentful_sdk_core__WEBPACK_IMPORTED_MODULE_1__ = __nested_webpack_require_335681__(/*! contentful-sdk-core */ "../node_modules/contentful-sdk-core/dist/index.es-modules.js");
-/* harmony import */ var _enhance_with_methods__WEBPACK_IMPORTED_MODULE_2__ = __nested_webpack_require_335681__(/*! ../enhance-with-methods */ "./enhance-with-methods.js");
-/* harmony import */ var _error_handler__WEBPACK_IMPORTED_MODULE_3__ = __nested_webpack_require_335681__(/*! ../error-handler */ "./error-handler.js");
-/* harmony import */ var _instance_actions__WEBPACK_IMPORTED_MODULE_4__ = __nested_webpack_require_335681__(/*! ../instance-actions */ "./instance-actions.js");
+__nested_webpack_require_394059__.r(__webpack_exports__);
+/* harmony export (binding) */ __nested_webpack_require_394059__.d(__webpack_exports__, "wrapAsset", function() { return wrapAsset; });
+/* harmony export (binding) */ __nested_webpack_require_394059__.d(__webpack_exports__, "wrapAssetCollection", function() { return wrapAssetCollection; });
+/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__ = __nested_webpack_require_394059__(/*! lodash/cloneDeep */ "../node_modules/lodash/cloneDeep.js");
+/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__nested_webpack_require_394059__.n(lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__);
+/* harmony import */ var contentful_sdk_core__WEBPACK_IMPORTED_MODULE_1__ = __nested_webpack_require_394059__(/*! contentful-sdk-core */ "../node_modules/contentful-sdk-core/dist/index.es-modules.js");
+/* harmony import */ var _enhance_with_methods__WEBPACK_IMPORTED_MODULE_2__ = __nested_webpack_require_394059__(/*! ../enhance-with-methods */ "./enhance-with-methods.js");
+/* harmony import */ var _error_handler__WEBPACK_IMPORTED_MODULE_3__ = __nested_webpack_require_394059__(/*! ../error-handler */ "./error-handler.js");
+/* harmony import */ var _instance_actions__WEBPACK_IMPORTED_MODULE_4__ = __nested_webpack_require_394059__(/*! ../instance-actions */ "./instance-actions.js");
 /**
  * Asset instances
  * @namespace Asset
@@ -25390,10 +27242,24 @@ function createAssetApi(http) {
 
     var self = this;
     var locales = Object.keys(this.fields.file || {});
-    return Promise.all(locales.map(function (locale) {
-      return processForLocale.call(self, locale, options);
-    })).then(function (assets) {
-      return assets[0];
+
+    var mostUpToDateAssetVersion = void 0;
+
+    // Let all the locales process
+    // Since they all resolve at different times,
+    // we need to pick the last resolved value
+    // to reflect the most recent state
+    var allProcessingLocales = locales.map(function (locale) {
+      return processForLocale.call(self, locale, options).then(function (result) {
+        // Side effect of always setting the most up to date asset version
+        // The last one to call this will be the last one that finished
+        // and thus the most up to date
+        mostUpToDateAssetVersion = result;
+      });
+    });
+
+    return Promise.all(allProcessingLocales).then(function () {
+      return mostUpToDateAssetVersion;
     });
   }
 
@@ -25686,20 +27552,20 @@ function wrapAssetCollection(http, data) {
   !*** ./entities/content-type.js ***!
   \**********************************/
 /*! exports provided: wrapContentType, wrapContentTypeCollection */
-/***/ (function(module, __webpack_exports__, __nested_webpack_require_351949__) {
+/***/ (function(module, __webpack_exports__, __nested_webpack_require_410871__) {
 
 "use strict";
-__nested_webpack_require_351949__.r(__webpack_exports__);
-/* harmony export (binding) */ __nested_webpack_require_351949__.d(__webpack_exports__, "wrapContentType", function() { return wrapContentType; });
-/* harmony export (binding) */ __nested_webpack_require_351949__.d(__webpack_exports__, "wrapContentTypeCollection", function() { return wrapContentTypeCollection; });
-/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__ = __nested_webpack_require_351949__(/*! lodash/cloneDeep */ "../node_modules/lodash/cloneDeep.js");
-/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__nested_webpack_require_351949__.n(lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__);
-/* harmony import */ var contentful_sdk_core__WEBPACK_IMPORTED_MODULE_1__ = __nested_webpack_require_351949__(/*! contentful-sdk-core */ "../node_modules/contentful-sdk-core/dist/index.es-modules.js");
-/* harmony import */ var _enhance_with_methods__WEBPACK_IMPORTED_MODULE_2__ = __nested_webpack_require_351949__(/*! ../enhance-with-methods */ "./enhance-with-methods.js");
-/* harmony import */ var _instance_actions__WEBPACK_IMPORTED_MODULE_3__ = __nested_webpack_require_351949__(/*! ../instance-actions */ "./instance-actions.js");
-/* harmony import */ var _editor_interface__WEBPACK_IMPORTED_MODULE_4__ = __nested_webpack_require_351949__(/*! ./editor-interface */ "./entities/editor-interface.js");
-/* harmony import */ var _error_handler__WEBPACK_IMPORTED_MODULE_5__ = __nested_webpack_require_351949__(/*! ../error-handler */ "./error-handler.js");
-/* harmony import */ var _snapshot__WEBPACK_IMPORTED_MODULE_6__ = __nested_webpack_require_351949__(/*! ./snapshot */ "./entities/snapshot.js");
+__nested_webpack_require_410871__.r(__webpack_exports__);
+/* harmony export (binding) */ __nested_webpack_require_410871__.d(__webpack_exports__, "wrapContentType", function() { return wrapContentType; });
+/* harmony export (binding) */ __nested_webpack_require_410871__.d(__webpack_exports__, "wrapContentTypeCollection", function() { return wrapContentTypeCollection; });
+/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__ = __nested_webpack_require_410871__(/*! lodash/cloneDeep */ "../node_modules/lodash/cloneDeep.js");
+/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__nested_webpack_require_410871__.n(lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__);
+/* harmony import */ var contentful_sdk_core__WEBPACK_IMPORTED_MODULE_1__ = __nested_webpack_require_410871__(/*! contentful-sdk-core */ "../node_modules/contentful-sdk-core/dist/index.es-modules.js");
+/* harmony import */ var _enhance_with_methods__WEBPACK_IMPORTED_MODULE_2__ = __nested_webpack_require_410871__(/*! ../enhance-with-methods */ "./enhance-with-methods.js");
+/* harmony import */ var _instance_actions__WEBPACK_IMPORTED_MODULE_3__ = __nested_webpack_require_410871__(/*! ../instance-actions */ "./instance-actions.js");
+/* harmony import */ var _editor_interface__WEBPACK_IMPORTED_MODULE_4__ = __nested_webpack_require_410871__(/*! ./editor-interface */ "./entities/editor-interface.js");
+/* harmony import */ var _error_handler__WEBPACK_IMPORTED_MODULE_5__ = __nested_webpack_require_410871__(/*! ../error-handler */ "./error-handler.js");
+/* harmony import */ var _snapshot__WEBPACK_IMPORTED_MODULE_6__ = __nested_webpack_require_410871__(/*! ./snapshot */ "./entities/snapshot.js");
 /**
  * Content Type instances
  * @namespace ContentType
@@ -25994,16 +27860,16 @@ function wrapContentTypeCollection(http, data) {
   !*** ./entities/editor-interface.js ***!
   \**************************************/
 /*! exports provided: wrapEditorInterface */
-/***/ (function(module, __webpack_exports__, __nested_webpack_require_365233__) {
+/***/ (function(module, __webpack_exports__, __nested_webpack_require_424155__) {
 
 "use strict";
-__nested_webpack_require_365233__.r(__webpack_exports__);
-/* harmony export (binding) */ __nested_webpack_require_365233__.d(__webpack_exports__, "wrapEditorInterface", function() { return wrapEditorInterface; });
-/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__ = __nested_webpack_require_365233__(/*! lodash/cloneDeep */ "../node_modules/lodash/cloneDeep.js");
-/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__nested_webpack_require_365233__.n(lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__);
-/* harmony import */ var contentful_sdk_core__WEBPACK_IMPORTED_MODULE_1__ = __nested_webpack_require_365233__(/*! contentful-sdk-core */ "../node_modules/contentful-sdk-core/dist/index.es-modules.js");
-/* harmony import */ var _enhance_with_methods__WEBPACK_IMPORTED_MODULE_2__ = __nested_webpack_require_365233__(/*! ../enhance-with-methods */ "./enhance-with-methods.js");
-/* harmony import */ var _error_handler__WEBPACK_IMPORTED_MODULE_3__ = __nested_webpack_require_365233__(/*! ../error-handler */ "./error-handler.js");
+__nested_webpack_require_424155__.r(__webpack_exports__);
+/* harmony export (binding) */ __nested_webpack_require_424155__.d(__webpack_exports__, "wrapEditorInterface", function() { return wrapEditorInterface; });
+/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__ = __nested_webpack_require_424155__(/*! lodash/cloneDeep */ "../node_modules/lodash/cloneDeep.js");
+/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__nested_webpack_require_424155__.n(lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__);
+/* harmony import */ var contentful_sdk_core__WEBPACK_IMPORTED_MODULE_1__ = __nested_webpack_require_424155__(/*! contentful-sdk-core */ "../node_modules/contentful-sdk-core/dist/index.es-modules.js");
+/* harmony import */ var _enhance_with_methods__WEBPACK_IMPORTED_MODULE_2__ = __nested_webpack_require_424155__(/*! ../enhance-with-methods */ "./enhance-with-methods.js");
+/* harmony import */ var _error_handler__WEBPACK_IMPORTED_MODULE_3__ = __nested_webpack_require_424155__(/*! ../error-handler */ "./error-handler.js");
 /**
  * Editor Interface instances
  * @namespace EditorInterface
@@ -26110,19 +27976,19 @@ function wrapEditorInterface(http, data) {
   !*** ./entities/entry.js ***!
   \***************************/
 /*! exports provided: wrapEntry, wrapEntryCollection */
-/***/ (function(module, __webpack_exports__, __nested_webpack_require_369908__) {
+/***/ (function(module, __webpack_exports__, __nested_webpack_require_428830__) {
 
 "use strict";
-__nested_webpack_require_369908__.r(__webpack_exports__);
-/* harmony export (binding) */ __nested_webpack_require_369908__.d(__webpack_exports__, "wrapEntry", function() { return wrapEntry; });
-/* harmony export (binding) */ __nested_webpack_require_369908__.d(__webpack_exports__, "wrapEntryCollection", function() { return wrapEntryCollection; });
-/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__ = __nested_webpack_require_369908__(/*! lodash/cloneDeep */ "../node_modules/lodash/cloneDeep.js");
-/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__nested_webpack_require_369908__.n(lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__);
-/* harmony import */ var contentful_sdk_core__WEBPACK_IMPORTED_MODULE_1__ = __nested_webpack_require_369908__(/*! contentful-sdk-core */ "../node_modules/contentful-sdk-core/dist/index.es-modules.js");
-/* harmony import */ var _enhance_with_methods__WEBPACK_IMPORTED_MODULE_2__ = __nested_webpack_require_369908__(/*! ../enhance-with-methods */ "./enhance-with-methods.js");
-/* harmony import */ var _instance_actions__WEBPACK_IMPORTED_MODULE_3__ = __nested_webpack_require_369908__(/*! ../instance-actions */ "./instance-actions.js");
-/* harmony import */ var _error_handler__WEBPACK_IMPORTED_MODULE_4__ = __nested_webpack_require_369908__(/*! ../error-handler */ "./error-handler.js");
-/* harmony import */ var _snapshot__WEBPACK_IMPORTED_MODULE_5__ = __nested_webpack_require_369908__(/*! ./snapshot */ "./entities/snapshot.js");
+__nested_webpack_require_428830__.r(__webpack_exports__);
+/* harmony export (binding) */ __nested_webpack_require_428830__.d(__webpack_exports__, "wrapEntry", function() { return wrapEntry; });
+/* harmony export (binding) */ __nested_webpack_require_428830__.d(__webpack_exports__, "wrapEntryCollection", function() { return wrapEntryCollection; });
+/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__ = __nested_webpack_require_428830__(/*! lodash/cloneDeep */ "../node_modules/lodash/cloneDeep.js");
+/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__nested_webpack_require_428830__.n(lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__);
+/* harmony import */ var contentful_sdk_core__WEBPACK_IMPORTED_MODULE_1__ = __nested_webpack_require_428830__(/*! contentful-sdk-core */ "../node_modules/contentful-sdk-core/dist/index.es-modules.js");
+/* harmony import */ var _enhance_with_methods__WEBPACK_IMPORTED_MODULE_2__ = __nested_webpack_require_428830__(/*! ../enhance-with-methods */ "./enhance-with-methods.js");
+/* harmony import */ var _instance_actions__WEBPACK_IMPORTED_MODULE_3__ = __nested_webpack_require_428830__(/*! ../instance-actions */ "./instance-actions.js");
+/* harmony import */ var _error_handler__WEBPACK_IMPORTED_MODULE_4__ = __nested_webpack_require_428830__(/*! ../error-handler */ "./error-handler.js");
+/* harmony import */ var _snapshot__WEBPACK_IMPORTED_MODULE_5__ = __nested_webpack_require_428830__(/*! ./snapshot */ "./entities/snapshot.js");
 /**
  * Entry instances
  * @namespace Entry
@@ -26461,22 +28327,127 @@ function wrapEntryCollection(http, data, resolveLinks) {
 
 /***/ }),
 
+/***/ "./entities/environment-alias.js":
+/*!***************************************!*\
+  !*** ./entities/environment-alias.js ***!
+  \***************************************/
+/*! exports provided: wrapEnvironmentAlias, wrapEnvironmentAliasCollection */
+/***/ (function(module, __webpack_exports__, __nested_webpack_require_441438__) {
+
+"use strict";
+__nested_webpack_require_441438__.r(__webpack_exports__);
+/* harmony export (binding) */ __nested_webpack_require_441438__.d(__webpack_exports__, "wrapEnvironmentAlias", function() { return wrapEnvironmentAlias; });
+/* harmony export (binding) */ __nested_webpack_require_441438__.d(__webpack_exports__, "wrapEnvironmentAliasCollection", function() { return wrapEnvironmentAliasCollection; });
+/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__ = __nested_webpack_require_441438__(/*! lodash/cloneDeep */ "../node_modules/lodash/cloneDeep.js");
+/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__nested_webpack_require_441438__.n(lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__);
+/* harmony import */ var contentful_sdk_core__WEBPACK_IMPORTED_MODULE_1__ = __nested_webpack_require_441438__(/*! contentful-sdk-core */ "../node_modules/contentful-sdk-core/dist/index.es-modules.js");
+/* harmony import */ var _enhance_with_methods__WEBPACK_IMPORTED_MODULE_2__ = __nested_webpack_require_441438__(/*! ../enhance-with-methods */ "./enhance-with-methods.js");
+/* harmony import */ var _instance_actions__WEBPACK_IMPORTED_MODULE_3__ = __nested_webpack_require_441438__(/*! ../instance-actions */ "./instance-actions.js");
+/**
+ * Environment alias instances
+ * @namespace EnvironmentAlias
+ * @description Environment aliases allow environments to be accessed through another identifier. You must have a V2 org and manually opt-in to this feature from the
+ *  environments settings page in the Contentful web app. If you do not have access to this feature, these methods will return 403 errors.
+ */
+
+
+
+
+
+/**
+ * @memberof EnvironmentAlias
+ * @typedef EnvironmentAlias
+ * @prop {Object} sys - System metadata
+ * @prop {string} sys.id - EnvironmentAlias id
+ * @prop {string} sys.type - Entity type
+ * @prop {Environment} environment - the environment this alias points to
+ * @prop {function(): Object} toPlainObject() - Returns this EnvironmentAlias as a plain JS object
+ */
+
+/**
+ * @memberof EnvironmentAlias
+ * @typedef EnvironmentAliasCollection
+ * @prop {number} total
+ * @prop {number} skip
+ * @prop {number} limit
+ * @prop {Array<EnvironmentAlias.EnvironmentAlias>} items
+ * @prop {function(): Object} toPlainObject() - Returns this EnvironmentAlias collection as a plain JS object
+ */
+function createEnvironmentAliasApi(http) {
+  return {
+    /**
+     * Sends an update to the server with any changes made to the object's properties. Currently, you can only change the id of the alias's underlying environment. See the example below.
+     * @memberof EnvironmentAlias
+     * @func update
+     * @return {Promise<EnvironmentAlias>} Object returned from the server with updated changes.
+     * @example
+     * const contentful = require('contentful-management')
+     *
+     * const client = contentful.createClient({
+     *   accessToken: '<content_management_api_key>'
+     * })
+     *
+     * client.getSpace('<space_id>')
+     * .then((space) => space.getEnvironmentAlias('<environment_alias_id>'))
+     * .then((alias) => {
+     *   alias.environment.sys.id = '<environment_id>'
+     *   return alias.update()
+     * })
+     * .then((alias) => console.log(`alias ${alias.sys.id} updated.`))
+     * .catch(console.error)
+     */
+    update: Object(_instance_actions__WEBPACK_IMPORTED_MODULE_3__["createUpdateEntity"])({
+      http: http,
+      entityPath: 'environment_aliases',
+      wrapperMethod: wrapEnvironmentAlias
+    })
+  };
+}
+
+/**
+ * @private
+ * @param {Object} http - HTTP client instance
+ * @param {Object} data - Raw environment alias data
+ * @return {EnvironmentAlias} Wrapped environment alias data
+ */
+function wrapEnvironmentAlias(http, data) {
+  var alias = Object(contentful_sdk_core__WEBPACK_IMPORTED_MODULE_1__["toPlainObject"])(lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0___default()(data));
+  Object(_enhance_with_methods__WEBPACK_IMPORTED_MODULE_2__["default"])(alias, createEnvironmentAliasApi(http));
+  return Object(contentful_sdk_core__WEBPACK_IMPORTED_MODULE_1__["freezeSys"])(alias);
+}
+
+/**
+ * @private
+ * @param {Object} http - HTTP client instance
+ * @param {Object} data - Raw environment alias collection data
+ * @return {EnvironmentAliasCollection} Wrapped environment alias collection data
+ */
+function wrapEnvironmentAliasCollection(http, data) {
+  var aliases = Object(contentful_sdk_core__WEBPACK_IMPORTED_MODULE_1__["toPlainObject"])(lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0___default()(data));
+  aliases.items = aliases.items.map(function (entity) {
+    return wrapEnvironmentAlias(http, entity);
+  });
+  return Object(contentful_sdk_core__WEBPACK_IMPORTED_MODULE_1__["freezeSys"])(aliases);
+}
+
+/***/ }),
+
 /***/ "./entities/environment.js":
 /*!*********************************!*\
   !*** ./entities/environment.js ***!
   \*********************************/
 /*! exports provided: wrapEnvironment, wrapEnvironmentCollection */
-/***/ (function(module, __webpack_exports__, __nested_webpack_require_382482__) {
+/***/ (function(module, __webpack_exports__, __nested_webpack_require_446336__) {
 
 "use strict";
-__nested_webpack_require_382482__.r(__webpack_exports__);
-/* harmony export (binding) */ __nested_webpack_require_382482__.d(__webpack_exports__, "wrapEnvironment", function() { return wrapEnvironment; });
-/* harmony export (binding) */ __nested_webpack_require_382482__.d(__webpack_exports__, "wrapEnvironmentCollection", function() { return wrapEnvironmentCollection; });
-/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__ = __nested_webpack_require_382482__(/*! lodash/cloneDeep */ "../node_modules/lodash/cloneDeep.js");
-/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__nested_webpack_require_382482__.n(lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__);
-/* harmony import */ var contentful_sdk_core__WEBPACK_IMPORTED_MODULE_1__ = __nested_webpack_require_382482__(/*! contentful-sdk-core */ "../node_modules/contentful-sdk-core/dist/index.es-modules.js");
-/* harmony import */ var _enhance_with_methods__WEBPACK_IMPORTED_MODULE_2__ = __nested_webpack_require_382482__(/*! ../enhance-with-methods */ "./enhance-with-methods.js");
-/* harmony import */ var _create_environment_api__WEBPACK_IMPORTED_MODULE_3__ = __nested_webpack_require_382482__(/*! ../create-environment-api */ "./create-environment-api.js");
+__nested_webpack_require_446336__.r(__webpack_exports__);
+/* harmony export (binding) */ __nested_webpack_require_446336__.d(__webpack_exports__, "wrapEnvironment", function() { return wrapEnvironment; });
+/* harmony export (binding) */ __nested_webpack_require_446336__.d(__webpack_exports__, "wrapEnvironmentCollection", function() { return wrapEnvironmentCollection; });
+/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__ = __nested_webpack_require_446336__(/*! lodash/cloneDeep */ "../node_modules/lodash/cloneDeep.js");
+/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__nested_webpack_require_446336__.n(lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__);
+/* harmony import */ var contentful_sdk_core__WEBPACK_IMPORTED_MODULE_1__ = __nested_webpack_require_446336__(/*! contentful-sdk-core */ "../node_modules/contentful-sdk-core/dist/index.es-modules.js");
+/* harmony import */ var _enhance_with_methods__WEBPACK_IMPORTED_MODULE_2__ = __nested_webpack_require_446336__(/*! ../enhance-with-methods */ "./enhance-with-methods.js");
+/* harmony import */ var _create_environment_api__WEBPACK_IMPORTED_MODULE_3__ = __nested_webpack_require_446336__(/*! ../create-environment-api */ "./create-environment-api.js");
 
 
 
@@ -26556,30 +28527,46 @@ function wrapEnvironmentCollection(http, data) {
   !*** ./entities/index.js ***!
   \***************************/
 /*! exports provided: default */
-/***/ (function(module, __webpack_exports__, __nested_webpack_require_386738__) {
+/***/ (function(module, __webpack_exports__, __nested_webpack_require_450592__) {
 
 "use strict";
-__nested_webpack_require_386738__.r(__webpack_exports__);
-/* harmony import */ var _space__WEBPACK_IMPORTED_MODULE_0__ = __nested_webpack_require_386738__(/*! ./space */ "./entities/space.js");
-/* harmony import */ var _environment__WEBPACK_IMPORTED_MODULE_1__ = __nested_webpack_require_386738__(/*! ./environment */ "./entities/environment.js");
-/* harmony import */ var _entry__WEBPACK_IMPORTED_MODULE_2__ = __nested_webpack_require_386738__(/*! ./entry */ "./entities/entry.js");
-/* harmony import */ var _asset__WEBPACK_IMPORTED_MODULE_3__ = __nested_webpack_require_386738__(/*! ./asset */ "./entities/asset.js");
-/* harmony import */ var _content_type__WEBPACK_IMPORTED_MODULE_4__ = __nested_webpack_require_386738__(/*! ./content-type */ "./entities/content-type.js");
-/* harmony import */ var _editor_interface__WEBPACK_IMPORTED_MODULE_5__ = __nested_webpack_require_386738__(/*! ./editor-interface */ "./entities/editor-interface.js");
-/* harmony import */ var _locale__WEBPACK_IMPORTED_MODULE_6__ = __nested_webpack_require_386738__(/*! ./locale */ "./entities/locale.js");
-/* harmony import */ var _webhook__WEBPACK_IMPORTED_MODULE_7__ = __nested_webpack_require_386738__(/*! ./webhook */ "./entities/webhook.js");
-/* harmony import */ var _space_membership__WEBPACK_IMPORTED_MODULE_8__ = __nested_webpack_require_386738__(/*! ./space-membership */ "./entities/space-membership.js");
-/* harmony import */ var _role__WEBPACK_IMPORTED_MODULE_9__ = __nested_webpack_require_386738__(/*! ./role */ "./entities/role.js");
-/* harmony import */ var _api_key__WEBPACK_IMPORTED_MODULE_10__ = __nested_webpack_require_386738__(/*! ./api-key */ "./entities/api-key.js");
-/* harmony import */ var _preview_api_key__WEBPACK_IMPORTED_MODULE_11__ = __nested_webpack_require_386738__(/*! ./preview-api-key */ "./entities/preview-api-key.js");
-/* harmony import */ var _upload__WEBPACK_IMPORTED_MODULE_12__ = __nested_webpack_require_386738__(/*! ./upload */ "./entities/upload.js");
-/* harmony import */ var _organization__WEBPACK_IMPORTED_MODULE_13__ = __nested_webpack_require_386738__(/*! ./organization */ "./entities/organization.js");
-/* harmony import */ var _ui_extension__WEBPACK_IMPORTED_MODULE_14__ = __nested_webpack_require_386738__(/*! ./ui-extension */ "./entities/ui-extension.js");
-/* harmony import */ var _snapshot__WEBPACK_IMPORTED_MODULE_15__ = __nested_webpack_require_386738__(/*! ./snapshot */ "./entities/snapshot.js");
-/* harmony import */ var _user__WEBPACK_IMPORTED_MODULE_16__ = __nested_webpack_require_386738__(/*! ./user */ "./entities/user.js");
-/* harmony import */ var _personal_access_token__WEBPACK_IMPORTED_MODULE_17__ = __nested_webpack_require_386738__(/*! ./personal-access-token */ "./entities/personal-access-token.js");
-/* harmony import */ var _usage_period__WEBPACK_IMPORTED_MODULE_18__ = __nested_webpack_require_386738__(/*! ./usage-period */ "./entities/usage-period.js");
-/* harmony import */ var _usage__WEBPACK_IMPORTED_MODULE_19__ = __nested_webpack_require_386738__(/*! ./usage */ "./entities/usage.js");
+__nested_webpack_require_450592__.r(__webpack_exports__);
+/* harmony import */ var _app_definition__WEBPACK_IMPORTED_MODULE_0__ = __nested_webpack_require_450592__(/*! ./app-definition */ "./entities/app-definition.js");
+/* harmony import */ var _space__WEBPACK_IMPORTED_MODULE_1__ = __nested_webpack_require_450592__(/*! ./space */ "./entities/space.js");
+/* harmony import */ var _environment__WEBPACK_IMPORTED_MODULE_2__ = __nested_webpack_require_450592__(/*! ./environment */ "./entities/environment.js");
+/* harmony import */ var _entry__WEBPACK_IMPORTED_MODULE_3__ = __nested_webpack_require_450592__(/*! ./entry */ "./entities/entry.js");
+/* harmony import */ var _asset__WEBPACK_IMPORTED_MODULE_4__ = __nested_webpack_require_450592__(/*! ./asset */ "./entities/asset.js");
+/* harmony import */ var _content_type__WEBPACK_IMPORTED_MODULE_5__ = __nested_webpack_require_450592__(/*! ./content-type */ "./entities/content-type.js");
+/* harmony import */ var _editor_interface__WEBPACK_IMPORTED_MODULE_6__ = __nested_webpack_require_450592__(/*! ./editor-interface */ "./entities/editor-interface.js");
+/* harmony import */ var _locale__WEBPACK_IMPORTED_MODULE_7__ = __nested_webpack_require_450592__(/*! ./locale */ "./entities/locale.js");
+/* harmony import */ var _webhook__WEBPACK_IMPORTED_MODULE_8__ = __nested_webpack_require_450592__(/*! ./webhook */ "./entities/webhook.js");
+/* harmony import */ var _space_member__WEBPACK_IMPORTED_MODULE_9__ = __nested_webpack_require_450592__(/*! ./space-member */ "./entities/space-member.js");
+/* harmony import */ var _space_membership__WEBPACK_IMPORTED_MODULE_10__ = __nested_webpack_require_450592__(/*! ./space-membership */ "./entities/space-membership.js");
+/* harmony import */ var _team_space_membership__WEBPACK_IMPORTED_MODULE_11__ = __nested_webpack_require_450592__(/*! ./team-space-membership */ "./entities/team-space-membership.js");
+/* harmony import */ var _organization_membership__WEBPACK_IMPORTED_MODULE_12__ = __nested_webpack_require_450592__(/*! ./organization-membership */ "./entities/organization-membership.js");
+/* harmony import */ var _organization_invitation__WEBPACK_IMPORTED_MODULE_13__ = __nested_webpack_require_450592__(/*! ./organization-invitation */ "./entities/organization-invitation.js");
+/* harmony import */ var _role__WEBPACK_IMPORTED_MODULE_14__ = __nested_webpack_require_450592__(/*! ./role */ "./entities/role.js");
+/* harmony import */ var _api_key__WEBPACK_IMPORTED_MODULE_15__ = __nested_webpack_require_450592__(/*! ./api-key */ "./entities/api-key.js");
+/* harmony import */ var _preview_api_key__WEBPACK_IMPORTED_MODULE_16__ = __nested_webpack_require_450592__(/*! ./preview-api-key */ "./entities/preview-api-key.js");
+/* harmony import */ var _upload__WEBPACK_IMPORTED_MODULE_17__ = __nested_webpack_require_450592__(/*! ./upload */ "./entities/upload.js");
+/* harmony import */ var _organization__WEBPACK_IMPORTED_MODULE_18__ = __nested_webpack_require_450592__(/*! ./organization */ "./entities/organization.js");
+/* harmony import */ var _ui_extension__WEBPACK_IMPORTED_MODULE_19__ = __nested_webpack_require_450592__(/*! ./ui-extension */ "./entities/ui-extension.js");
+/* harmony import */ var _app_installation__WEBPACK_IMPORTED_MODULE_20__ = __nested_webpack_require_450592__(/*! ./app-installation */ "./entities/app-installation.js");
+/* harmony import */ var _snapshot__WEBPACK_IMPORTED_MODULE_21__ = __nested_webpack_require_450592__(/*! ./snapshot */ "./entities/snapshot.js");
+/* harmony import */ var _user__WEBPACK_IMPORTED_MODULE_22__ = __nested_webpack_require_450592__(/*! ./user */ "./entities/user.js");
+/* harmony import */ var _personal_access_token__WEBPACK_IMPORTED_MODULE_23__ = __nested_webpack_require_450592__(/*! ./personal-access-token */ "./entities/personal-access-token.js");
+/* harmony import */ var _usage__WEBPACK_IMPORTED_MODULE_24__ = __nested_webpack_require_450592__(/*! ./usage */ "./entities/usage.js");
+/* harmony import */ var _environment_alias__WEBPACK_IMPORTED_MODULE_25__ = __nested_webpack_require_450592__(/*! ./environment-alias */ "./entities/environment-alias.js");
+/* harmony import */ var _team__WEBPACK_IMPORTED_MODULE_26__ = __nested_webpack_require_450592__(/*! ./team */ "./entities/team.js");
+/* harmony import */ var _team_membership__WEBPACK_IMPORTED_MODULE_27__ = __nested_webpack_require_450592__(/*! ./team-membership */ "./entities/team-membership.js");
+
+
+
+
+
+
+
+
 
 
 
@@ -26602,26 +28589,34 @@ __nested_webpack_require_386738__.r(__webpack_exports__);
 
 
 /* harmony default export */ __webpack_exports__["default"] = ({
-  space: _space__WEBPACK_IMPORTED_MODULE_0__,
-  environment: _environment__WEBPACK_IMPORTED_MODULE_1__,
-  entry: _entry__WEBPACK_IMPORTED_MODULE_2__,
-  asset: _asset__WEBPACK_IMPORTED_MODULE_3__,
-  contentType: _content_type__WEBPACK_IMPORTED_MODULE_4__,
-  editorInterface: _editor_interface__WEBPACK_IMPORTED_MODULE_5__,
-  locale: _locale__WEBPACK_IMPORTED_MODULE_6__,
-  webhook: _webhook__WEBPACK_IMPORTED_MODULE_7__,
-  spaceMembership: _space_membership__WEBPACK_IMPORTED_MODULE_8__,
-  role: _role__WEBPACK_IMPORTED_MODULE_9__,
-  apiKey: _api_key__WEBPACK_IMPORTED_MODULE_10__,
-  previewApiKey: _preview_api_key__WEBPACK_IMPORTED_MODULE_11__,
-  upload: _upload__WEBPACK_IMPORTED_MODULE_12__,
-  organization: _organization__WEBPACK_IMPORTED_MODULE_13__,
-  uiExtension: _ui_extension__WEBPACK_IMPORTED_MODULE_14__,
-  snapshot: _snapshot__WEBPACK_IMPORTED_MODULE_15__,
-  user: _user__WEBPACK_IMPORTED_MODULE_16__,
-  personalAccessToken: _personal_access_token__WEBPACK_IMPORTED_MODULE_17__,
-  usagePeriod: _usage_period__WEBPACK_IMPORTED_MODULE_18__,
-  usage: _usage__WEBPACK_IMPORTED_MODULE_19__
+  appDefinition: _app_definition__WEBPACK_IMPORTED_MODULE_0__,
+  space: _space__WEBPACK_IMPORTED_MODULE_1__,
+  environment: _environment__WEBPACK_IMPORTED_MODULE_2__,
+  entry: _entry__WEBPACK_IMPORTED_MODULE_3__,
+  asset: _asset__WEBPACK_IMPORTED_MODULE_4__,
+  contentType: _content_type__WEBPACK_IMPORTED_MODULE_5__,
+  editorInterface: _editor_interface__WEBPACK_IMPORTED_MODULE_6__,
+  locale: _locale__WEBPACK_IMPORTED_MODULE_7__,
+  webhook: _webhook__WEBPACK_IMPORTED_MODULE_8__,
+  spaceMember: _space_member__WEBPACK_IMPORTED_MODULE_9__,
+  spaceMembership: _space_membership__WEBPACK_IMPORTED_MODULE_10__,
+  teamSpaceMembership: _team_space_membership__WEBPACK_IMPORTED_MODULE_11__,
+  organizationMembership: _organization_membership__WEBPACK_IMPORTED_MODULE_12__,
+  organizationInvitation: _organization_invitation__WEBPACK_IMPORTED_MODULE_13__,
+  role: _role__WEBPACK_IMPORTED_MODULE_14__,
+  apiKey: _api_key__WEBPACK_IMPORTED_MODULE_15__,
+  previewApiKey: _preview_api_key__WEBPACK_IMPORTED_MODULE_16__,
+  upload: _upload__WEBPACK_IMPORTED_MODULE_17__,
+  organization: _organization__WEBPACK_IMPORTED_MODULE_18__,
+  uiExtension: _ui_extension__WEBPACK_IMPORTED_MODULE_19__,
+  appInstallation: _app_installation__WEBPACK_IMPORTED_MODULE_20__,
+  snapshot: _snapshot__WEBPACK_IMPORTED_MODULE_21__,
+  user: _user__WEBPACK_IMPORTED_MODULE_22__,
+  personalAccessToken: _personal_access_token__WEBPACK_IMPORTED_MODULE_23__,
+  usage: _usage__WEBPACK_IMPORTED_MODULE_24__,
+  environmentAlias: _environment_alias__WEBPACK_IMPORTED_MODULE_25__,
+  team: _team__WEBPACK_IMPORTED_MODULE_26__,
+  teamMembership: _team_membership__WEBPACK_IMPORTED_MODULE_27__
 });
 
 /***/ }),
@@ -26631,17 +28626,17 @@ __nested_webpack_require_386738__.r(__webpack_exports__);
   !*** ./entities/locale.js ***!
   \****************************/
 /*! exports provided: wrapLocale, wrapLocaleCollection */
-/***/ (function(module, __webpack_exports__, __nested_webpack_require_390970__) {
+/***/ (function(module, __webpack_exports__, __nested_webpack_require_456649__) {
 
 "use strict";
-__nested_webpack_require_390970__.r(__webpack_exports__);
-/* harmony export (binding) */ __nested_webpack_require_390970__.d(__webpack_exports__, "wrapLocale", function() { return wrapLocale; });
-/* harmony export (binding) */ __nested_webpack_require_390970__.d(__webpack_exports__, "wrapLocaleCollection", function() { return wrapLocaleCollection; });
-/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__ = __nested_webpack_require_390970__(/*! lodash/cloneDeep */ "../node_modules/lodash/cloneDeep.js");
-/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__nested_webpack_require_390970__.n(lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__);
-/* harmony import */ var contentful_sdk_core__WEBPACK_IMPORTED_MODULE_1__ = __nested_webpack_require_390970__(/*! contentful-sdk-core */ "../node_modules/contentful-sdk-core/dist/index.es-modules.js");
-/* harmony import */ var _enhance_with_methods__WEBPACK_IMPORTED_MODULE_2__ = __nested_webpack_require_390970__(/*! ../enhance-with-methods */ "./enhance-with-methods.js");
-/* harmony import */ var _instance_actions__WEBPACK_IMPORTED_MODULE_3__ = __nested_webpack_require_390970__(/*! ../instance-actions */ "./instance-actions.js");
+__nested_webpack_require_456649__.r(__webpack_exports__);
+/* harmony export (binding) */ __nested_webpack_require_456649__.d(__webpack_exports__, "wrapLocale", function() { return wrapLocale; });
+/* harmony export (binding) */ __nested_webpack_require_456649__.d(__webpack_exports__, "wrapLocaleCollection", function() { return wrapLocaleCollection; });
+/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__ = __nested_webpack_require_456649__(/*! lodash/cloneDeep */ "../node_modules/lodash/cloneDeep.js");
+/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__nested_webpack_require_456649__.n(lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__);
+/* harmony import */ var contentful_sdk_core__WEBPACK_IMPORTED_MODULE_1__ = __nested_webpack_require_456649__(/*! contentful-sdk-core */ "../node_modules/contentful-sdk-core/dist/index.es-modules.js");
+/* harmony import */ var _enhance_with_methods__WEBPACK_IMPORTED_MODULE_2__ = __nested_webpack_require_456649__(/*! ../enhance-with-methods */ "./enhance-with-methods.js");
+/* harmony import */ var _instance_actions__WEBPACK_IMPORTED_MODULE_3__ = __nested_webpack_require_456649__(/*! ../instance-actions */ "./instance-actions.js");
 /**
  * Locale instances
  * @namespace Locale
@@ -26752,21 +28747,245 @@ function wrapLocaleCollection(http, data) {
 
 /***/ }),
 
+/***/ "./entities/organization-invitation.js":
+/*!*********************************************!*\
+  !*** ./entities/organization-invitation.js ***!
+  \*********************************************/
+/*! exports provided: wrapOrganizationInvitation */
+/***/ (function(module, __webpack_exports__, __nested_webpack_require_461958__) {
+
+"use strict";
+__nested_webpack_require_461958__.r(__webpack_exports__);
+/* harmony export (binding) */ __nested_webpack_require_461958__.d(__webpack_exports__, "wrapOrganizationInvitation", function() { return wrapOrganizationInvitation; });
+/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__ = __nested_webpack_require_461958__(/*! lodash/cloneDeep */ "../node_modules/lodash/cloneDeep.js");
+/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__nested_webpack_require_461958__.n(lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__);
+/* harmony import */ var contentful_sdk_core__WEBPACK_IMPORTED_MODULE_1__ = __nested_webpack_require_461958__(/*! contentful-sdk-core */ "../node_modules/contentful-sdk-core/dist/index.es-modules.js");
+/**
+ * Organization invitation instances
+ * @namespace OrganizationInvitation
+ */
+
+
+
+
+/**
+ * @memberof OrganizationInvitation
+ * @typedef OrganizationInvitation
+ * @prop {Meta.Sys} sys - System metadata
+ * @prop {function(): Object} toPlainObject() - Returns this Organization Invitation as a plain JS object
+ */
+
+/**
+ * @private
+ * @param {Object} http - HTTP client instance
+ * @param {Object} data - Raw invitation data
+ * @return {OrganizationInvitation} Wrapped Inviation data
+ */
+function wrapOrganizationInvitation(http, data) {
+  var invitation = Object(contentful_sdk_core__WEBPACK_IMPORTED_MODULE_1__["toPlainObject"])(lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0___default()(data));
+  return Object(contentful_sdk_core__WEBPACK_IMPORTED_MODULE_1__["freezeSys"])(invitation);
+}
+
+/***/ }),
+
+/***/ "./entities/organization-membership.js":
+/*!*********************************************!*\
+  !*** ./entities/organization-membership.js ***!
+  \*********************************************/
+/*! exports provided: wrapOrganizationMembership, wrapOrganizationMembershipCollection */
+/***/ (function(module, __webpack_exports__, __nested_webpack_require_463838__) {
+
+"use strict";
+__nested_webpack_require_463838__.r(__webpack_exports__);
+/* harmony export (binding) */ __nested_webpack_require_463838__.d(__webpack_exports__, "wrapOrganizationMembership", function() { return wrapOrganizationMembership; });
+/* harmony export (binding) */ __nested_webpack_require_463838__.d(__webpack_exports__, "wrapOrganizationMembershipCollection", function() { return wrapOrganizationMembershipCollection; });
+/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__ = __nested_webpack_require_463838__(/*! lodash/cloneDeep */ "../node_modules/lodash/cloneDeep.js");
+/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__nested_webpack_require_463838__.n(lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__);
+/* harmony import */ var contentful_sdk_core__WEBPACK_IMPORTED_MODULE_1__ = __nested_webpack_require_463838__(/*! contentful-sdk-core */ "../node_modules/contentful-sdk-core/dist/index.es-modules.js");
+/* harmony import */ var _enhance_with_methods__WEBPACK_IMPORTED_MODULE_2__ = __nested_webpack_require_463838__(/*! ../enhance-with-methods */ "./enhance-with-methods.js");
+/* harmony import */ var _error_handler__WEBPACK_IMPORTED_MODULE_3__ = __nested_webpack_require_463838__(/*! ../error-handler */ "./error-handler.js");
+/**
+ * Organization membership instances
+ * @namespace OrganizationMembership
+ */
+
+
+
+
+
+
+/**
+ * @memberof OrganizationMembership
+ * @typedef OrganizationMembership
+ * @prop {Meta.Sys} sys - System metadata
+ * @prop {string} role
+ * @prop {boolean} status - User is an admin
+ * @prop {function(): Object} toPlainObject() - Returns this Organization Membership as a plain JS object
+ */
+
+/**
+ * @memberof OrganizationMembership
+ * @typedef OrganizationMembershipCollection
+ * @prop {number} total
+ * @prop {number} limit
+ * @prop {number} skip
+ * @prop {Object<{type: "Array"}>} sys
+ * @prop {Array<OrganizationMembership.OrganizationMembership>} items
+ * @prop {function(): Object} toPlainObject() - Returns the collection as a plain JS object
+ */
+
+function createOrganizationMembershipApi(http) {
+  return {
+    /**
+     * Sends an update to the server with any changes made to the object's properties
+     * @memberof OrganizationMembership
+     * @func update
+     * @return {Promise<OrganizationMembership>} Object returned from the server with updated changes.
+     * @example
+     * const contentful = require('contentful-management')
+     *
+     * const client = contentful.createClient({
+     *   accessToken: '<content_management_api_key>'
+     * })
+     *
+     * client.getOrganization('organization_id')
+     * .then(org => org.getOrganizationMembership('organizationMembership_id'))
+     * .then((organizationMembership) => {
+     *  organizationMembership.role = 'member';
+     *  organizationMembership.update();
+     * })
+     * .catch(console.error)
+     */
+
+    update: function update() {
+      var raw = this.toPlainObject();
+      var role = raw.role;
+
+
+      return http.put('organization_memberships' + '/' + this.sys.id, { role: role }, {
+        headers: {
+          'X-Contentful-Version': this.sys.version || 0
+        }
+      }).then(function (response) {
+        return wrapOrganizationMembership(http, response.data);
+      }, _error_handler__WEBPACK_IMPORTED_MODULE_3__["default"]);
+    },
+
+    /**
+     * Deletes this object on the server.
+     * @memberof OrganizationMembership
+     * @func delete
+     * @return {Promise} Promise for the deletion. It contains no data, but the Promise error case should be handled.
+     * @example
+     * const contentful = require('contentful-management')
+     *
+     * const client = contentful.createClient({
+     *   accessToken: '<content_management_api_key>'
+     * })
+     *
+     * client.getOrganization('organization_id')
+     * .then(org => org.getOrganizationMembership('organizationMembership_id'))
+     * .then((organizationMembership) => {
+     *  organizationMembership.delete();
+     * })
+     * .catch(console.error)
+     */
+
+    delete: function _delete() {
+      return http.delete('organization_memberships' + '/' + this.sys.id).then(function (response) {}, _error_handler__WEBPACK_IMPORTED_MODULE_3__["default"]);
+    }
+  };
+}
+
+/**
+ * @private
+ * @param {Object} http - HTTP client instance
+ * @param {Object} data - Raw organization membership data
+ * @return {OrganizationMembership} Wrapped organization membership data
+ */
+function wrapOrganizationMembership(http, data) {
+  var organizationMembership = Object(contentful_sdk_core__WEBPACK_IMPORTED_MODULE_1__["toPlainObject"])(lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0___default()(data));
+  Object(_enhance_with_methods__WEBPACK_IMPORTED_MODULE_2__["default"])(organizationMembership, createOrganizationMembershipApi(http));
+  return Object(contentful_sdk_core__WEBPACK_IMPORTED_MODULE_1__["freezeSys"])(organizationMembership);
+}
+
+/**
+ * @private
+ * @param {Object} http - HTTP client instance
+ * @param {Object} data - Raw organization membership collection data
+ * @return {OrganizationMembershipCollection} Wrapped organization membership collection data
+ */
+function wrapOrganizationMembershipCollection(http, data) {
+  var organizationMemberships = Object(contentful_sdk_core__WEBPACK_IMPORTED_MODULE_1__["toPlainObject"])(lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0___default()(data));
+  organizationMemberships.items = organizationMemberships.items.map(function (entity) {
+    return wrapOrganizationMembership(http, entity);
+  });
+  return Object(contentful_sdk_core__WEBPACK_IMPORTED_MODULE_1__["freezeSys"])(organizationMemberships);
+}
+
+/***/ }),
+
 /***/ "./entities/organization.js":
 /*!**********************************!*\
   !*** ./entities/organization.js ***!
   \**********************************/
-/*! exports provided: wrapOrganizationCollection */
-/***/ (function(module, __webpack_exports__, __nested_webpack_require_396235__) {
+/*! exports provided: wrapOrganization, wrapOrganizationCollection */
+/***/ (function(module, __webpack_exports__, __nested_webpack_require_469629__) {
 
 "use strict";
-__nested_webpack_require_396235__.r(__webpack_exports__);
-/* harmony export (binding) */ __nested_webpack_require_396235__.d(__webpack_exports__, "wrapOrganizationCollection", function() { return wrapOrganizationCollection; });
-/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__ = __nested_webpack_require_396235__(/*! lodash/cloneDeep */ "../node_modules/lodash/cloneDeep.js");
-/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__nested_webpack_require_396235__.n(lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__);
-/* harmony import */ var contentful_sdk_core__WEBPACK_IMPORTED_MODULE_1__ = __nested_webpack_require_396235__(/*! contentful-sdk-core */ "../node_modules/contentful-sdk-core/dist/index.es-modules.js");
+__nested_webpack_require_469629__.r(__webpack_exports__);
+/* harmony export (binding) */ __nested_webpack_require_469629__.d(__webpack_exports__, "wrapOrganization", function() { return wrapOrganization; });
+/* harmony export (binding) */ __nested_webpack_require_469629__.d(__webpack_exports__, "wrapOrganizationCollection", function() { return wrapOrganizationCollection; });
+/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__ = __nested_webpack_require_469629__(/*! lodash/cloneDeep */ "../node_modules/lodash/cloneDeep.js");
+/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__nested_webpack_require_469629__.n(lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__);
+/* harmony import */ var contentful_sdk_core__WEBPACK_IMPORTED_MODULE_1__ = __nested_webpack_require_469629__(/*! contentful-sdk-core */ "../node_modules/contentful-sdk-core/dist/index.es-modules.js");
+/* harmony import */ var _enhance_with_methods__WEBPACK_IMPORTED_MODULE_2__ = __nested_webpack_require_469629__(/*! ../enhance-with-methods */ "./enhance-with-methods.js");
+/* harmony import */ var _create_organization_api__WEBPACK_IMPORTED_MODULE_3__ = __nested_webpack_require_469629__(/*! ../create-organization-api */ "./create-organization-api.js");
 
 
+
+
+
+/**
+ * @memberof Organization
+ * @typedef Organization
+ * @prop {Object} sys - System metadata
+ * @prop {string} sys.id - Organization id
+ * @prop {string} sys.type - Entity type
+ * @prop {string} name - Organization name
+ * @prop {function(): Object} toPlainObject() - Returns this Organization as a plain JS object
+ */
+
+/**
+ * @memberof Organization
+ * @typedef OrganizationCollection
+ * @prop {number} total
+ * @prop {number} skip
+ * @prop {number} limit
+ * @prop {Array<Organization.Organization>} items
+ * @prop {function(): Object} toPlainObject() - Returns this Organization collection as a plain JS object
+ */
+
+/**
+ * This method creates the API for the given organization with all the methods for
+ * reading and creating other entities. It also passes down a clone of the
+ * http client with an organization id, so the base path for requests now has the
+ * organization id already set.
+ * @private
+ * @param  {Object} http - HTTP client instance
+ * @param  {Object} data - API response for a Organization
+ * @return {Organization}
+ */
+function wrapOrganization(http, data) {
+  var org = Object(contentful_sdk_core__WEBPACK_IMPORTED_MODULE_1__["toPlainObject"])(lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0___default()(data));
+  var baseURL = http.defaults.baseURL.replace('/spaces/', '/organizations/') + org.sys.id + '/';
+  var orgScopedHttpClient = http.cloneWithNewParams({ baseURL: baseURL });
+  var orgApi = Object(_create_organization_api__WEBPACK_IMPORTED_MODULE_3__["default"])({
+    http: orgScopedHttpClient
+  });
+  var enhancedOrganization = Object(_enhance_with_methods__WEBPACK_IMPORTED_MODULE_2__["default"])(org, orgApi);
+  return Object(contentful_sdk_core__WEBPACK_IMPORTED_MODULE_1__["freezeSys"])(enhancedOrganization);
+}
 
 /**
 * This method normalizes each organization in a collection.
@@ -26777,6 +28996,9 @@ __nested_webpack_require_396235__.r(__webpack_exports__);
  */
 function wrapOrganizationCollection(http, data) {
   var organizations = Object(contentful_sdk_core__WEBPACK_IMPORTED_MODULE_1__["toPlainObject"])(lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0___default()(data));
+  organizations.items = organizations.items.map(function (entity) {
+    return wrapOrganization(http, entity);
+  });
   return Object(contentful_sdk_core__WEBPACK_IMPORTED_MODULE_1__["freezeSys"])(organizations);
 }
 
@@ -26787,17 +29009,17 @@ function wrapOrganizationCollection(http, data) {
   !*** ./entities/personal-access-token.js ***!
   \*******************************************/
 /*! exports provided: wrapPersonalAccessToken, wrapPersonalAccessTokenCollection */
-/***/ (function(module, __webpack_exports__, __nested_webpack_require_397886__) {
+/***/ (function(module, __webpack_exports__, __nested_webpack_require_473612__) {
 
 "use strict";
-__nested_webpack_require_397886__.r(__webpack_exports__);
-/* harmony export (binding) */ __nested_webpack_require_397886__.d(__webpack_exports__, "wrapPersonalAccessToken", function() { return wrapPersonalAccessToken; });
-/* harmony export (binding) */ __nested_webpack_require_397886__.d(__webpack_exports__, "wrapPersonalAccessTokenCollection", function() { return wrapPersonalAccessTokenCollection; });
-/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__ = __nested_webpack_require_397886__(/*! lodash/cloneDeep */ "../node_modules/lodash/cloneDeep.js");
-/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__nested_webpack_require_397886__.n(lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__);
-/* harmony import */ var contentful_sdk_core__WEBPACK_IMPORTED_MODULE_1__ = __nested_webpack_require_397886__(/*! contentful-sdk-core */ "../node_modules/contentful-sdk-core/dist/index.es-modules.js");
-/* harmony import */ var _enhance_with_methods__WEBPACK_IMPORTED_MODULE_2__ = __nested_webpack_require_397886__(/*! ../enhance-with-methods */ "./enhance-with-methods.js");
-/* harmony import */ var _error_handler__WEBPACK_IMPORTED_MODULE_3__ = __nested_webpack_require_397886__(/*! ../error-handler */ "./error-handler.js");
+__nested_webpack_require_473612__.r(__webpack_exports__);
+/* harmony export (binding) */ __nested_webpack_require_473612__.d(__webpack_exports__, "wrapPersonalAccessToken", function() { return wrapPersonalAccessToken; });
+/* harmony export (binding) */ __nested_webpack_require_473612__.d(__webpack_exports__, "wrapPersonalAccessTokenCollection", function() { return wrapPersonalAccessTokenCollection; });
+/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__ = __nested_webpack_require_473612__(/*! lodash/cloneDeep */ "../node_modules/lodash/cloneDeep.js");
+/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__nested_webpack_require_473612__.n(lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__);
+/* harmony import */ var contentful_sdk_core__WEBPACK_IMPORTED_MODULE_1__ = __nested_webpack_require_473612__(/*! contentful-sdk-core */ "../node_modules/contentful-sdk-core/dist/index.es-modules.js");
+/* harmony import */ var _enhance_with_methods__WEBPACK_IMPORTED_MODULE_2__ = __nested_webpack_require_473612__(/*! ../enhance-with-methods */ "./enhance-with-methods.js");
+/* harmony import */ var _error_handler__WEBPACK_IMPORTED_MODULE_3__ = __nested_webpack_require_473612__(/*! ../error-handler */ "./error-handler.js");
 /**
  * Personal access token
  * @namespace PersonalAccessToken
@@ -26872,16 +29094,16 @@ function wrapPersonalAccessTokenCollection(http, data) {
   !*** ./entities/preview-api-key.js ***!
   \*************************************/
 /*! exports provided: wrapPreviewApiKey, wrapPreviewApiKeyCollection */
-/***/ (function(module, __webpack_exports__, __nested_webpack_require_401759__) {
+/***/ (function(module, __webpack_exports__, __nested_webpack_require_477485__) {
 
 "use strict";
-__nested_webpack_require_401759__.r(__webpack_exports__);
-/* harmony export (binding) */ __nested_webpack_require_401759__.d(__webpack_exports__, "wrapPreviewApiKey", function() { return wrapPreviewApiKey; });
-/* harmony export (binding) */ __nested_webpack_require_401759__.d(__webpack_exports__, "wrapPreviewApiKeyCollection", function() { return wrapPreviewApiKeyCollection; });
-/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__ = __nested_webpack_require_401759__(/*! lodash/cloneDeep */ "../node_modules/lodash/cloneDeep.js");
-/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__nested_webpack_require_401759__.n(lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__);
-/* harmony import */ var contentful_sdk_core__WEBPACK_IMPORTED_MODULE_1__ = __nested_webpack_require_401759__(/*! contentful-sdk-core */ "../node_modules/contentful-sdk-core/dist/index.es-modules.js");
-/* harmony import */ var _enhance_with_methods__WEBPACK_IMPORTED_MODULE_2__ = __nested_webpack_require_401759__(/*! ../enhance-with-methods */ "./enhance-with-methods.js");
+__nested_webpack_require_477485__.r(__webpack_exports__);
+/* harmony export (binding) */ __nested_webpack_require_477485__.d(__webpack_exports__, "wrapPreviewApiKey", function() { return wrapPreviewApiKey; });
+/* harmony export (binding) */ __nested_webpack_require_477485__.d(__webpack_exports__, "wrapPreviewApiKeyCollection", function() { return wrapPreviewApiKeyCollection; });
+/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__ = __nested_webpack_require_477485__(/*! lodash/cloneDeep */ "../node_modules/lodash/cloneDeep.js");
+/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__nested_webpack_require_477485__.n(lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__);
+/* harmony import */ var contentful_sdk_core__WEBPACK_IMPORTED_MODULE_1__ = __nested_webpack_require_477485__(/*! contentful-sdk-core */ "../node_modules/contentful-sdk-core/dist/index.es-modules.js");
+/* harmony import */ var _enhance_with_methods__WEBPACK_IMPORTED_MODULE_2__ = __nested_webpack_require_477485__(/*! ../enhance-with-methods */ "./enhance-with-methods.js");
 /**
  * Preview Api Key instances
  * @namespace PreviewApiKey
@@ -26937,17 +29159,17 @@ function wrapPreviewApiKeyCollection(http, data) {
   !*** ./entities/role.js ***!
   \**************************/
 /*! exports provided: wrapRole, wrapRoleCollection */
-/***/ (function(module, __webpack_exports__, __nested_webpack_require_404623__) {
+/***/ (function(module, __webpack_exports__, __nested_webpack_require_480349__) {
 
 "use strict";
-__nested_webpack_require_404623__.r(__webpack_exports__);
-/* harmony export (binding) */ __nested_webpack_require_404623__.d(__webpack_exports__, "wrapRole", function() { return wrapRole; });
-/* harmony export (binding) */ __nested_webpack_require_404623__.d(__webpack_exports__, "wrapRoleCollection", function() { return wrapRoleCollection; });
-/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__ = __nested_webpack_require_404623__(/*! lodash/cloneDeep */ "../node_modules/lodash/cloneDeep.js");
-/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__nested_webpack_require_404623__.n(lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__);
-/* harmony import */ var contentful_sdk_core__WEBPACK_IMPORTED_MODULE_1__ = __nested_webpack_require_404623__(/*! contentful-sdk-core */ "../node_modules/contentful-sdk-core/dist/index.es-modules.js");
-/* harmony import */ var _enhance_with_methods__WEBPACK_IMPORTED_MODULE_2__ = __nested_webpack_require_404623__(/*! ../enhance-with-methods */ "./enhance-with-methods.js");
-/* harmony import */ var _instance_actions__WEBPACK_IMPORTED_MODULE_3__ = __nested_webpack_require_404623__(/*! ../instance-actions */ "./instance-actions.js");
+__nested_webpack_require_480349__.r(__webpack_exports__);
+/* harmony export (binding) */ __nested_webpack_require_480349__.d(__webpack_exports__, "wrapRole", function() { return wrapRole; });
+/* harmony export (binding) */ __nested_webpack_require_480349__.d(__webpack_exports__, "wrapRoleCollection", function() { return wrapRoleCollection; });
+/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__ = __nested_webpack_require_480349__(/*! lodash/cloneDeep */ "../node_modules/lodash/cloneDeep.js");
+/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__nested_webpack_require_480349__.n(lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__);
+/* harmony import */ var contentful_sdk_core__WEBPACK_IMPORTED_MODULE_1__ = __nested_webpack_require_480349__(/*! contentful-sdk-core */ "../node_modules/contentful-sdk-core/dist/index.es-modules.js");
+/* harmony import */ var _enhance_with_methods__WEBPACK_IMPORTED_MODULE_2__ = __nested_webpack_require_480349__(/*! ../enhance-with-methods */ "./enhance-with-methods.js");
+/* harmony import */ var _instance_actions__WEBPACK_IMPORTED_MODULE_3__ = __nested_webpack_require_480349__(/*! ../instance-actions */ "./instance-actions.js");
 /**
  * Role instances
  * @namespace Role
@@ -27056,16 +29278,16 @@ function wrapRoleCollection(http, data) {
   !*** ./entities/snapshot.js ***!
   \******************************/
 /*! exports provided: wrapSnapshot, wrapSnapshotCollection */
-/***/ (function(module, __webpack_exports__, __nested_webpack_require_409281__) {
+/***/ (function(module, __webpack_exports__, __nested_webpack_require_485007__) {
 
 "use strict";
-__nested_webpack_require_409281__.r(__webpack_exports__);
-/* harmony export (binding) */ __nested_webpack_require_409281__.d(__webpack_exports__, "wrapSnapshot", function() { return wrapSnapshot; });
-/* harmony export (binding) */ __nested_webpack_require_409281__.d(__webpack_exports__, "wrapSnapshotCollection", function() { return wrapSnapshotCollection; });
-/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__ = __nested_webpack_require_409281__(/*! lodash/cloneDeep */ "../node_modules/lodash/cloneDeep.js");
-/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__nested_webpack_require_409281__.n(lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__);
-/* harmony import */ var contentful_sdk_core__WEBPACK_IMPORTED_MODULE_1__ = __nested_webpack_require_409281__(/*! contentful-sdk-core */ "../node_modules/contentful-sdk-core/dist/index.es-modules.js");
-/* harmony import */ var _enhance_with_methods__WEBPACK_IMPORTED_MODULE_2__ = __nested_webpack_require_409281__(/*! ../enhance-with-methods */ "./enhance-with-methods.js");
+__nested_webpack_require_485007__.r(__webpack_exports__);
+/* harmony export (binding) */ __nested_webpack_require_485007__.d(__webpack_exports__, "wrapSnapshot", function() { return wrapSnapshot; });
+/* harmony export (binding) */ __nested_webpack_require_485007__.d(__webpack_exports__, "wrapSnapshotCollection", function() { return wrapSnapshotCollection; });
+/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__ = __nested_webpack_require_485007__(/*! lodash/cloneDeep */ "../node_modules/lodash/cloneDeep.js");
+/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__nested_webpack_require_485007__.n(lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__);
+/* harmony import */ var contentful_sdk_core__WEBPACK_IMPORTED_MODULE_1__ = __nested_webpack_require_485007__(/*! contentful-sdk-core */ "../node_modules/contentful-sdk-core/dist/index.es-modules.js");
+/* harmony import */ var _enhance_with_methods__WEBPACK_IMPORTED_MODULE_2__ = __nested_webpack_require_485007__(/*! ../enhance-with-methods */ "./enhance-with-methods.js");
 /**
  * Snapshot instances
  * @namespace Snapshot
@@ -27113,22 +29335,82 @@ function wrapSnapshotCollection(http, data) {
 
 /***/ }),
 
+/***/ "./entities/space-member.js":
+/*!**********************************!*\
+  !*** ./entities/space-member.js ***!
+  \**********************************/
+/*! exports provided: wrapSpaceMember, wrapSpaceMemberCollection */
+/***/ (function(module, __webpack_exports__, __nested_webpack_require_487864__) {
+
+"use strict";
+__nested_webpack_require_487864__.r(__webpack_exports__);
+/* harmony export (binding) */ __nested_webpack_require_487864__.d(__webpack_exports__, "wrapSpaceMember", function() { return wrapSpaceMember; });
+/* harmony export (binding) */ __nested_webpack_require_487864__.d(__webpack_exports__, "wrapSpaceMemberCollection", function() { return wrapSpaceMemberCollection; });
+/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__ = __nested_webpack_require_487864__(/*! lodash/cloneDeep */ "../node_modules/lodash/cloneDeep.js");
+/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__nested_webpack_require_487864__.n(lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__);
+/* harmony import */ var contentful_sdk_core__WEBPACK_IMPORTED_MODULE_1__ = __nested_webpack_require_487864__(/*! contentful-sdk-core */ "../node_modules/contentful-sdk-core/dist/index.es-modules.js");
+/**
+ * Space Member instances
+ * @namespace SpaceMember
+ */
+
+
+
+
+/**
+ * @memberof SpaceMember
+ * @typedef SpaceMember
+ * @prop {Meta.Sys} sys - System metadata
+ * @prop {string} sys.id - Space member id is of form <spaceId>-<userId>
+ * @prop {array} sys.relatedMemberships - Array of SpaceMemberships or TeamSpaceMemberships Links
+ * @prop {boolean} admin - User is an admin
+ * @prop {array} roles - Array of Role Links
+ * @prop {function(): Object} toPlainObject() - Returns this Space Member as a plain JS object
+ */
+
+/**
+ * @private
+ * @param {Object} http - HTTP client instance
+ * @param {Object} data - Raw space member data
+ * @return {SpaceMember} Wrapped space member data
+ */
+function wrapSpaceMember(http, data) {
+  var spaceMember = Object(contentful_sdk_core__WEBPACK_IMPORTED_MODULE_1__["toPlainObject"])(lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0___default()(data));
+  return Object(contentful_sdk_core__WEBPACK_IMPORTED_MODULE_1__["freezeSys"])(spaceMember);
+}
+
+/**
+ * @private
+ * @param {Object} http - HTTP client instance
+ * @param {Object} data - Raw space members collection data
+ * @return {SpaceMemberCollection} Wrapped space members collection data
+ */
+function wrapSpaceMemberCollection(http, data) {
+  var spaceMembers = Object(contentful_sdk_core__WEBPACK_IMPORTED_MODULE_1__["toPlainObject"])(lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0___default()(data));
+  spaceMembers.items = spaceMembers.items.map(function (entity) {
+    return wrapSpaceMember(http, entity);
+  });
+  return Object(contentful_sdk_core__WEBPACK_IMPORTED_MODULE_1__["freezeSys"])(spaceMembers);
+}
+
+/***/ }),
+
 /***/ "./entities/space-membership.js":
 /*!**************************************!*\
   !*** ./entities/space-membership.js ***!
   \**************************************/
 /*! exports provided: wrapSpaceMembership, wrapSpaceMembershipCollection */
-/***/ (function(module, __webpack_exports__, __nested_webpack_require_412162__) {
+/***/ (function(module, __webpack_exports__, __nested_webpack_require_490643__) {
 
 "use strict";
-__nested_webpack_require_412162__.r(__webpack_exports__);
-/* harmony export (binding) */ __nested_webpack_require_412162__.d(__webpack_exports__, "wrapSpaceMembership", function() { return wrapSpaceMembership; });
-/* harmony export (binding) */ __nested_webpack_require_412162__.d(__webpack_exports__, "wrapSpaceMembershipCollection", function() { return wrapSpaceMembershipCollection; });
-/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__ = __nested_webpack_require_412162__(/*! lodash/cloneDeep */ "../node_modules/lodash/cloneDeep.js");
-/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__nested_webpack_require_412162__.n(lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__);
-/* harmony import */ var contentful_sdk_core__WEBPACK_IMPORTED_MODULE_1__ = __nested_webpack_require_412162__(/*! contentful-sdk-core */ "../node_modules/contentful-sdk-core/dist/index.es-modules.js");
-/* harmony import */ var _enhance_with_methods__WEBPACK_IMPORTED_MODULE_2__ = __nested_webpack_require_412162__(/*! ../enhance-with-methods */ "./enhance-with-methods.js");
-/* harmony import */ var _instance_actions__WEBPACK_IMPORTED_MODULE_3__ = __nested_webpack_require_412162__(/*! ../instance-actions */ "./instance-actions.js");
+__nested_webpack_require_490643__.r(__webpack_exports__);
+/* harmony export (binding) */ __nested_webpack_require_490643__.d(__webpack_exports__, "wrapSpaceMembership", function() { return wrapSpaceMembership; });
+/* harmony export (binding) */ __nested_webpack_require_490643__.d(__webpack_exports__, "wrapSpaceMembershipCollection", function() { return wrapSpaceMembershipCollection; });
+/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__ = __nested_webpack_require_490643__(/*! lodash/cloneDeep */ "../node_modules/lodash/cloneDeep.js");
+/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__nested_webpack_require_490643__.n(lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__);
+/* harmony import */ var contentful_sdk_core__WEBPACK_IMPORTED_MODULE_1__ = __nested_webpack_require_490643__(/*! contentful-sdk-core */ "../node_modules/contentful-sdk-core/dist/index.es-modules.js");
+/* harmony import */ var _enhance_with_methods__WEBPACK_IMPORTED_MODULE_2__ = __nested_webpack_require_490643__(/*! ../enhance-with-methods */ "./enhance-with-methods.js");
+/* harmony import */ var _instance_actions__WEBPACK_IMPORTED_MODULE_3__ = __nested_webpack_require_490643__(/*! ../instance-actions */ "./instance-actions.js");
 /**
  * Space Membership instances
  * @namespace SpaceMembership
@@ -27236,17 +29518,17 @@ function wrapSpaceMembershipCollection(http, data) {
   !*** ./entities/space.js ***!
   \***************************/
 /*! exports provided: wrapSpace, wrapSpaceCollection */
-/***/ (function(module, __webpack_exports__, __nested_webpack_require_417153__) {
+/***/ (function(module, __webpack_exports__, __nested_webpack_require_495634__) {
 
 "use strict";
-__nested_webpack_require_417153__.r(__webpack_exports__);
-/* harmony export (binding) */ __nested_webpack_require_417153__.d(__webpack_exports__, "wrapSpace", function() { return wrapSpace; });
-/* harmony export (binding) */ __nested_webpack_require_417153__.d(__webpack_exports__, "wrapSpaceCollection", function() { return wrapSpaceCollection; });
-/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__ = __nested_webpack_require_417153__(/*! lodash/cloneDeep */ "../node_modules/lodash/cloneDeep.js");
-/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__nested_webpack_require_417153__.n(lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__);
-/* harmony import */ var contentful_sdk_core__WEBPACK_IMPORTED_MODULE_1__ = __nested_webpack_require_417153__(/*! contentful-sdk-core */ "../node_modules/contentful-sdk-core/dist/index.es-modules.js");
-/* harmony import */ var _enhance_with_methods__WEBPACK_IMPORTED_MODULE_2__ = __nested_webpack_require_417153__(/*! ../enhance-with-methods */ "./enhance-with-methods.js");
-/* harmony import */ var _create_space_api__WEBPACK_IMPORTED_MODULE_3__ = __nested_webpack_require_417153__(/*! ../create-space-api */ "./create-space-api.js");
+__nested_webpack_require_495634__.r(__webpack_exports__);
+/* harmony export (binding) */ __nested_webpack_require_495634__.d(__webpack_exports__, "wrapSpace", function() { return wrapSpace; });
+/* harmony export (binding) */ __nested_webpack_require_495634__.d(__webpack_exports__, "wrapSpaceCollection", function() { return wrapSpaceCollection; });
+/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__ = __nested_webpack_require_495634__(/*! lodash/cloneDeep */ "../node_modules/lodash/cloneDeep.js");
+/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__nested_webpack_require_495634__.n(lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__);
+/* harmony import */ var contentful_sdk_core__WEBPACK_IMPORTED_MODULE_1__ = __nested_webpack_require_495634__(/*! contentful-sdk-core */ "../node_modules/contentful-sdk-core/dist/index.es-modules.js");
+/* harmony import */ var _enhance_with_methods__WEBPACK_IMPORTED_MODULE_2__ = __nested_webpack_require_495634__(/*! ../enhance-with-methods */ "./enhance-with-methods.js");
+/* harmony import */ var _create_space_api__WEBPACK_IMPORTED_MODULE_3__ = __nested_webpack_require_495634__(/*! ../create-space-api */ "./create-space-api.js");
 
 
 
@@ -27321,22 +29603,431 @@ function wrapSpaceCollection(http, data) {
 
 /***/ }),
 
+/***/ "./entities/team-membership.js":
+/*!*************************************!*\
+  !*** ./entities/team-membership.js ***!
+  \*************************************/
+/*! exports provided: wrapTeamMembership, wrapTeamMembershipCollection */
+/***/ (function(module, __webpack_exports__, __nested_webpack_require_499647__) {
+
+"use strict";
+__nested_webpack_require_499647__.r(__webpack_exports__);
+/* harmony export (binding) */ __nested_webpack_require_499647__.d(__webpack_exports__, "wrapTeamMembership", function() { return wrapTeamMembership; });
+/* harmony export (binding) */ __nested_webpack_require_499647__.d(__webpack_exports__, "wrapTeamMembershipCollection", function() { return wrapTeamMembershipCollection; });
+/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__ = __nested_webpack_require_499647__(/*! lodash/cloneDeep */ "../node_modules/lodash/cloneDeep.js");
+/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__nested_webpack_require_499647__.n(lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__);
+/* harmony import */ var contentful_sdk_core__WEBPACK_IMPORTED_MODULE_1__ = __nested_webpack_require_499647__(/*! contentful-sdk-core */ "../node_modules/contentful-sdk-core/dist/index.es-modules.js");
+/* harmony import */ var _enhance_with_methods__WEBPACK_IMPORTED_MODULE_2__ = __nested_webpack_require_499647__(/*! ../enhance-with-methods */ "./enhance-with-methods.js");
+/* harmony import */ var _error_handler__WEBPACK_IMPORTED_MODULE_3__ = __nested_webpack_require_499647__(/*! ../error-handler */ "./error-handler.js");
+/**
+ * TeamMembership instances
+ * @namespace TeamMembership
+ */
+
+
+
+
+
+
+/**
+ * @memberof TeamMembership
+ * @typedef TeamMembership
+ * @prop {Meta.Sys} sys - System metadata
+ * @prop {boolean} admin - User is an admin
+ * @prop {function(): Object} toPlainObject() - Returns this Team Membership as a plain JS object
+ */
+
+/**
+ * @memberof TeamMembership
+ * @typedef TeamMembershipCollection
+ * @prop {number} total
+ * @prop {number} limit
+ * @prop {number} skip
+ * @prop {Object<{type: "Array"}>} sys
+ * @prop {Array<TeamMembership.TeamMembership>} items
+ * @prop {function(): Object} toPlainObject() - Returns the collection as a plain JS object
+ */
+
+function createTeamMembershipApi(http) {
+  return {
+    /**
+     * Sends an update to the server with any changes made to the object's properties
+     * @memberof TeamMembership
+     * @func update
+     * @return {Promise<TeamMembership>} Object returned from the server with updated changes.
+     * @example
+     * const contentful = require('contentful-management')
+     *
+     * const client = contentful.createClient({
+     *   accessToken: '<content_management_api_key>'
+     * })
+     *
+     * client.getOrganization('organizationId')
+     * .then(org => org.getTeamMembership('teamId', 'teamMembershipId'))
+     * .then((teamMembership) => {
+     *  teamMembership.admin = true;
+     *  teamMembership.update();
+     * })
+     * .catch(console.error)
+     */
+
+    update: function update() {
+      var raw = this.toPlainObject();
+      var teamId = raw.sys.team.sys.id;
+      return http.put('teams/' + teamId + '/team_memberships/' + this.sys.id, raw, {
+        headers: {
+          'X-Contentful-Version': this.sys.version || 0
+        }
+      }).then(function (response) {
+        return wrapTeamMembership(http, response.data);
+      }, _error_handler__WEBPACK_IMPORTED_MODULE_3__["default"]);
+    },
+
+    /**
+     * Deletes this object on the server.
+     * @memberof TeamMembership
+     * @func delete
+     * @return {Promise} Promise for the deletion. It contains no data, but the Promise error case should be handled.
+     * @example
+     * const contentful = require('contentful-management')
+     *
+     * const client = contentful.createClient({
+     *   accessToken: '<content_management_api_key>'
+     * })
+     *
+     * client.getOrganization('organizationId')
+     * .then(org => org.getTeamMembership('teamId', 'teamMembershipId'))
+     * .then((teamMembership) => {
+     *  teamMembership.delete();
+     * })
+     * .catch(console.error)
+     */
+
+    delete: function _delete() {
+      var raw = this.toPlainObject();
+      var teamId = raw.sys.team.sys.id;
+      return http.delete('teams/' + teamId + '/team_memberships/' + this.sys.id).then(function (response) {}, _error_handler__WEBPACK_IMPORTED_MODULE_3__["default"]);
+    }
+  };
+}
+/**
+ * @private
+ * @param {Object} http - HTTP client instance
+ * @param {Object} data - Raw team membership data
+ * @return {TeamMembership} Wrapped team membership data
+ */
+function wrapTeamMembership(http, data) {
+  var teamMembership = Object(contentful_sdk_core__WEBPACK_IMPORTED_MODULE_1__["toPlainObject"])(lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0___default()(data));
+  Object(_enhance_with_methods__WEBPACK_IMPORTED_MODULE_2__["default"])(teamMembership, createTeamMembershipApi(http));
+  return Object(contentful_sdk_core__WEBPACK_IMPORTED_MODULE_1__["freezeSys"])(teamMembership);
+}
+
+/**
+ * @private
+ * @param {Object} http - HTTP client instance
+ * @param {Object} data - Raw team membership collection data
+ * @return {TeamMembershipCollection} Wrapped team membership collection data
+ */
+function wrapTeamMembershipCollection(http, data) {
+  var teamMemberships = Object(contentful_sdk_core__WEBPACK_IMPORTED_MODULE_1__["toPlainObject"])(lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0___default()(data));
+  teamMemberships.items = teamMemberships.items.map(function (entity) {
+    return wrapTeamMembership(http, entity);
+  });
+  return Object(contentful_sdk_core__WEBPACK_IMPORTED_MODULE_1__["freezeSys"])(teamMemberships);
+}
+
+/***/ }),
+
+/***/ "./entities/team-space-membership.js":
+/*!*******************************************!*\
+  !*** ./entities/team-space-membership.js ***!
+  \*******************************************/
+/*! exports provided: wrapTeamSpaceMembership, wrapTeamSpaceMembershipCollection */
+/***/ (function(module, __webpack_exports__, __nested_webpack_require_505217__) {
+
+"use strict";
+__nested_webpack_require_505217__.r(__webpack_exports__);
+/* harmony export (binding) */ __nested_webpack_require_505217__.d(__webpack_exports__, "wrapTeamSpaceMembership", function() { return wrapTeamSpaceMembership; });
+/* harmony export (binding) */ __nested_webpack_require_505217__.d(__webpack_exports__, "wrapTeamSpaceMembershipCollection", function() { return wrapTeamSpaceMembershipCollection; });
+/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__ = __nested_webpack_require_505217__(/*! lodash/cloneDeep */ "../node_modules/lodash/cloneDeep.js");
+/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__nested_webpack_require_505217__.n(lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__);
+/* harmony import */ var contentful_sdk_core__WEBPACK_IMPORTED_MODULE_1__ = __nested_webpack_require_505217__(/*! contentful-sdk-core */ "../node_modules/contentful-sdk-core/dist/index.es-modules.js");
+/* harmony import */ var _enhance_with_methods__WEBPACK_IMPORTED_MODULE_2__ = __nested_webpack_require_505217__(/*! ../enhance-with-methods */ "./enhance-with-methods.js");
+/* harmony import */ var _instance_actions__WEBPACK_IMPORTED_MODULE_3__ = __nested_webpack_require_505217__(/*! ../instance-actions */ "./instance-actions.js");
+/* harmony import */ var _error_handler__WEBPACK_IMPORTED_MODULE_4__ = __nested_webpack_require_505217__(/*! ../error-handler */ "./error-handler.js");
+/**
+ * Team Space Membership instances
+ * @namespace TeamSpaceMembership
+ */
+
+
+
+
+
+
+
+/**
+ * @memberof TeamSpaceMembership
+ * @typedef TeamSpaceMembership
+ * @prop {Meta.Sys} sys - System metadata
+ * @prop {boolean} admin - User is an admin
+ * @prop {array} roles - Array of Role Links
+ * @prop {function(): Object} toPlainObject() - Returns this Team Space Membership as a plain JS object
+ */
+
+function createTeamSpaceMembershipApi(http) {
+  return {
+
+    /**
+     * Sends an update to the server with any changes made to the object's properties
+     * @memberof TeamSpaceMembership
+     * @func update
+     * @return {Promise<SpaceMembership>} Object returned from the server with updated changes.
+     * @example
+     * const contentful = require('contentful-management')
+     *
+     * const client = contentful.createClient({
+     *   accessToken: '<content_management_api_key>'
+     * })
+     *
+     * client.getSpace('<space_id>')
+     *  .then((space) => space.getTeamSpaceMembership('team_space_membership_id'))
+     *  .then((teamSpaceMembership) => {
+     *    item.roles = [
+     *      {
+     *        sys: {
+     *          type: 'Link',
+     *          linkType: 'Role',
+     *          id: 'role_id'
+     *        }
+     *      }
+     *    ]
+     *  })
+     *  .then((spaceMembership) => console.log(`spaceMembership ${spaceMembership.sys.id} updated.`))
+     *  .catch(console.error)
+     */
+    update: function update() {
+      var raw = this.toPlainObject();
+      var data = lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0___default()(raw);
+      delete data.sys;
+
+      return http.put('team_space_memberships/' + this.sys.id, data, {
+        headers: {
+          'X-Contentful-Version': this.sys.version || 0,
+          'x-contentful-team': this.sys.team.sys.id
+        }
+      }).then(function (response) {
+        return wrapTeamSpaceMembership(http, response.data);
+      }, _error_handler__WEBPACK_IMPORTED_MODULE_4__["default"]);
+    },
+
+    /**
+     * Deletes this object on the server.
+     * @memberof TeamSpaceMembership
+     * @func delete
+     * @return {Promise} Promise for the deletion. It contains no data, but the Promise error case should be handled.
+     * @example
+     * const contentful = require('contentful-management')
+     *
+     * const client = contentful.createClient({
+     *   accessToken: '<content_management_api_key>'
+     * })
+     *
+     * client.getSpace('<space_id>')
+     * .then((space) => space.getTeamSpaceMembership('<team_space_membership_id>'))
+     * .then((teamSpaceMembership) => teamSpaceMembership.delete())
+     * .then(() => console.log(`spaceMembership deleted.`))
+     * .catch(console.error)
+     */
+    delete: Object(_instance_actions__WEBPACK_IMPORTED_MODULE_3__["createDeleteEntity"])({
+      http: http,
+      entityPath: 'team_space_memberships'
+    })
+  };
+}
+
+/**
+ * @private
+ * @param {Object} http - HTTP client instance
+ * @param {Object} data - Raw space membership data
+ * @return {TeamSpaceMembership} Wrapped team space membership data
+ */
+function wrapTeamSpaceMembership(http, data) {
+  var teamSpaceMembership = Object(contentful_sdk_core__WEBPACK_IMPORTED_MODULE_1__["toPlainObject"])(lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0___default()(data));
+  Object(_enhance_with_methods__WEBPACK_IMPORTED_MODULE_2__["default"])(teamSpaceMembership, createTeamSpaceMembershipApi(http));
+  return Object(contentful_sdk_core__WEBPACK_IMPORTED_MODULE_1__["freezeSys"])(teamSpaceMembership);
+}
+
+/**
+ * @private
+ * @param {Object} http - HTTP client instance
+ * @param {Object} data - Raw space membership collection data
+ * @return {TeamSpaceMembershipCollection} Wrapped team space membership collection data
+ */
+function wrapTeamSpaceMembershipCollection(http, data) {
+  var teamSpaceMemberships = Object(contentful_sdk_core__WEBPACK_IMPORTED_MODULE_1__["toPlainObject"])(lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0___default()(data));
+  teamSpaceMemberships.items = teamSpaceMemberships.items.map(function (entity) {
+    return wrapTeamSpaceMembership(http, entity);
+  });
+  return Object(contentful_sdk_core__WEBPACK_IMPORTED_MODULE_1__["freezeSys"])(teamSpaceMemberships);
+}
+
+/***/ }),
+
+/***/ "./entities/team.js":
+/*!**************************!*\
+  !*** ./entities/team.js ***!
+  \**************************/
+/*! exports provided: wrapTeam, wrapTeamCollection */
+/***/ (function(module, __webpack_exports__, __nested_webpack_require_510962__) {
+
+"use strict";
+__nested_webpack_require_510962__.r(__webpack_exports__);
+/* harmony export (binding) */ __nested_webpack_require_510962__.d(__webpack_exports__, "wrapTeam", function() { return wrapTeam; });
+/* harmony export (binding) */ __nested_webpack_require_510962__.d(__webpack_exports__, "wrapTeamCollection", function() { return wrapTeamCollection; });
+/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__ = __nested_webpack_require_510962__(/*! lodash/cloneDeep */ "../node_modules/lodash/cloneDeep.js");
+/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__nested_webpack_require_510962__.n(lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__);
+/* harmony import */ var contentful_sdk_core__WEBPACK_IMPORTED_MODULE_1__ = __nested_webpack_require_510962__(/*! contentful-sdk-core */ "../node_modules/contentful-sdk-core/dist/index.es-modules.js");
+/* harmony import */ var _enhance_with_methods__WEBPACK_IMPORTED_MODULE_2__ = __nested_webpack_require_510962__(/*! ../enhance-with-methods */ "./enhance-with-methods.js");
+/* harmony import */ var _error_handler__WEBPACK_IMPORTED_MODULE_3__ = __nested_webpack_require_510962__(/*! ../error-handler */ "./error-handler.js");
+/**
+ * Team instances
+ * @namespace Team
+ */
+
+
+
+
+
+
+/**
+ * @memberof Team
+ * @typedef Team
+ * @prop {Meta.Sys} sys - System metadata
+ * @prop {string} name
+ * @prop {string} description
+ * @prop {function(): Object} toPlainObject() - Returns this Team as a plain JS object
+ */
+
+/**
+ * @memberof Team
+ * @typedef TeamCollection
+ * @prop {number} total
+ * @prop {number} limit
+ * @prop {number} skip
+ * @prop {Object<{type: "Array"}>} sys
+ * @prop {Array<Team.Team>} items
+ * @prop {function(): Object} toPlainObject() - Returns the collection as a plain JS object
+ */
+
+function createTeamApi(http) {
+  return {
+    /**
+     * Sends an update to the server with any changes made to the object's properties
+     * @memberof Team
+     * @func update
+     * @return {Promise<Team>} Object returned from the server with updated changes.
+     * @example
+     * const contentful = require('contentful-management')
+     *
+     * const client = contentful.createClient({
+     *   accessToken: '<content_management_api_key>'
+     * })
+     *
+     * client.getOrganization('organization_id')
+     * .then(org => org.getTeam('team_id'))
+     * .then((team) => {
+     *  team.description = 'new description';
+     *  team.update();
+     * })
+     * .catch(console.error)
+     */
+
+    update: function update() {
+      var raw = this.toPlainObject();
+      var name = raw.name,
+          description = raw.description;
+
+
+      return http.put('teams/' + this.sys.id, { name: name, description: description }, {
+        headers: {
+          'X-Contentful-Version': this.sys.version || 0
+        }
+      }).then(function (response) {
+        return wrapTeam(http, response.data);
+      }, _error_handler__WEBPACK_IMPORTED_MODULE_3__["default"]);
+    },
+
+    /**
+     * Deletes this object on the server.
+     * @memberof Team
+     * @func delete
+     * @return {Promise} Promise for the deletion. It contains no data, but the Promise error case should be handled.
+     * @example
+     * const contentful = require('contentful-management')
+     *
+     * const client = contentful.createClient({
+     *   accessToken: '<content_management_api_key>'
+     * })
+     *
+     * client.getOrganization('organization_id')
+     * .then(org => org.getOrganizationMembership('organizationMembership_id'))
+     * .then((team) => {
+     *  team.delete();
+     * })
+     * .catch(console.error)
+     */
+
+    delete: function _delete() {
+      return http.delete('teams/' + this.sys.id).then(function (response) {}, _error_handler__WEBPACK_IMPORTED_MODULE_3__["default"]);
+    }
+  };
+}
+
+/**
+ * @private
+ * @param {Object} http - HTTP client instance
+ * @param {Object} data - Raw team data
+ * @return {Team} Wrapped team data
+ */
+function wrapTeam(http, data) {
+  var team = Object(contentful_sdk_core__WEBPACK_IMPORTED_MODULE_1__["toPlainObject"])(lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0___default()(data));
+  Object(_enhance_with_methods__WEBPACK_IMPORTED_MODULE_2__["default"])(team, createTeamApi(http));
+  return Object(contentful_sdk_core__WEBPACK_IMPORTED_MODULE_1__["freezeSys"])(team);
+}
+
+/**
+ * @private
+ * @param {Object} http - HTTP client instance
+ * @param {Object} data - Raw team collection data
+ * @return {TeamCollection} Wrapped team collection data
+ */
+function wrapTeamCollection(http, data) {
+  var teams = Object(contentful_sdk_core__WEBPACK_IMPORTED_MODULE_1__["toPlainObject"])(lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0___default()(data));
+  teams.items = teams.items.map(function (entity) {
+    return wrapTeam(http, entity);
+  });
+  return Object(contentful_sdk_core__WEBPACK_IMPORTED_MODULE_1__["freezeSys"])(teams);
+}
+
+/***/ }),
+
 /***/ "./entities/ui-extension.js":
 /*!**********************************!*\
   !*** ./entities/ui-extension.js ***!
   \**********************************/
 /*! exports provided: wrapUiExtension, wrapUiExtensionCollection */
-/***/ (function(module, __webpack_exports__, __nested_webpack_require_421148__) {
+/***/ (function(module, __webpack_exports__, __nested_webpack_require_516009__) {
 
 "use strict";
-__nested_webpack_require_421148__.r(__webpack_exports__);
-/* harmony export (binding) */ __nested_webpack_require_421148__.d(__webpack_exports__, "wrapUiExtension", function() { return wrapUiExtension; });
-/* harmony export (binding) */ __nested_webpack_require_421148__.d(__webpack_exports__, "wrapUiExtensionCollection", function() { return wrapUiExtensionCollection; });
-/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__ = __nested_webpack_require_421148__(/*! lodash/cloneDeep */ "../node_modules/lodash/cloneDeep.js");
-/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__nested_webpack_require_421148__.n(lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__);
-/* harmony import */ var contentful_sdk_core__WEBPACK_IMPORTED_MODULE_1__ = __nested_webpack_require_421148__(/*! contentful-sdk-core */ "../node_modules/contentful-sdk-core/dist/index.es-modules.js");
-/* harmony import */ var _enhance_with_methods__WEBPACK_IMPORTED_MODULE_2__ = __nested_webpack_require_421148__(/*! ../enhance-with-methods */ "./enhance-with-methods.js");
-/* harmony import */ var _instance_actions__WEBPACK_IMPORTED_MODULE_3__ = __nested_webpack_require_421148__(/*! ../instance-actions */ "./instance-actions.js");
+__nested_webpack_require_516009__.r(__webpack_exports__);
+/* harmony export (binding) */ __nested_webpack_require_516009__.d(__webpack_exports__, "wrapUiExtension", function() { return wrapUiExtension; });
+/* harmony export (binding) */ __nested_webpack_require_516009__.d(__webpack_exports__, "wrapUiExtensionCollection", function() { return wrapUiExtensionCollection; });
+/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__ = __nested_webpack_require_516009__(/*! lodash/cloneDeep */ "../node_modules/lodash/cloneDeep.js");
+/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__nested_webpack_require_516009__.n(lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__);
+/* harmony import */ var contentful_sdk_core__WEBPACK_IMPORTED_MODULE_1__ = __nested_webpack_require_516009__(/*! contentful-sdk-core */ "../node_modules/contentful-sdk-core/dist/index.es-modules.js");
+/* harmony import */ var _enhance_with_methods__WEBPACK_IMPORTED_MODULE_2__ = __nested_webpack_require_516009__(/*! ../enhance-with-methods */ "./enhance-with-methods.js");
+/* harmony import */ var _instance_actions__WEBPACK_IMPORTED_MODULE_3__ = __nested_webpack_require_516009__(/*! ../instance-actions */ "./instance-actions.js");
 /**
  * UI Extension instances
  * @namespace UiExtension
@@ -27446,16 +30137,16 @@ function wrapUiExtensionCollection(http, data) {
   !*** ./entities/upload.js ***!
   \****************************/
 /*! exports provided: wrapUpload */
-/***/ (function(module, __webpack_exports__, __nested_webpack_require_426420__) {
+/***/ (function(module, __webpack_exports__, __nested_webpack_require_521281__) {
 
 "use strict";
-__nested_webpack_require_426420__.r(__webpack_exports__);
-/* harmony export (binding) */ __nested_webpack_require_426420__.d(__webpack_exports__, "wrapUpload", function() { return wrapUpload; });
-/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__ = __nested_webpack_require_426420__(/*! lodash/cloneDeep */ "../node_modules/lodash/cloneDeep.js");
-/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__nested_webpack_require_426420__.n(lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__);
-/* harmony import */ var contentful_sdk_core__WEBPACK_IMPORTED_MODULE_1__ = __nested_webpack_require_426420__(/*! contentful-sdk-core */ "../node_modules/contentful-sdk-core/dist/index.es-modules.js");
-/* harmony import */ var _enhance_with_methods__WEBPACK_IMPORTED_MODULE_2__ = __nested_webpack_require_426420__(/*! ../enhance-with-methods */ "./enhance-with-methods.js");
-/* harmony import */ var _instance_actions__WEBPACK_IMPORTED_MODULE_3__ = __nested_webpack_require_426420__(/*! ../instance-actions */ "./instance-actions.js");
+__nested_webpack_require_521281__.r(__webpack_exports__);
+/* harmony export (binding) */ __nested_webpack_require_521281__.d(__webpack_exports__, "wrapUpload", function() { return wrapUpload; });
+/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__ = __nested_webpack_require_521281__(/*! lodash/cloneDeep */ "../node_modules/lodash/cloneDeep.js");
+/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__nested_webpack_require_521281__.n(lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__);
+/* harmony import */ var contentful_sdk_core__WEBPACK_IMPORTED_MODULE_1__ = __nested_webpack_require_521281__(/*! contentful-sdk-core */ "../node_modules/contentful-sdk-core/dist/index.es-modules.js");
+/* harmony import */ var _enhance_with_methods__WEBPACK_IMPORTED_MODULE_2__ = __nested_webpack_require_521281__(/*! ../enhance-with-methods */ "./enhance-with-methods.js");
+/* harmony import */ var _instance_actions__WEBPACK_IMPORTED_MODULE_3__ = __nested_webpack_require_521281__(/*! ../instance-actions */ "./instance-actions.js");
 /**
  * Upload instances
  * @namespace Upload
@@ -27515,116 +30206,83 @@ function wrapUpload(http, data) {
 
 /***/ }),
 
-/***/ "./entities/usage-period.js":
-/*!**********************************!*\
-  !*** ./entities/usage-period.js ***!
-  \**********************************/
-/*! exports provided: wrapUsagePeriodCollection */
-/***/ (function(module, __webpack_exports__, __nested_webpack_require_429482__) {
-
-"use strict";
-__nested_webpack_require_429482__.r(__webpack_exports__);
-/* harmony export (binding) */ __nested_webpack_require_429482__.d(__webpack_exports__, "wrapUsagePeriodCollection", function() { return wrapUsagePeriodCollection; });
-/* harmony import */ var contentful_sdk_core__WEBPACK_IMPORTED_MODULE_0__ = __nested_webpack_require_429482__(/*! contentful-sdk-core */ "../node_modules/contentful-sdk-core/dist/index.es-modules.js");
-/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_1__ = __nested_webpack_require_429482__(/*! lodash/cloneDeep */ "../node_modules/lodash/cloneDeep.js");
-/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_1___default = /*#__PURE__*/__nested_webpack_require_429482__.n(lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_1__);
-/**
- * UsagePeriod
- * @namespace UsagePeriod
- */
-
-
-/**
- * @memberof UsagePeriod
- * @typedef UsagePeriod
- * @prop {Object} sys - System metadata
- * @prop {string} sys.id - User id
- * @prop {string} sys.type - Entity type, UsagePeriod
- * @prop {string} startDate - Start date of usage period
- * @prop {string} endDate - End date of usage period. Will be null for current period
- */
-
-/**
- * @memberof UsagePeriod
- * @typedef UsagePeriodCollection
- * @prop {number} total
- * @prop {number} skip
- * @prop {number} limit
- * @prop {Object} sys
- * @prop {Array<UsagePeriod.UsagePeriod>} items
- * @prop {function(): Object} toPlainObject() - Returns this Space collection as a plain JS object
- */
-
-/**
-* This method normalizes each organization in a collection.
- * @private
- * @param {Object} http - HTTP client instance
- * @param {Object} data - Raw usage period collection data
- * @return {UsagePeriod.UsagePeriodCollection} Normalized usage period collection data
- */
-function wrapUsagePeriodCollection(http, data) {
-  var usagePeriods = Object(contentful_sdk_core__WEBPACK_IMPORTED_MODULE_0__["toPlainObject"])(lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_1___default()(data));
-  return Object(contentful_sdk_core__WEBPACK_IMPORTED_MODULE_0__["freezeSys"])(usagePeriods);
-}
-
-/***/ }),
-
 /***/ "./entities/usage.js":
 /*!***************************!*\
   !*** ./entities/usage.js ***!
   \***************************/
 /*! exports provided: wrapUsageCollection */
-/***/ (function(module, __webpack_exports__, __nested_webpack_require_431722__) {
+/***/ (function(module, __webpack_exports__, __nested_webpack_require_524309__) {
 
 "use strict";
-__nested_webpack_require_431722__.r(__webpack_exports__);
-/* harmony export (binding) */ __nested_webpack_require_431722__.d(__webpack_exports__, "wrapUsageCollection", function() { return wrapUsageCollection; });
-/* harmony import */ var contentful_sdk_core__WEBPACK_IMPORTED_MODULE_0__ = __nested_webpack_require_431722__(/*! contentful-sdk-core */ "../node_modules/contentful-sdk-core/dist/index.es-modules.js");
-/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_1__ = __nested_webpack_require_431722__(/*! lodash/cloneDeep */ "../node_modules/lodash/cloneDeep.js");
-/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_1___default = /*#__PURE__*/__nested_webpack_require_431722__.n(lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_1__);
+__nested_webpack_require_524309__.r(__webpack_exports__);
+/* harmony export (binding) */ __nested_webpack_require_524309__.d(__webpack_exports__, "wrapUsageCollection", function() { return wrapUsageCollection; });
+/* harmony import */ var contentful_sdk_core__WEBPACK_IMPORTED_MODULE_0__ = __nested_webpack_require_524309__(/*! contentful-sdk-core */ "../node_modules/contentful-sdk-core/dist/index.es-modules.js");
+/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_1__ = __nested_webpack_require_524309__(/*! lodash/cloneDeep */ "../node_modules/lodash/cloneDeep.js");
+/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_1___default = /*#__PURE__*/__nested_webpack_require_524309__.n(lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_1__);
 /**
- * Usages
  * @namespace Usage
  */
 
 
+
+/**
+ * @memberof Usage
+ * @typedef { "cma" | "cda" | "cpa" | "gql" } UsageMetricEnum
+ */
+
+/**
+ * The <code>dateRange</code> parameter is optional. When some or all of
+ * <code>dateRange</code> properties are missing the usage period is derived
+ * from today and the maximum reported data points which are currently set to
+ * <code>45 days</code>. The calculated usage period is part of the response
+ * object see {@link Usage.Usage}
+ *
+ * @memberof Usage
+ * @typedef UsageQuery
+ * @prop {string} [metric[in]] - One or more comma separated usage {@link Usage.UsageMetricEnum metrics}. By default no filtering is applied.
+ * @prop {string} [dateRange.startAt] - Start of a usage period in <code>yyyy-mm-dd</code> format
+ * @prop {string} [dateRange.endAt] - End of a usage period in <code>yyyy-mm-dd</code> format
+ * @prop {number} [skip=0]
+ * @prop {number} [limit=25]
+ * @prop {string} [order="-usage"]
+ */
+
 /**
  * @memberof Usage
  * @typedef Usage
- * @prop {Object} sys - System metadata
- * @prop {string} sys.id - User id in form {usagePeriod}_{orgID or spaceID}
- * @prop {string} sys.type - Entity type, ApiUsage
- * @prop {Object} sys.usagePeriod - Link to <UsagePeriod>
- * @prop {Object} organization - optional, depends on type of usage requested. Link to org
- * @prop {Object} space - optional, depends on type of usage requested. Link to space
- * @prop {string} unitOfMeasure
- * @prop {string} interval
- * @prop {string} startDate
- * @prop {string} endDate
- * @prop {Array<number>} usage
+ * @prop {string} sys.id - Usage id in form of <code>usage-{metric}-{entity}-key-{key}-{startAt}-{endAt}</code>
+ * @prop {"OrganizationPeriodicUsage" | "SpacePeriodicUsage"} sys.type - Usage internal type
+ * @prop {Meta.Link} [sys.organization] - Organization link when <code>sys.type</code> is <code>OrganizationPeriodicUsage</code>
+ * @prop {Meta.Link} [sys.space] - Space link when <code>sys.code</code> is <code>SpacePeriodicUsage</code>
+ * @prop {"apiRequestsCount"} unitOfMeasure - Unit of measurement
+ * @prop {Usage.UsageMetricEnum} metric - Type of the requested metric
+ * @prop {string} dateRange.startAt - Start of the requested usage period in <code>yyyy-mm-dd</code> format
+ * @prop {string} dateRange.endAt - End of the requested usage period in <code>yyyy-mm-dd</code> format
+ * @prop {number} usage - Usage total for the requested <code>metric</code> and usage period
+ * @prop {Object} usagePerDay - Usage per day for the requested <code>metric</code> and usage period, <code>{ "yyyy-dd-mm": number, ... }</code>
  */
 
 /**
  * @memberof Usage
  * @typedef UsageCollection
  * @prop {number} total
- * @prop {number} skip
  * @prop {number} limit
- * @prop {Object} sys
+ * @prop {number} skip
+ * @prop {string} order
+ * @prop {Object<{type: "Array"}>} sys
  * @prop {Array<Usage.Usage>} items
- * @prop {function(): Object} toPlainObject() - Returns this Space collection as a plain JS object
+ * @prop {function(): Object} toPlainObject() - Returns the collection as a plain JS object
  */
 
 /**
-* This method normalizes each organization in a collection.
  * @private
  * @param {Object} http - HTTP client instance
- * @param {Object} data - Raw usage period collection data
- * @return {Usage.UsageCollection} Normalized usage period collection data
+ * @param {Object} data - Raw usage data collection
+ * @return {Usage.UsageCollection} Normalized usage collection
  */
 function wrapUsageCollection(http, data) {
-  var usages = Object(contentful_sdk_core__WEBPACK_IMPORTED_MODULE_0__["toPlainObject"])(lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_1___default()(data));
-  return Object(contentful_sdk_core__WEBPACK_IMPORTED_MODULE_0__["freezeSys"])(usages);
+  var usage = Object(contentful_sdk_core__WEBPACK_IMPORTED_MODULE_0__["toPlainObject"])(lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_1___default()(data));
+  return Object(contentful_sdk_core__WEBPACK_IMPORTED_MODULE_0__["freezeSys"])(usage);
 }
 
 /***/ }),
@@ -27633,16 +30291,21 @@ function wrapUsageCollection(http, data) {
 /*!**************************!*\
   !*** ./entities/user.js ***!
   \**************************/
-/*! exports provided: wrapUser */
-/***/ (function(module, __webpack_exports__, __nested_webpack_require_434132__) {
+/*! exports provided: wrapUser, wrapUserCollection */
+/***/ (function(module, __webpack_exports__, __nested_webpack_require_528074__) {
 
 "use strict";
-__nested_webpack_require_434132__.r(__webpack_exports__);
-/* harmony export (binding) */ __nested_webpack_require_434132__.d(__webpack_exports__, "wrapUser", function() { return wrapUser; });
-/* harmony import */ var contentful_sdk_core__WEBPACK_IMPORTED_MODULE_0__ = __nested_webpack_require_434132__(/*! contentful-sdk-core */ "../node_modules/contentful-sdk-core/dist/index.es-modules.js");
-/* harmony import */ var _enhance_with_methods__WEBPACK_IMPORTED_MODULE_1__ = __nested_webpack_require_434132__(/*! ../enhance-with-methods */ "./enhance-with-methods.js");
-/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_2__ = __nested_webpack_require_434132__(/*! lodash/cloneDeep */ "../node_modules/lodash/cloneDeep.js");
-/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_2___default = /*#__PURE__*/__nested_webpack_require_434132__.n(lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_2__);
+__nested_webpack_require_528074__.r(__webpack_exports__);
+/* harmony export (binding) */ __nested_webpack_require_528074__.d(__webpack_exports__, "wrapUser", function() { return wrapUser; });
+/* harmony export (binding) */ __nested_webpack_require_528074__.d(__webpack_exports__, "wrapUserCollection", function() { return wrapUserCollection; });
+/* harmony import */ var contentful_sdk_core__WEBPACK_IMPORTED_MODULE_0__ = __nested_webpack_require_528074__(/*! contentful-sdk-core */ "../node_modules/contentful-sdk-core/dist/index.es-modules.js");
+/* harmony import */ var _enhance_with_methods__WEBPACK_IMPORTED_MODULE_1__ = __nested_webpack_require_528074__(/*! ../enhance-with-methods */ "./enhance-with-methods.js");
+/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_2__ = __nested_webpack_require_528074__(/*! lodash/cloneDeep */ "../node_modules/lodash/cloneDeep.js");
+/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_2___default = /*#__PURE__*/__nested_webpack_require_528074__.n(lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_2__);
+/**
+ * @namespace User
+ */
+
 
 
 
@@ -27662,6 +30325,17 @@ __nested_webpack_require_434132__.r(__webpack_exports__);
  * @prop {function(): Object} toPlainObject() - Returns this User as a plain JS object
  */
 
+/**
+ * @memberof User
+ * @typedef UserCollection
+ * @prop {number} total
+ * @prop {number} limit
+ * @prop {number} skip
+ * @prop {Object<{type: "Array"}>} sys
+ * @prop {Array<User.User>} items
+ * @prop {function(): Object} toPlainObject() - Returns the collection as a plain JS object
+ */
+
 /*
  *
  * @private
@@ -27672,6 +30346,20 @@ function wrapUser(http, data) {
   return Object(contentful_sdk_core__WEBPACK_IMPORTED_MODULE_0__["freezeSys"])(user);
 }
 
+/**
+ * @private
+ * @param {Object} http - HTTP client instance
+ * @param {Object} data - Raw data collection
+ * @return {User.UserCollection} Normalized usage collection
+ */
+function wrapUserCollection(http, data) {
+  var users = Object(contentful_sdk_core__WEBPACK_IMPORTED_MODULE_0__["toPlainObject"])(lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_2___default()(data));
+  users.items = users.items.map(function (entity) {
+    return wrapUser(http, entity);
+  });
+  return Object(contentful_sdk_core__WEBPACK_IMPORTED_MODULE_0__["freezeSys"])(users);
+}
+
 /***/ }),
 
 /***/ "./entities/webhook.js":
@@ -27679,18 +30367,18 @@ function wrapUser(http, data) {
   !*** ./entities/webhook.js ***!
   \*****************************/
 /*! exports provided: wrapWebhook, wrapWebhookCollection */
-/***/ (function(module, __webpack_exports__, __nested_webpack_require_436198__) {
+/***/ (function(module, __webpack_exports__, __nested_webpack_require_531149__) {
 
 "use strict";
-__nested_webpack_require_436198__.r(__webpack_exports__);
-/* harmony export (binding) */ __nested_webpack_require_436198__.d(__webpack_exports__, "wrapWebhook", function() { return wrapWebhook; });
-/* harmony export (binding) */ __nested_webpack_require_436198__.d(__webpack_exports__, "wrapWebhookCollection", function() { return wrapWebhookCollection; });
-/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__ = __nested_webpack_require_436198__(/*! lodash/cloneDeep */ "../node_modules/lodash/cloneDeep.js");
-/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__nested_webpack_require_436198__.n(lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__);
-/* harmony import */ var contentful_sdk_core__WEBPACK_IMPORTED_MODULE_1__ = __nested_webpack_require_436198__(/*! contentful-sdk-core */ "../node_modules/contentful-sdk-core/dist/index.es-modules.js");
-/* harmony import */ var _enhance_with_methods__WEBPACK_IMPORTED_MODULE_2__ = __nested_webpack_require_436198__(/*! ../enhance-with-methods */ "./enhance-with-methods.js");
-/* harmony import */ var _error_handler__WEBPACK_IMPORTED_MODULE_3__ = __nested_webpack_require_436198__(/*! ../error-handler */ "./error-handler.js");
-/* harmony import */ var _instance_actions__WEBPACK_IMPORTED_MODULE_4__ = __nested_webpack_require_436198__(/*! ../instance-actions */ "./instance-actions.js");
+__nested_webpack_require_531149__.r(__webpack_exports__);
+/* harmony export (binding) */ __nested_webpack_require_531149__.d(__webpack_exports__, "wrapWebhook", function() { return wrapWebhook; });
+/* harmony export (binding) */ __nested_webpack_require_531149__.d(__webpack_exports__, "wrapWebhookCollection", function() { return wrapWebhookCollection; });
+/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__ = __nested_webpack_require_531149__(/*! lodash/cloneDeep */ "../node_modules/lodash/cloneDeep.js");
+/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__nested_webpack_require_531149__.n(lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__);
+/* harmony import */ var contentful_sdk_core__WEBPACK_IMPORTED_MODULE_1__ = __nested_webpack_require_531149__(/*! contentful-sdk-core */ "../node_modules/contentful-sdk-core/dist/index.es-modules.js");
+/* harmony import */ var _enhance_with_methods__WEBPACK_IMPORTED_MODULE_2__ = __nested_webpack_require_531149__(/*! ../enhance-with-methods */ "./enhance-with-methods.js");
+/* harmony import */ var _error_handler__WEBPACK_IMPORTED_MODULE_3__ = __nested_webpack_require_531149__(/*! ../error-handler */ "./error-handler.js");
+/* harmony import */ var _instance_actions__WEBPACK_IMPORTED_MODULE_4__ = __nested_webpack_require_531149__(/*! ../instance-actions */ "./instance-actions.js");
 /**
  * Webhook instances
  * @namespace Webhook
@@ -27884,13 +30572,13 @@ function wrapWebhookCollection(http, data) {
   !*** ./error-handler.js ***!
   \**************************/
 /*! exports provided: default */
-/***/ (function(module, __webpack_exports__, __nested_webpack_require_444647__) {
+/***/ (function(module, __webpack_exports__, __nested_webpack_require_539598__) {
 
 "use strict";
-__nested_webpack_require_444647__.r(__webpack_exports__);
-/* harmony export (binding) */ __nested_webpack_require_444647__.d(__webpack_exports__, "default", function() { return errorHandler; });
-/* harmony import */ var lodash_isPlainObject__WEBPACK_IMPORTED_MODULE_0__ = __nested_webpack_require_444647__(/*! lodash/isPlainObject */ "../node_modules/lodash/isPlainObject.js");
-/* harmony import */ var lodash_isPlainObject__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__nested_webpack_require_444647__.n(lodash_isPlainObject__WEBPACK_IMPORTED_MODULE_0__);
+__nested_webpack_require_539598__.r(__webpack_exports__);
+/* harmony export (binding) */ __nested_webpack_require_539598__.d(__webpack_exports__, "default", function() { return errorHandler; });
+/* harmony import */ var lodash_isPlainObject__WEBPACK_IMPORTED_MODULE_0__ = __nested_webpack_require_539598__(/*! lodash/isPlainObject */ "../node_modules/lodash/isPlainObject.js");
+/* harmony import */ var lodash_isPlainObject__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__nested_webpack_require_539598__.n(lodash_isPlainObject__WEBPACK_IMPORTED_MODULE_0__);
 
 
 /**
@@ -27965,23 +30653,25 @@ function errorHandler(errorResponse) {
   !*** ./instance-actions.js ***!
   \*****************************/
 /*! exports provided: createUpdateEntity, createDeleteEntity, createPublishEntity, createUnpublishEntity, createArchiveEntity, createUnarchiveEntity, createPublishedChecker, createUpdatedChecker, createDraftChecker, createArchivedChecker */
-/***/ (function(module, __webpack_exports__, __nested_webpack_require_447638__) {
+/***/ (function(module, __webpack_exports__, __nested_webpack_require_542589__) {
 
 "use strict";
-__nested_webpack_require_447638__.r(__webpack_exports__);
-/* harmony export (binding) */ __nested_webpack_require_447638__.d(__webpack_exports__, "createUpdateEntity", function() { return createUpdateEntity; });
-/* harmony export (binding) */ __nested_webpack_require_447638__.d(__webpack_exports__, "createDeleteEntity", function() { return createDeleteEntity; });
-/* harmony export (binding) */ __nested_webpack_require_447638__.d(__webpack_exports__, "createPublishEntity", function() { return createPublishEntity; });
-/* harmony export (binding) */ __nested_webpack_require_447638__.d(__webpack_exports__, "createUnpublishEntity", function() { return createUnpublishEntity; });
-/* harmony export (binding) */ __nested_webpack_require_447638__.d(__webpack_exports__, "createArchiveEntity", function() { return createArchiveEntity; });
-/* harmony export (binding) */ __nested_webpack_require_447638__.d(__webpack_exports__, "createUnarchiveEntity", function() { return createUnarchiveEntity; });
-/* harmony export (binding) */ __nested_webpack_require_447638__.d(__webpack_exports__, "createPublishedChecker", function() { return createPublishedChecker; });
-/* harmony export (binding) */ __nested_webpack_require_447638__.d(__webpack_exports__, "createUpdatedChecker", function() { return createUpdatedChecker; });
-/* harmony export (binding) */ __nested_webpack_require_447638__.d(__webpack_exports__, "createDraftChecker", function() { return createDraftChecker; });
-/* harmony export (binding) */ __nested_webpack_require_447638__.d(__webpack_exports__, "createArchivedChecker", function() { return createArchivedChecker; });
-/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__ = __nested_webpack_require_447638__(/*! lodash/cloneDeep */ "../node_modules/lodash/cloneDeep.js");
-/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__nested_webpack_require_447638__.n(lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__);
-/* harmony import */ var _error_handler__WEBPACK_IMPORTED_MODULE_1__ = __nested_webpack_require_447638__(/*! ./error-handler */ "./error-handler.js");
+__nested_webpack_require_542589__.r(__webpack_exports__);
+/* harmony export (binding) */ __nested_webpack_require_542589__.d(__webpack_exports__, "createUpdateEntity", function() { return createUpdateEntity; });
+/* harmony export (binding) */ __nested_webpack_require_542589__.d(__webpack_exports__, "createDeleteEntity", function() { return createDeleteEntity; });
+/* harmony export (binding) */ __nested_webpack_require_542589__.d(__webpack_exports__, "createPublishEntity", function() { return createPublishEntity; });
+/* harmony export (binding) */ __nested_webpack_require_542589__.d(__webpack_exports__, "createUnpublishEntity", function() { return createUnpublishEntity; });
+/* harmony export (binding) */ __nested_webpack_require_542589__.d(__webpack_exports__, "createArchiveEntity", function() { return createArchiveEntity; });
+/* harmony export (binding) */ __nested_webpack_require_542589__.d(__webpack_exports__, "createUnarchiveEntity", function() { return createUnarchiveEntity; });
+/* harmony export (binding) */ __nested_webpack_require_542589__.d(__webpack_exports__, "createPublishedChecker", function() { return createPublishedChecker; });
+/* harmony export (binding) */ __nested_webpack_require_542589__.d(__webpack_exports__, "createUpdatedChecker", function() { return createUpdatedChecker; });
+/* harmony export (binding) */ __nested_webpack_require_542589__.d(__webpack_exports__, "createDraftChecker", function() { return createDraftChecker; });
+/* harmony export (binding) */ __nested_webpack_require_542589__.d(__webpack_exports__, "createArchivedChecker", function() { return createArchivedChecker; });
+/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__ = __nested_webpack_require_542589__(/*! lodash/cloneDeep */ "../node_modules/lodash/cloneDeep.js");
+/* harmony import */ var lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__nested_webpack_require_542589__.n(lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0__);
+/* harmony import */ var _error_handler__WEBPACK_IMPORTED_MODULE_1__ = __nested_webpack_require_542589__(/*! ./error-handler */ "./error-handler.js");
+var _extends = Object.assign || function (target) { for (var i = 1; i < arguments.length; i++) { var source = arguments[i]; for (var key in source) { if (Object.prototype.hasOwnProperty.call(source, key)) { target[key] = source[key]; } } } return target; };
+
 
 
 
@@ -27992,16 +30682,16 @@ __nested_webpack_require_447638__.r(__webpack_exports__);
 function createUpdateEntity(_ref) {
   var http = _ref.http,
       entityPath = _ref.entityPath,
-      wrapperMethod = _ref.wrapperMethod;
+      wrapperMethod = _ref.wrapperMethod,
+      headers = _ref.headers;
 
   return function () {
     var raw = this.toPlainObject();
     var data = lodash_cloneDeep__WEBPACK_IMPORTED_MODULE_0___default()(raw);
     delete data.sys;
     return http.put(entityPath + '/' + this.sys.id, data, {
-      headers: {
-        'X-Contentful-Version': this.sys.version
-      }
+      headers: _extends({
+        'X-Contentful-Version': this.sys.version || 0 }, headers)
     }).then(function (response) {
       return wrapperMethod(http, response.data);
     }, _error_handler__WEBPACK_IMPORTED_MODULE_1__["default"]);
@@ -28129,9 +30819,9 @@ function createArchivedChecker() {
   !*** multi ./contentful-management.js ***!
   \****************************************/
 /*! no static exports found */
-/***/ (function(module, exports, __nested_webpack_require_453166__) {
+/***/ (function(module, exports, __nested_webpack_require_548424__) {
 
-module.exports = __nested_webpack_require_453166__(/*! ./contentful-management.js */"./contentful-management.js");
+module.exports = __nested_webpack_require_548424__(/*! ./contentful-management.js */"./contentful-management.js");
 
 
 /***/ }),
@@ -28187,7 +30877,7 @@ module.exports = __webpack_require__(87);
 /*! no static exports found */
 /***/ (function(module, exports) {
 
-module.exports = __webpack_require__(413);
+module.exports = __webpack_require__(794);
 
 /***/ }),
 
@@ -28326,193 +31016,296 @@ module.exports.frames = frames;
 
 /***/ }),
 /* 141 */
-/***/ (function(module, exports, __webpack_require__) {
+/***/ (function(__unusedmodule, exports, __webpack_require__) {
 
 "use strict";
 
 
-function _typeof(obj) { if (typeof Symbol === "function" && typeof Symbol.iterator === "symbol") { _typeof = function _typeof(obj) { return typeof obj; }; } else { _typeof = function _typeof(obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; }; } return _typeof(obj); }
-
-/* eslint-env browser */
-
-/**
- * This is the web browser implementation of `debug()`.
- */
-exports.log = log;
-exports.formatArgs = formatArgs;
-exports.save = save;
-exports.load = load;
-exports.useColors = useColors;
-exports.storage = localstorage();
-/**
- * Colors.
- */
-
-exports.colors = ['#0000CC', '#0000FF', '#0033CC', '#0033FF', '#0066CC', '#0066FF', '#0099CC', '#0099FF', '#00CC00', '#00CC33', '#00CC66', '#00CC99', '#00CCCC', '#00CCFF', '#3300CC', '#3300FF', '#3333CC', '#3333FF', '#3366CC', '#3366FF', '#3399CC', '#3399FF', '#33CC00', '#33CC33', '#33CC66', '#33CC99', '#33CCCC', '#33CCFF', '#6600CC', '#6600FF', '#6633CC', '#6633FF', '#66CC00', '#66CC33', '#9900CC', '#9900FF', '#9933CC', '#9933FF', '#99CC00', '#99CC33', '#CC0000', '#CC0033', '#CC0066', '#CC0099', '#CC00CC', '#CC00FF', '#CC3300', '#CC3333', '#CC3366', '#CC3399', '#CC33CC', '#CC33FF', '#CC6600', '#CC6633', '#CC9900', '#CC9933', '#CCCC00', '#CCCC33', '#FF0000', '#FF0033', '#FF0066', '#FF0099', '#FF00CC', '#FF00FF', '#FF3300', '#FF3333', '#FF3366', '#FF3399', '#FF33CC', '#FF33FF', '#FF6600', '#FF6633', '#FF9900', '#FF9933', '#FFCC00', '#FFCC33'];
-/**
- * Currently only WebKit-based Web Inspectors, Firefox >= v31,
- * and the Firebug extension (any Firefox version) are known
- * to support "%c" CSS customizations.
- *
- * TODO: add a `localStorage` variable to explicitly enable/disable colors
- */
-// eslint-disable-next-line complexity
-
-function useColors() {
-  // NB: In an Electron preload script, document will be defined but not fully
-  // initialized. Since we know we're in Chrome, we'll just detect this case
-  // explicitly
-  if (typeof window !== 'undefined' && window.process && (window.process.type === 'renderer' || window.process.__nwjs)) {
-    return true;
-  } // Internet Explorer and Edge do not support colors.
+var net = __webpack_require__(631);
+var tls = __webpack_require__(16);
+var http = __webpack_require__(605);
+var https = __webpack_require__(211);
+var events = __webpack_require__(614);
+var assert = __webpack_require__(357);
+var util = __webpack_require__(669);
 
 
-  if (typeof navigator !== 'undefined' && navigator.userAgent && navigator.userAgent.toLowerCase().match(/(edge|trident)\/(\d+)/)) {
-    return false;
-  } // Is webkit? http://stackoverflow.com/a/16459606/376773
-  // document is undefined in react-native: https://github.com/facebook/react-native/pull/1632
+exports.httpOverHttp = httpOverHttp;
+exports.httpsOverHttp = httpsOverHttp;
+exports.httpOverHttps = httpOverHttps;
+exports.httpsOverHttps = httpsOverHttps;
 
 
-  return typeof document !== 'undefined' && document.documentElement && document.documentElement.style && document.documentElement.style.WebkitAppearance || // Is firebug? http://stackoverflow.com/a/398120/376773
-  typeof window !== 'undefined' && window.console && (window.console.firebug || window.console.exception && window.console.table) || // Is firefox >= v31?
-  // https://developer.mozilla.org/en-US/docs/Tools/Web_Console#Styling_messages
-  typeof navigator !== 'undefined' && navigator.userAgent && navigator.userAgent.toLowerCase().match(/firefox\/(\d+)/) && parseInt(RegExp.$1, 10) >= 31 || // Double check webkit in userAgent just in case we are in a worker
-  typeof navigator !== 'undefined' && navigator.userAgent && navigator.userAgent.toLowerCase().match(/applewebkit\/(\d+)/);
+function httpOverHttp(options) {
+  var agent = new TunnelingAgent(options);
+  agent.request = http.request;
+  return agent;
 }
-/**
- * Colorize log arguments if enabled.
- *
- * @api public
- */
+
+function httpsOverHttp(options) {
+  var agent = new TunnelingAgent(options);
+  agent.request = http.request;
+  agent.createSocket = createSecureSocket;
+  agent.defaultPort = 443;
+  return agent;
+}
+
+function httpOverHttps(options) {
+  var agent = new TunnelingAgent(options);
+  agent.request = https.request;
+  return agent;
+}
+
+function httpsOverHttps(options) {
+  var agent = new TunnelingAgent(options);
+  agent.request = https.request;
+  agent.createSocket = createSecureSocket;
+  agent.defaultPort = 443;
+  return agent;
+}
 
 
-function formatArgs(args) {
-  args[0] = (this.useColors ? '%c' : '') + this.namespace + (this.useColors ? ' %c' : ' ') + args[0] + (this.useColors ? '%c ' : ' ') + '+' + module.exports.humanize(this.diff);
+function TunnelingAgent(options) {
+  var self = this;
+  self.options = options || {};
+  self.proxyOptions = self.options.proxy || {};
+  self.maxSockets = self.options.maxSockets || http.Agent.defaultMaxSockets;
+  self.requests = [];
+  self.sockets = [];
 
-  if (!this.useColors) {
+  self.on('free', function onFree(socket, host, port, localAddress) {
+    var options = toOptions(host, port, localAddress);
+    for (var i = 0, len = self.requests.length; i < len; ++i) {
+      var pending = self.requests[i];
+      if (pending.host === options.host && pending.port === options.port) {
+        // Detect the request to connect same origin server,
+        // reuse the connection.
+        self.requests.splice(i, 1);
+        pending.request.onSocket(socket);
+        return;
+      }
+    }
+    socket.destroy();
+    self.removeSocket(socket);
+  });
+}
+util.inherits(TunnelingAgent, events.EventEmitter);
+
+TunnelingAgent.prototype.addRequest = function addRequest(req, host, port, localAddress) {
+  var self = this;
+  var options = mergeOptions({request: req}, self.options, toOptions(host, port, localAddress));
+
+  if (self.sockets.length >= this.maxSockets) {
+    // We are over limit so we'll add it to the queue.
+    self.requests.push(options);
     return;
   }
 
-  var c = 'color: ' + this.color;
-  args.splice(1, 0, c, 'color: inherit'); // The final "%c" is somewhat tricky, because there could be other
-  // arguments passed either before or after the %c, so we need to
-  // figure out the correct index to insert the CSS into
+  // If we are under maxSockets create a new one.
+  self.createSocket(options, function(socket) {
+    socket.on('free', onFree);
+    socket.on('close', onCloseOrRemove);
+    socket.on('agentRemove', onCloseOrRemove);
+    req.onSocket(socket);
 
-  var index = 0;
-  var lastC = 0;
-  args[0].replace(/%[a-zA-Z%]/g, function (match) {
-    if (match === '%%') {
-      return;
+    function onFree() {
+      self.emit('free', socket, options);
     }
 
-    index++;
-
-    if (match === '%c') {
-      // We only are interested in the *last* %c
-      // (the user may have provided their own)
-      lastC = index;
+    function onCloseOrRemove(err) {
+      self.removeSocket(socket);
+      socket.removeListener('free', onFree);
+      socket.removeListener('close', onCloseOrRemove);
+      socket.removeListener('agentRemove', onCloseOrRemove);
     }
   });
-  args.splice(lastC, 0, c);
-}
-/**
- * Invokes `console.log()` when available.
- * No-op when `console.log` is not a "function".
- *
- * @api public
- */
+};
 
+TunnelingAgent.prototype.createSocket = function createSocket(options, cb) {
+  var self = this;
+  var placeholder = {};
+  self.sockets.push(placeholder);
 
-function log() {
-  var _console;
-
-  // This hackery is required for IE8/9, where
-  // the `console.log` function doesn't have 'apply'
-  return (typeof console === "undefined" ? "undefined" : _typeof(console)) === 'object' && console.log && (_console = console).log.apply(_console, arguments);
-}
-/**
- * Save `namespaces`.
- *
- * @param {String} namespaces
- * @api private
- */
-
-
-function save(namespaces) {
-  try {
-    if (namespaces) {
-      exports.storage.setItem('debug', namespaces);
-    } else {
-      exports.storage.removeItem('debug');
+  var connectOptions = mergeOptions({}, self.proxyOptions, {
+    method: 'CONNECT',
+    path: options.host + ':' + options.port,
+    agent: false,
+    headers: {
+      host: options.host + ':' + options.port
     }
-  } catch (error) {// Swallow
-    // XXX (@Qix-) should we be logging these?
+  });
+  if (options.localAddress) {
+    connectOptions.localAddress = options.localAddress;
   }
-}
-/**
- * Load `namespaces`.
- *
- * @return {String} returns the previously persisted debug modes
- * @api private
- */
-
-
-function load() {
-  var r;
-
-  try {
-    r = exports.storage.getItem('debug');
-  } catch (error) {} // Swallow
-  // XXX (@Qix-) should we be logging these?
-  // If debug isn't set in LS, and we're in Electron, try to load $DEBUG
-
-
-  if (!r && typeof process !== 'undefined' && 'env' in process) {
-    r = process.env.DEBUG;
+  if (connectOptions.proxyAuth) {
+    connectOptions.headers = connectOptions.headers || {};
+    connectOptions.headers['Proxy-Authorization'] = 'Basic ' +
+        new Buffer(connectOptions.proxyAuth).toString('base64');
   }
 
-  return r;
-}
-/**
- * Localstorage attempts to return the localstorage.
- *
- * This is necessary because safari throws
- * when a user disables cookies/localstorage
- * and you attempt to access it.
- *
- * @return {LocalStorage}
- * @api private
- */
+  debug('making CONNECT request');
+  var connectReq = self.request(connectOptions);
+  connectReq.useChunkedEncodingByDefault = false; // for v0.6
+  connectReq.once('response', onResponse); // for v0.6
+  connectReq.once('upgrade', onUpgrade);   // for v0.6
+  connectReq.once('connect', onConnect);   // for v0.7 or later
+  connectReq.once('error', onError);
+  connectReq.end();
 
-
-function localstorage() {
-  try {
-    // TVMLKit (Apple TV JS Runtime) does not have a window object, just localStorage in the global context
-    // The Browser also has localStorage in the global context.
-    return localStorage;
-  } catch (error) {// Swallow
-    // XXX (@Qix-) should we be logging these?
+  function onResponse(res) {
+    // Very hacky. This is necessary to avoid http-parser leaks.
+    res.upgrade = true;
   }
-}
 
-module.exports = __webpack_require__(783)(exports);
-var formatters = module.exports.formatters;
-/**
- * Map %j to `JSON.stringify()`, since no Web Inspectors do that by default.
- */
+  function onUpgrade(res, socket, head) {
+    // Hacky.
+    process.nextTick(function() {
+      onConnect(res, socket, head);
+    });
+  }
 
-formatters.j = function (v) {
-  try {
-    return JSON.stringify(v);
-  } catch (error) {
-    return '[UnexpectedJSONParseError]: ' + error.message;
+  function onConnect(res, socket, head) {
+    connectReq.removeAllListeners();
+    socket.removeAllListeners();
+
+    if (res.statusCode !== 200) {
+      debug('tunneling socket could not be established, statusCode=%d',
+        res.statusCode);
+      socket.destroy();
+      var error = new Error('tunneling socket could not be established, ' +
+        'statusCode=' + res.statusCode);
+      error.code = 'ECONNRESET';
+      options.request.emit('error', error);
+      self.removeSocket(placeholder);
+      return;
+    }
+    if (head.length > 0) {
+      debug('got illegal response body from proxy');
+      socket.destroy();
+      var error = new Error('got illegal response body from proxy');
+      error.code = 'ECONNRESET';
+      options.request.emit('error', error);
+      self.removeSocket(placeholder);
+      return;
+    }
+    debug('tunneling connection has established');
+    self.sockets[self.sockets.indexOf(placeholder)] = socket;
+    return cb(socket);
+  }
+
+  function onError(cause) {
+    connectReq.removeAllListeners();
+
+    debug('tunneling socket could not be established, cause=%s\n',
+          cause.message, cause.stack);
+    var error = new Error('tunneling socket could not be established, ' +
+                          'cause=' + cause.message);
+    error.code = 'ECONNRESET';
+    options.request.emit('error', error);
+    self.removeSocket(placeholder);
   }
 };
 
+TunnelingAgent.prototype.removeSocket = function removeSocket(socket) {
+  var pos = this.sockets.indexOf(socket)
+  if (pos === -1) {
+    return;
+  }
+  this.sockets.splice(pos, 1);
+
+  var pending = this.requests.shift();
+  if (pending) {
+    // If we have pending requests and a socket gets closed a new one
+    // needs to be created to take over in the pool for the one that closed.
+    this.createSocket(pending, function(socket) {
+      pending.request.onSocket(socket);
+    });
+  }
+};
+
+function createSecureSocket(options, cb) {
+  var self = this;
+  TunnelingAgent.prototype.createSocket.call(self, options, function(socket) {
+    var hostHeader = options.request.getHeader('host');
+    var tlsOptions = mergeOptions({}, self.options, {
+      socket: socket,
+      servername: hostHeader ? hostHeader.replace(/:.*$/, '') : options.host
+    });
+
+    // 0 is dummy port for v0.6
+    var secureSocket = tls.connect(0, tlsOptions);
+    self.sockets[self.sockets.indexOf(socket)] = secureSocket;
+    cb(secureSocket);
+  });
+}
+
+
+function toOptions(host, port, localAddress) {
+  if (typeof host === 'string') { // since v0.10
+    return {
+      host: host,
+      port: port,
+      localAddress: localAddress
+    };
+  }
+  return host; // for v0.11 or later
+}
+
+function mergeOptions(target) {
+  for (var i = 1, len = arguments.length; i < len; ++i) {
+    var overrides = arguments[i];
+    if (typeof overrides === 'object') {
+      var keys = Object.keys(overrides);
+      for (var j = 0, keyLen = keys.length; j < keyLen; ++j) {
+        var k = keys[j];
+        if (overrides[k] !== undefined) {
+          target[k] = overrides[k];
+        }
+      }
+    }
+  }
+  return target;
+}
+
+
+var debug;
+if (process.env.NODE_DEBUG && /\btunnel\b/.test(process.env.NODE_DEBUG)) {
+  debug = function() {
+    var args = Array.prototype.slice.call(arguments);
+    if (typeof args[0] === 'string') {
+      args[0] = 'TUNNEL: ' + args[0];
+    } else {
+      args.unshift('TUNNEL:');
+    }
+    console.error.apply(console, args);
+  }
+} else {
+  debug = function() {};
+}
+exports.debug = debug; // for test
 
 
 /***/ }),
-/* 142 */,
+/* 142 */
+/***/ (function(__unusedmodule, exports, __webpack_require__) {
+
+"use strict";
+
+Object.defineProperty(exports, "__esModule", { value: true });
+const action_1 = __webpack_require__(64);
+class ContentTypeDeleteAction extends action_1.APIAction {
+    constructor(contentTypeId) {
+        super();
+        this.contentTypeId = contentTypeId;
+    }
+    async applyTo(api) {
+        await api.deleteContentType(this.contentTypeId);
+    }
+}
+exports.ContentTypeDeleteAction = ContentTypeDeleteAction;
+//# sourceMappingURL=content-type-delete.js.map
+
+/***/ }),
 /* 143 */
 /***/ (function(module) {
 
@@ -28546,12 +31339,68 @@ module.exports = isArray;
 
 /***/ }),
 /* 144 */,
-/* 145 */,
+/* 145 */
+/***/ (function(module, __unusedexports, __webpack_require__) {
+
+"use strict";
+
+const pump = __webpack_require__(453);
+const bufferStream = __webpack_require__(966);
+
+class MaxBufferError extends Error {
+	constructor() {
+		super('maxBuffer exceeded');
+		this.name = 'MaxBufferError';
+	}
+}
+
+function getStream(inputStream, options) {
+	if (!inputStream) {
+		return Promise.reject(new Error('Expected a stream'));
+	}
+
+	options = Object.assign({maxBuffer: Infinity}, options);
+
+	const {maxBuffer} = options;
+
+	let stream;
+	return new Promise((resolve, reject) => {
+		const rejectPromise = error => {
+			if (error) { // A null check
+				error.bufferedData = stream.getBufferedValue();
+			}
+			reject(error);
+		};
+
+		stream = pump(inputStream, bufferStream(options), error => {
+			if (error) {
+				rejectPromise(error);
+				return;
+			}
+
+			resolve();
+		});
+
+		stream.on('data', () => {
+			if (stream.getBufferedLength() > maxBuffer) {
+				rejectPromise(new MaxBufferError());
+			}
+		});
+	}).then(() => stream.getBufferedValue());
+}
+
+module.exports = getStream;
+module.exports.buffer = (stream, options) => getStream(stream, Object.assign({}, options, {encoding: 'buffer'}));
+module.exports.array = (stream, options) => getStream(stream, Object.assign({}, options, {array: true}));
+module.exports.MaxBufferError = MaxBufferError;
+
+
+/***/ }),
 /* 146 */
 /***/ (function(module, __unusedexports, __webpack_require__) {
 
 var isFunction = __webpack_require__(10),
-    isLength = __webpack_require__(611);
+    isLength = __webpack_require__(198);
 
 /**
  * Checks if `value` is array-like. A value is considered array-like if it's
@@ -29793,7 +32642,54 @@ exports.CopyEditorInterfaceAction = CopyEditorInterfaceAction;
 //# sourceMappingURL=editorinterface-copy.js.map
 
 /***/ }),
-/* 168 */,
+/* 168 */
+/***/ (function(module) {
+
+"use strict";
+
+const alias = ['stdin', 'stdout', 'stderr'];
+
+const hasAlias = opts => alias.some(x => Boolean(opts[x]));
+
+module.exports = opts => {
+	if (!opts) {
+		return null;
+	}
+
+	if (opts.stdio && hasAlias(opts)) {
+		throw new Error(`It's not possible to provide \`stdio\` in combination with one of ${alias.map(x => `\`${x}\``).join(', ')}`);
+	}
+
+	if (typeof opts.stdio === 'string') {
+		return opts.stdio;
+	}
+
+	const stdio = opts.stdio || [];
+
+	if (!Array.isArray(stdio)) {
+		throw new TypeError(`Expected \`stdio\` to be of type \`string\` or \`Array\`, got \`${typeof stdio}\``);
+	}
+
+	const result = [];
+	const len = Math.max(stdio.length, alias.length);
+
+	for (let i = 0; i < len; i++) {
+		let value = null;
+
+		if (stdio[i] !== undefined) {
+			value = stdio[i];
+		} else if (opts[alias[i]] !== undefined) {
+			value = opts[alias[i]];
+		}
+
+		result[i] = value;
+	}
+
+	return result;
+};
+
+
+/***/ }),
 /* 169 */,
 /* 170 */,
 /* 171 */,
@@ -29803,10 +32699,10 @@ exports.CopyEditorInterfaceAction = CopyEditorInterfaceAction;
 
 "use strict";
 
-const logUpdate = __webpack_require__(49);
+const logUpdate = __webpack_require__(224);
 const chalk = __webpack_require__(343);
 const figures = __webpack_require__(769);
-const indentString = __webpack_require__(948);
+const indentString = __webpack_require__(374);
 const cliTruncate = __webpack_require__(864);
 const stripAnsi = __webpack_require__(193);
 const utils = __webpack_require__(726);
@@ -30003,7 +32899,7 @@ module.exports = buildDistanceInWordsLocale
 
 // Load modules
 
-const Hoek = __webpack_require__(11);
+const Hoek = __webpack_require__(970);
 const Topo = __webpack_require__(367);
 const Any = __webpack_require__(227);
 const Errors = __webpack_require__(420);
@@ -31222,25 +34118,93 @@ module.exports = function (str) {
 /* 195 */,
 /* 196 */,
 /* 197 */
-/***/ (function(__unusedmodule, exports, __webpack_require__) {
+/***/ (function(module, __unusedexports, __webpack_require__) {
 
-"use strict";
+module.exports = isexe
+isexe.sync = sync
 
-Object.defineProperty(exports, "__esModule", { value: true });
-const steps_validation_1 = __webpack_require__(573);
-exports.StepsValidationError = steps_validation_1.default;
-const chunks_validation_1 = __webpack_require__(559);
-exports.ChunksValidationError = chunks_validation_1.default;
-const space_access_1 = __webpack_require__(425);
-exports.SpaceAccessError = space_access_1.default;
-const payload_validation_1 = __webpack_require__(12);
-exports.PayloadValidationError = payload_validation_1.default;
-const editorinterfaces_fetching_1 = __webpack_require__(219);
-exports.EditorInterfacesFetchingError = editorinterfaces_fetching_1.default;
-//# sourceMappingURL=index.js.map
+var fs = __webpack_require__(747)
+
+function isexe (path, options, cb) {
+  fs.stat(path, function (er, stat) {
+    cb(er, er ? false : checkStat(stat, options))
+  })
+}
+
+function sync (path, options) {
+  return checkStat(fs.statSync(path), options)
+}
+
+function checkStat (stat, options) {
+  return stat.isFile() && checkMode(stat, options)
+}
+
+function checkMode (stat, options) {
+  var mod = stat.mode
+  var uid = stat.uid
+  var gid = stat.gid
+
+  var myUid = options.uid !== undefined ?
+    options.uid : process.getuid && process.getuid()
+  var myGid = options.gid !== undefined ?
+    options.gid : process.getgid && process.getgid()
+
+  var u = parseInt('100', 8)
+  var g = parseInt('010', 8)
+  var o = parseInt('001', 8)
+  var ug = u | g
+
+  var ret = (mod & o) ||
+    (mod & g) && gid === myGid ||
+    (mod & u) && uid === myUid ||
+    (mod & ug) && myUid === 0
+
+  return ret
+}
+
 
 /***/ }),
-/* 198 */,
+/* 198 */
+/***/ (function(module) {
+
+/** Used as references for various `Number` constants. */
+var MAX_SAFE_INTEGER = 9007199254740991;
+
+/**
+ * Checks if `value` is a valid array-like length.
+ *
+ * **Note:** This method is loosely based on
+ * [`ToLength`](http://ecma-international.org/ecma-262/7.0/#sec-tolength).
+ *
+ * @static
+ * @memberOf _
+ * @since 4.0.0
+ * @category Lang
+ * @param {*} value The value to check.
+ * @returns {boolean} Returns `true` if `value` is a valid length, else `false`.
+ * @example
+ *
+ * _.isLength(3);
+ * // => true
+ *
+ * _.isLength(Number.MIN_VALUE);
+ * // => false
+ *
+ * _.isLength(Infinity);
+ * // => false
+ *
+ * _.isLength('3');
+ * // => false
+ */
+function isLength(value) {
+  return typeof value == 'number' &&
+    value > -1 && value % 1 == 0 && value <= MAX_SAFE_INTEGER;
+}
+
+module.exports = isLength;
+
+
+/***/ }),
 /* 199 */,
 /* 200 */
 /***/ (function(module, __unusedexports, __webpack_require__) {
@@ -31975,155 +34939,39 @@ x.iTerm.setCwd = cwd => OSC + '50;CurrentDir=' + (cwd || process.cwd()) + BEL;
 
 /***/ }),
 /* 224 */
-/***/ (function(module) {
+/***/ (function(module, __unusedexports, __webpack_require__) {
 
-var toString = Object.prototype.toString;
+"use strict";
 
-/**
- * Get the native `typeof` a value.
- *
- * @param  {*} `val`
- * @return {*} Native javascript type
- */
+var ansiEscapes = __webpack_require__(746);
+var cliCursor = __webpack_require__(388);
 
-module.exports = function kindOf(val) {
-  var type = typeof val;
+function main(stream) {
+	var prevLineCount = 0;
 
-  // primitivies
-  if (type === 'undefined') {
-    return 'undefined';
-  }
-  if (val === null) {
-    return 'null';
-  }
-  if (val === true || val === false || val instanceof Boolean) {
-    return 'boolean';
-  }
-  if (type === 'string' || val instanceof String) {
-    return 'string';
-  }
-  if (type === 'number' || val instanceof Number) {
-    return 'number';
-  }
+	var render = function () {
+		cliCursor.hide();
+		var out = [].join.call(arguments, ' ') + '\n';
+		stream.write(ansiEscapes.eraseLines(prevLineCount) + out);
+		prevLineCount = out.split('\n').length;
+	};
 
-  // functions
-  if (type === 'function' || val instanceof Function) {
-    if (typeof val.constructor.name !== 'undefined' && val.constructor.name.slice(0, 9) === 'Generator') {
-      return 'generatorfunction';
-    }
-    return 'function';
-  }
+	render.clear = function () {
+		stream.write(ansiEscapes.eraseLines(prevLineCount));
+		prevLineCount = 0;
+	};
 
-  // array
-  if (typeof Array.isArray !== 'undefined' && Array.isArray(val)) {
-    return 'array';
-  }
+	render.done = function () {
+		prevLineCount = 0;
+		cliCursor.show();
+	};
 
-  // check for instances of RegExp and Date before calling `toString`
-  if (val instanceof RegExp) {
-    return 'regexp';
-  }
-  if (val instanceof Date) {
-    return 'date';
-  }
-
-  // other objects
-  type = toString.call(val);
-
-  if (type === '[object RegExp]') {
-    return 'regexp';
-  }
-  if (type === '[object Date]') {
-    return 'date';
-  }
-  if (type === '[object Arguments]') {
-    return 'arguments';
-  }
-  if (type === '[object Error]') {
-    return 'error';
-  }
-  if (type === '[object Promise]') {
-    return 'promise';
-  }
-
-  // buffer
-  if (isBuffer(val)) {
-    return 'buffer';
-  }
-
-  // es6: Map, WeakMap, Set, WeakSet
-  if (type === '[object Set]') {
-    return 'set';
-  }
-  if (type === '[object WeakSet]') {
-    return 'weakset';
-  }
-  if (type === '[object Map]') {
-    return 'map';
-  }
-  if (type === '[object WeakMap]') {
-    return 'weakmap';
-  }
-  if (type === '[object Symbol]') {
-    return 'symbol';
-  }
-  
-  if (type === '[object Map Iterator]') {
-    return 'mapiterator';
-  }
-  if (type === '[object Set Iterator]') {
-    return 'setiterator';
-  }
-  if (type === '[object String Iterator]') {
-    return 'stringiterator';
-  }
-  if (type === '[object Array Iterator]') {
-    return 'arrayiterator';
-  }
-  
-  // typed arrays
-  if (type === '[object Int8Array]') {
-    return 'int8array';
-  }
-  if (type === '[object Uint8Array]') {
-    return 'uint8array';
-  }
-  if (type === '[object Uint8ClampedArray]') {
-    return 'uint8clampedarray';
-  }
-  if (type === '[object Int16Array]') {
-    return 'int16array';
-  }
-  if (type === '[object Uint16Array]') {
-    return 'uint16array';
-  }
-  if (type === '[object Int32Array]') {
-    return 'int32array';
-  }
-  if (type === '[object Uint32Array]') {
-    return 'uint32array';
-  }
-  if (type === '[object Float32Array]') {
-    return 'float32array';
-  }
-  if (type === '[object Float64Array]') {
-    return 'float64array';
-  }
-
-  // must be a plain object
-  return 'object';
-};
-
-/**
- * If you need to support Safari 5-7 (8-10 yr-old browser),
- * take a look at https://github.com/feross/is-buffer
- */
-
-function isBuffer(val) {
-  return val.constructor
-    && typeof val.constructor.isBuffer === 'function'
-    && val.constructor.isBuffer(val);
+	return render;
 }
+
+module.exports = main(process.stdout);
+module.exports.stderr = main(process.stderr);
+module.exports.create = main;
 
 
 /***/ }),
@@ -32137,7 +34985,7 @@ function isBuffer(val) {
 
 // Load modules
 
-const Hoek = __webpack_require__(11);
+const Hoek = __webpack_require__(970);
 const Ref = __webpack_require__(953);
 const Errors = __webpack_require__(420);
 let Alternatives = null;                // Delay-loaded to prevent circular dependencies
@@ -34251,7 +37099,35 @@ module.exports = ret;
 
 
 /***/ }),
-/* 249 */,
+/* 249 */
+/***/ (function(__unusedmodule, exports, __webpack_require__) {
+
+"use strict";
+
+Object.defineProperty(exports, "__esModule", { value: true });
+const action_1 = __webpack_require__(64);
+class EntryFieldRenameAction extends action_1.APIAction {
+    constructor(contentTypeId, fieldId, props) {
+        super();
+        this.contentTypeId = contentTypeId;
+        this.fieldId = fieldId;
+        this.props = props;
+    }
+    async applyTo(api) {
+        const entries = await api.getEntriesForContentType(this.contentTypeId);
+        for (const entry of entries) {
+            const { newId } = this.props;
+            const field = entry.fields[this.fieldId];
+            const newFields = Object.assign({}, entry.fields, { [newId]: field });
+            delete newFields[this.fieldId];
+            entry.fields = newFields;
+        }
+    }
+}
+exports.EntryFieldRenameAction = EntryFieldRenameAction;
+//# sourceMappingURL=entry-field-rename.js.map
+
+/***/ }),
 /* 250 */,
 /* 251 */
 /***/ (function(__unusedmodule, exports, __webpack_require__) {
@@ -34594,103 +37470,163 @@ exports.default = EditorInterfaceUpdateIntent;
 /* 260 */
 /***/ (function(module, __unusedexports, __webpack_require__) {
 
-var conversions = __webpack_require__(600);
+// Note: since nyc uses this module to output coverage, any lines
+// that are in the direct sync flow of nyc's outputCoverage are
+// ignored, since we can never get coverage for them.
+var assert = __webpack_require__(357)
+var signals = __webpack_require__(654)
 
-/*
-	this function routes a model to all other models.
-
-	all functions that are routed have a property `.conversion` attached
-	to the returned synthetic function. This property is an array
-	of strings, each with the steps in between the 'from' and 'to'
-	color models (inclusive).
-
-	conversions that are not possible simply are not included.
-*/
-
-function buildGraph() {
-	var graph = {};
-	// https://jsperf.com/object-keys-vs-for-in-with-closure/3
-	var models = Object.keys(conversions);
-
-	for (var len = models.length, i = 0; i < len; i++) {
-		graph[models[i]] = {
-			// http://jsperf.com/1-vs-infinity
-			// micro-opt, but this is simple.
-			distance: -1,
-			parent: null
-		};
-	}
-
-	return graph;
+var EE = __webpack_require__(614)
+/* istanbul ignore if */
+if (typeof EE !== 'function') {
+  EE = EE.EventEmitter
 }
 
-// https://en.wikipedia.org/wiki/Breadth-first_search
-function deriveBFS(fromModel) {
-	var graph = buildGraph();
-	var queue = [fromModel]; // unshift -> queue -> pop
-
-	graph[fromModel].distance = 0;
-
-	while (queue.length) {
-		var current = queue.pop();
-		var adjacents = Object.keys(conversions[current]);
-
-		for (var len = adjacents.length, i = 0; i < len; i++) {
-			var adjacent = adjacents[i];
-			var node = graph[adjacent];
-
-			if (node.distance === -1) {
-				node.distance = graph[current].distance + 1;
-				node.parent = current;
-				queue.unshift(adjacent);
-			}
-		}
-	}
-
-	return graph;
+var emitter
+if (process.__signal_exit_emitter__) {
+  emitter = process.__signal_exit_emitter__
+} else {
+  emitter = process.__signal_exit_emitter__ = new EE()
+  emitter.count = 0
+  emitter.emitted = {}
 }
 
-function link(from, to) {
-	return function (args) {
-		return to(from(args));
-	};
+// Because this emitter is a global, we have to check to see if a
+// previous version of this library failed to enable infinite listeners.
+// I know what you're about to say.  But literally everything about
+// signal-exit is a compromise with evil.  Get used to it.
+if (!emitter.infinite) {
+  emitter.setMaxListeners(Infinity)
+  emitter.infinite = true
 }
 
-function wrapConversion(toModel, graph) {
-	var path = [graph[toModel].parent, toModel];
-	var fn = conversions[graph[toModel].parent][toModel];
+module.exports = function (cb, opts) {
+  assert.equal(typeof cb, 'function', 'a callback must be provided for exit handler')
 
-	var cur = graph[toModel].parent;
-	while (graph[cur].parent) {
-		path.unshift(graph[cur].parent);
-		fn = link(conversions[graph[cur].parent][cur], fn);
-		cur = graph[cur].parent;
-	}
+  if (loaded === false) {
+    load()
+  }
 
-	fn.conversion = path;
-	return fn;
+  var ev = 'exit'
+  if (opts && opts.alwaysLast) {
+    ev = 'afterexit'
+  }
+
+  var remove = function () {
+    emitter.removeListener(ev, cb)
+    if (emitter.listeners('exit').length === 0 &&
+        emitter.listeners('afterexit').length === 0) {
+      unload()
+    }
+  }
+  emitter.on(ev, cb)
+
+  return remove
 }
 
-module.exports = function (fromModel) {
-	var graph = deriveBFS(fromModel);
-	var conversion = {};
+module.exports.unload = unload
+function unload () {
+  if (!loaded) {
+    return
+  }
+  loaded = false
 
-	var models = Object.keys(graph);
-	for (var len = models.length, i = 0; i < len; i++) {
-		var toModel = models[i];
-		var node = graph[toModel];
+  signals.forEach(function (sig) {
+    try {
+      process.removeListener(sig, sigListeners[sig])
+    } catch (er) {}
+  })
+  process.emit = originalProcessEmit
+  process.reallyExit = originalProcessReallyExit
+  emitter.count -= 1
+}
 
-		if (node.parent === null) {
-			// no possible conversion, or this node is the source model.
-			continue;
-		}
+function emit (event, code, signal) {
+  if (emitter.emitted[event]) {
+    return
+  }
+  emitter.emitted[event] = true
+  emitter.emit(event, code, signal)
+}
 
-		conversion[toModel] = wrapConversion(toModel, graph);
-	}
+// { <signal>: <listener fn>, ... }
+var sigListeners = {}
+signals.forEach(function (sig) {
+  sigListeners[sig] = function listener () {
+    // If there are no other listeners, an exit is coming!
+    // Simplest way: remove us and then re-send the signal.
+    // We know that this will kill the process, so we can
+    // safely emit now.
+    var listeners = process.listeners(sig)
+    if (listeners.length === emitter.count) {
+      unload()
+      emit('exit', null, sig)
+      /* istanbul ignore next */
+      emit('afterexit', null, sig)
+      /* istanbul ignore next */
+      process.kill(process.pid, sig)
+    }
+  }
+})
 
-	return conversion;
-};
+module.exports.signals = function () {
+  return signals
+}
 
+module.exports.load = load
+
+var loaded = false
+
+function load () {
+  if (loaded) {
+    return
+  }
+  loaded = true
+
+  // This is the number of onSignalExit's that are in play.
+  // It's important so that we can count the correct number of
+  // listeners on signals, and don't wait for the other one to
+  // handle it instead of us.
+  emitter.count += 1
+
+  signals = signals.filter(function (sig) {
+    try {
+      process.on(sig, sigListeners[sig])
+      return true
+    } catch (er) {
+      return false
+    }
+  })
+
+  process.emit = processEmit
+  process.reallyExit = processReallyExit
+}
+
+var originalProcessReallyExit = process.reallyExit
+function processReallyExit (code) {
+  process.exitCode = code || 0
+  emit('exit', process.exitCode, null)
+  /* istanbul ignore next */
+  emit('afterexit', process.exitCode, null)
+  /* istanbul ignore next */
+  originalProcessReallyExit.call(process, process.exitCode)
+}
+
+var originalProcessEmit = process.emit
+function processEmit (ev, arg) {
+  if (ev === 'exit') {
+    if (arg !== undefined) {
+      process.exitCode = arg
+    }
+    var ret = originalProcessEmit.apply(this, arguments)
+    emit('exit', process.exitCode, null)
+    /* istanbul ignore next */
+    emit('afterexit', process.exitCode, null)
+    return ret
+  } else {
+    return originalProcessEmit.apply(this, arguments)
+  }
+}
 
 
 /***/ }),
@@ -34724,14 +37660,56 @@ module.exports = hashSet;
 
 /***/ }),
 /* 262 */
-/***/ (function(module, __unusedexports, __webpack_require__) {
+/***/ (function(__unusedmodule, exports, __webpack_require__) {
 
-module.exports = {
-    highlight: __webpack_require__(994)
-  , highlightFile: __webpack_require__(163)
-  , highlightFileSync: __webpack_require__(122)
-};
+"use strict";
 
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.Context = void 0;
+const fs_1 = __webpack_require__(747);
+const os_1 = __webpack_require__(87);
+class Context {
+    /**
+     * Hydrate the context from the environment
+     */
+    constructor() {
+        this.payload = {};
+        if (process.env.GITHUB_EVENT_PATH) {
+            if (fs_1.existsSync(process.env.GITHUB_EVENT_PATH)) {
+                this.payload = JSON.parse(fs_1.readFileSync(process.env.GITHUB_EVENT_PATH, { encoding: 'utf8' }));
+            }
+            else {
+                const path = process.env.GITHUB_EVENT_PATH;
+                process.stdout.write(`GITHUB_EVENT_PATH ${path} does not exist${os_1.EOL}`);
+            }
+        }
+        this.eventName = process.env.GITHUB_EVENT_NAME;
+        this.sha = process.env.GITHUB_SHA;
+        this.ref = process.env.GITHUB_REF;
+        this.workflow = process.env.GITHUB_WORKFLOW;
+        this.action = process.env.GITHUB_ACTION;
+        this.actor = process.env.GITHUB_ACTOR;
+    }
+    get issue() {
+        const payload = this.payload;
+        return Object.assign(Object.assign({}, this.repo), { number: (payload.issue || payload.pull_request || payload).number });
+    }
+    get repo() {
+        if (process.env.GITHUB_REPOSITORY) {
+            const [owner, repo] = process.env.GITHUB_REPOSITORY.split('/');
+            return { owner, repo };
+        }
+        if (this.payload.repository) {
+            return {
+                owner: this.payload.repository.owner.login,
+                repo: this.payload.repository.name
+            };
+        }
+        throw new Error("context.repo requires a GITHUB_REPOSITORY environment variable like 'owner/repo'");
+    }
+}
+exports.Context = Context;
+//# sourceMappingURL=context.js.map
 
 /***/ }),
 /* 263 */,
@@ -34954,1043 +37932,17 @@ module.exports = simpleSchema
 /* 272 */
 /***/ (function(module, __unusedexports, __webpack_require__) {
 
-"use strict";
+var buildDistanceInWordsLocale = __webpack_require__(175)
+var buildFormatLocale = __webpack_require__(212)
 
-module.exports = function(Promise, Context,
-    enableAsyncHooks, disableAsyncHooks) {
-var async = Promise._async;
-var Warning = __webpack_require__(607).Warning;
-var util = __webpack_require__(248);
-var es5 = __webpack_require__(883);
-var canAttachTrace = util.canAttachTrace;
-var unhandledRejectionHandled;
-var possiblyUnhandledRejection;
-var bluebirdFramePattern =
-    /[\\\/]bluebird[\\\/]js[\\\/](release|debug|instrumented)/;
-var nodeFramePattern = /\((?:timers\.js):\d+:\d+\)/;
-var parseLinePattern = /[\/<\(](.+?):(\d+):(\d+)\)?\s*$/;
-var stackFramePattern = null;
-var formatStack = null;
-var indentStackFrames = false;
-var printWarning;
-var debugging = !!(util.env("BLUEBIRD_DEBUG") != 0 &&
-                        ( false ||
-                         util.env("BLUEBIRD_DEBUG") ||
-                         util.env("NODE_ENV") === "development"));
-
-var warnings = !!(util.env("BLUEBIRD_WARNINGS") != 0 &&
-    (debugging || util.env("BLUEBIRD_WARNINGS")));
-
-var longStackTraces = !!(util.env("BLUEBIRD_LONG_STACK_TRACES") != 0 &&
-    (debugging || util.env("BLUEBIRD_LONG_STACK_TRACES")));
-
-var wForgottenReturn = util.env("BLUEBIRD_W_FORGOTTEN_RETURN") != 0 &&
-    (warnings || !!util.env("BLUEBIRD_W_FORGOTTEN_RETURN"));
-
-var deferUnhandledRejectionCheck;
-(function() {
-    var promises = [];
-
-    function unhandledRejectionCheck() {
-        for (var i = 0; i < promises.length; ++i) {
-            promises[i]._notifyUnhandledRejection();
-        }
-        unhandledRejectionClear();
-    }
-
-    function unhandledRejectionClear() {
-        promises.length = 0;
-    }
-
-    if (typeof document === "object" && document.createElement) {
-        deferUnhandledRejectionCheck = (function() {
-            var iframeSetTimeout;
-
-            function checkIframe() {
-                if (document.body) {
-                    var iframe = document.createElement("iframe");
-                    document.body.appendChild(iframe);
-                    if (iframe.contentWindow &&
-                        iframe.contentWindow.setTimeout) {
-                        iframeSetTimeout = iframe.contentWindow.setTimeout;
-                    }
-                    document.body.removeChild(iframe);
-                }
-            }
-            checkIframe();
-            return function(promise) {
-                promises.push(promise);
-                if (iframeSetTimeout) {
-                    iframeSetTimeout(unhandledRejectionCheck, 1);
-                } else {
-                    checkIframe();
-                }
-            };
-        })();
-    } else {
-        deferUnhandledRejectionCheck = function(promise) {
-            promises.push(promise);
-            setTimeout(unhandledRejectionCheck, 1);
-        };
-    }
-
-    es5.defineProperty(Promise, "_unhandledRejectionCheck", {
-        value: unhandledRejectionCheck
-    });
-    es5.defineProperty(Promise, "_unhandledRejectionClear", {
-        value: unhandledRejectionClear
-    });
-})();
-
-Promise.prototype.suppressUnhandledRejections = function() {
-    var target = this._target();
-    target._bitField = ((target._bitField & (~1048576)) |
-                      524288);
-};
-
-Promise.prototype._ensurePossibleRejectionHandled = function () {
-    if ((this._bitField & 524288) !== 0) return;
-    this._setRejectionIsUnhandled();
-    deferUnhandledRejectionCheck(this);
-};
-
-Promise.prototype._notifyUnhandledRejectionIsHandled = function () {
-    fireRejectionEvent("rejectionHandled",
-                                  unhandledRejectionHandled, undefined, this);
-};
-
-Promise.prototype._setReturnedNonUndefined = function() {
-    this._bitField = this._bitField | 268435456;
-};
-
-Promise.prototype._returnedNonUndefined = function() {
-    return (this._bitField & 268435456) !== 0;
-};
-
-Promise.prototype._notifyUnhandledRejection = function () {
-    if (this._isRejectionUnhandled()) {
-        var reason = this._settledValue();
-        this._setUnhandledRejectionIsNotified();
-        fireRejectionEvent("unhandledRejection",
-                                      possiblyUnhandledRejection, reason, this);
-    }
-};
-
-Promise.prototype._setUnhandledRejectionIsNotified = function () {
-    this._bitField = this._bitField | 262144;
-};
-
-Promise.prototype._unsetUnhandledRejectionIsNotified = function () {
-    this._bitField = this._bitField & (~262144);
-};
-
-Promise.prototype._isUnhandledRejectionNotified = function () {
-    return (this._bitField & 262144) > 0;
-};
-
-Promise.prototype._setRejectionIsUnhandled = function () {
-    this._bitField = this._bitField | 1048576;
-};
-
-Promise.prototype._unsetRejectionIsUnhandled = function () {
-    this._bitField = this._bitField & (~1048576);
-    if (this._isUnhandledRejectionNotified()) {
-        this._unsetUnhandledRejectionIsNotified();
-        this._notifyUnhandledRejectionIsHandled();
-    }
-};
-
-Promise.prototype._isRejectionUnhandled = function () {
-    return (this._bitField & 1048576) > 0;
-};
-
-Promise.prototype._warn = function(message, shouldUseOwnTrace, promise) {
-    return warn(message, shouldUseOwnTrace, promise || this);
-};
-
-Promise.onPossiblyUnhandledRejection = function (fn) {
-    var context = Promise._getContext();
-    possiblyUnhandledRejection = util.contextBind(context, fn);
-};
-
-Promise.onUnhandledRejectionHandled = function (fn) {
-    var context = Promise._getContext();
-    unhandledRejectionHandled = util.contextBind(context, fn);
-};
-
-var disableLongStackTraces = function() {};
-Promise.longStackTraces = function () {
-    if (async.haveItemsQueued() && !config.longStackTraces) {
-        throw new Error("cannot enable long stack traces after promises have been created\u000a\u000a    See http://goo.gl/MqrFmX\u000a");
-    }
-    if (!config.longStackTraces && longStackTracesIsSupported()) {
-        var Promise_captureStackTrace = Promise.prototype._captureStackTrace;
-        var Promise_attachExtraTrace = Promise.prototype._attachExtraTrace;
-        var Promise_dereferenceTrace = Promise.prototype._dereferenceTrace;
-        config.longStackTraces = true;
-        disableLongStackTraces = function() {
-            if (async.haveItemsQueued() && !config.longStackTraces) {
-                throw new Error("cannot enable long stack traces after promises have been created\u000a\u000a    See http://goo.gl/MqrFmX\u000a");
-            }
-            Promise.prototype._captureStackTrace = Promise_captureStackTrace;
-            Promise.prototype._attachExtraTrace = Promise_attachExtraTrace;
-            Promise.prototype._dereferenceTrace = Promise_dereferenceTrace;
-            Context.deactivateLongStackTraces();
-            config.longStackTraces = false;
-        };
-        Promise.prototype._captureStackTrace = longStackTracesCaptureStackTrace;
-        Promise.prototype._attachExtraTrace = longStackTracesAttachExtraTrace;
-        Promise.prototype._dereferenceTrace = longStackTracesDereferenceTrace;
-        Context.activateLongStackTraces();
-    }
-};
-
-Promise.hasLongStackTraces = function () {
-    return config.longStackTraces && longStackTracesIsSupported();
-};
-
-
-var legacyHandlers = {
-    unhandledrejection: {
-        before: function() {
-            var ret = util.global.onunhandledrejection;
-            util.global.onunhandledrejection = null;
-            return ret;
-        },
-        after: function(fn) {
-            util.global.onunhandledrejection = fn;
-        }
-    },
-    rejectionhandled: {
-        before: function() {
-            var ret = util.global.onrejectionhandled;
-            util.global.onrejectionhandled = null;
-            return ret;
-        },
-        after: function(fn) {
-            util.global.onrejectionhandled = fn;
-        }
-    }
-};
-
-var fireDomEvent = (function() {
-    var dispatch = function(legacy, e) {
-        if (legacy) {
-            var fn;
-            try {
-                fn = legacy.before();
-                return !util.global.dispatchEvent(e);
-            } finally {
-                legacy.after(fn);
-            }
-        } else {
-            return !util.global.dispatchEvent(e);
-        }
-    };
-    try {
-        if (typeof CustomEvent === "function") {
-            var event = new CustomEvent("CustomEvent");
-            util.global.dispatchEvent(event);
-            return function(name, event) {
-                name = name.toLowerCase();
-                var eventData = {
-                    detail: event,
-                    cancelable: true
-                };
-                var domEvent = new CustomEvent(name, eventData);
-                es5.defineProperty(
-                    domEvent, "promise", {value: event.promise});
-                es5.defineProperty(
-                    domEvent, "reason", {value: event.reason});
-
-                return dispatch(legacyHandlers[name], domEvent);
-            };
-        } else if (typeof Event === "function") {
-            var event = new Event("CustomEvent");
-            util.global.dispatchEvent(event);
-            return function(name, event) {
-                name = name.toLowerCase();
-                var domEvent = new Event(name, {
-                    cancelable: true
-                });
-                domEvent.detail = event;
-                es5.defineProperty(domEvent, "promise", {value: event.promise});
-                es5.defineProperty(domEvent, "reason", {value: event.reason});
-                return dispatch(legacyHandlers[name], domEvent);
-            };
-        } else {
-            var event = document.createEvent("CustomEvent");
-            event.initCustomEvent("testingtheevent", false, true, {});
-            util.global.dispatchEvent(event);
-            return function(name, event) {
-                name = name.toLowerCase();
-                var domEvent = document.createEvent("CustomEvent");
-                domEvent.initCustomEvent(name, false, true,
-                    event);
-                return dispatch(legacyHandlers[name], domEvent);
-            };
-        }
-    } catch (e) {}
-    return function() {
-        return false;
-    };
-})();
-
-var fireGlobalEvent = (function() {
-    if (util.isNode) {
-        return function() {
-            return process.emit.apply(process, arguments);
-        };
-    } else {
-        if (!util.global) {
-            return function() {
-                return false;
-            };
-        }
-        return function(name) {
-            var methodName = "on" + name.toLowerCase();
-            var method = util.global[methodName];
-            if (!method) return false;
-            method.apply(util.global, [].slice.call(arguments, 1));
-            return true;
-        };
-    }
-})();
-
-function generatePromiseLifecycleEventObject(name, promise) {
-    return {promise: promise};
+/**
+ * @category Locales
+ * @summary English locale.
+ */
+module.exports = {
+  distanceInWords: buildDistanceInWordsLocale(),
+  format: buildFormatLocale()
 }
-
-var eventToObjectGenerator = {
-    promiseCreated: generatePromiseLifecycleEventObject,
-    promiseFulfilled: generatePromiseLifecycleEventObject,
-    promiseRejected: generatePromiseLifecycleEventObject,
-    promiseResolved: generatePromiseLifecycleEventObject,
-    promiseCancelled: generatePromiseLifecycleEventObject,
-    promiseChained: function(name, promise, child) {
-        return {promise: promise, child: child};
-    },
-    warning: function(name, warning) {
-        return {warning: warning};
-    },
-    unhandledRejection: function (name, reason, promise) {
-        return {reason: reason, promise: promise};
-    },
-    rejectionHandled: generatePromiseLifecycleEventObject
-};
-
-var activeFireEvent = function (name) {
-    var globalEventFired = false;
-    try {
-        globalEventFired = fireGlobalEvent.apply(null, arguments);
-    } catch (e) {
-        async.throwLater(e);
-        globalEventFired = true;
-    }
-
-    var domEventFired = false;
-    try {
-        domEventFired = fireDomEvent(name,
-                    eventToObjectGenerator[name].apply(null, arguments));
-    } catch (e) {
-        async.throwLater(e);
-        domEventFired = true;
-    }
-
-    return domEventFired || globalEventFired;
-};
-
-Promise.config = function(opts) {
-    opts = Object(opts);
-    if ("longStackTraces" in opts) {
-        if (opts.longStackTraces) {
-            Promise.longStackTraces();
-        } else if (!opts.longStackTraces && Promise.hasLongStackTraces()) {
-            disableLongStackTraces();
-        }
-    }
-    if ("warnings" in opts) {
-        var warningsOption = opts.warnings;
-        config.warnings = !!warningsOption;
-        wForgottenReturn = config.warnings;
-
-        if (util.isObject(warningsOption)) {
-            if ("wForgottenReturn" in warningsOption) {
-                wForgottenReturn = !!warningsOption.wForgottenReturn;
-            }
-        }
-    }
-    if ("cancellation" in opts && opts.cancellation && !config.cancellation) {
-        if (async.haveItemsQueued()) {
-            throw new Error(
-                "cannot enable cancellation after promises are in use");
-        }
-        Promise.prototype._clearCancellationData =
-            cancellationClearCancellationData;
-        Promise.prototype._propagateFrom = cancellationPropagateFrom;
-        Promise.prototype._onCancel = cancellationOnCancel;
-        Promise.prototype._setOnCancel = cancellationSetOnCancel;
-        Promise.prototype._attachCancellationCallback =
-            cancellationAttachCancellationCallback;
-        Promise.prototype._execute = cancellationExecute;
-        propagateFromFunction = cancellationPropagateFrom;
-        config.cancellation = true;
-    }
-    if ("monitoring" in opts) {
-        if (opts.monitoring && !config.monitoring) {
-            config.monitoring = true;
-            Promise.prototype._fireEvent = activeFireEvent;
-        } else if (!opts.monitoring && config.monitoring) {
-            config.monitoring = false;
-            Promise.prototype._fireEvent = defaultFireEvent;
-        }
-    }
-    if ("asyncHooks" in opts && util.nodeSupportsAsyncResource) {
-        var prev = config.asyncHooks;
-        var cur = !!opts.asyncHooks;
-        if (prev !== cur) {
-            config.asyncHooks = cur;
-            if (cur) {
-                enableAsyncHooks();
-            } else {
-                disableAsyncHooks();
-            }
-        }
-    }
-    return Promise;
-};
-
-function defaultFireEvent() { return false; }
-
-Promise.prototype._fireEvent = defaultFireEvent;
-Promise.prototype._execute = function(executor, resolve, reject) {
-    try {
-        executor(resolve, reject);
-    } catch (e) {
-        return e;
-    }
-};
-Promise.prototype._onCancel = function () {};
-Promise.prototype._setOnCancel = function (handler) { ; };
-Promise.prototype._attachCancellationCallback = function(onCancel) {
-    ;
-};
-Promise.prototype._captureStackTrace = function () {};
-Promise.prototype._attachExtraTrace = function () {};
-Promise.prototype._dereferenceTrace = function () {};
-Promise.prototype._clearCancellationData = function() {};
-Promise.prototype._propagateFrom = function (parent, flags) {
-    ;
-    ;
-};
-
-function cancellationExecute(executor, resolve, reject) {
-    var promise = this;
-    try {
-        executor(resolve, reject, function(onCancel) {
-            if (typeof onCancel !== "function") {
-                throw new TypeError("onCancel must be a function, got: " +
-                                    util.toString(onCancel));
-            }
-            promise._attachCancellationCallback(onCancel);
-        });
-    } catch (e) {
-        return e;
-    }
-}
-
-function cancellationAttachCancellationCallback(onCancel) {
-    if (!this._isCancellable()) return this;
-
-    var previousOnCancel = this._onCancel();
-    if (previousOnCancel !== undefined) {
-        if (util.isArray(previousOnCancel)) {
-            previousOnCancel.push(onCancel);
-        } else {
-            this._setOnCancel([previousOnCancel, onCancel]);
-        }
-    } else {
-        this._setOnCancel(onCancel);
-    }
-}
-
-function cancellationOnCancel() {
-    return this._onCancelField;
-}
-
-function cancellationSetOnCancel(onCancel) {
-    this._onCancelField = onCancel;
-}
-
-function cancellationClearCancellationData() {
-    this._cancellationParent = undefined;
-    this._onCancelField = undefined;
-}
-
-function cancellationPropagateFrom(parent, flags) {
-    if ((flags & 1) !== 0) {
-        this._cancellationParent = parent;
-        var branchesRemainingToCancel = parent._branchesRemainingToCancel;
-        if (branchesRemainingToCancel === undefined) {
-            branchesRemainingToCancel = 0;
-        }
-        parent._branchesRemainingToCancel = branchesRemainingToCancel + 1;
-    }
-    if ((flags & 2) !== 0 && parent._isBound()) {
-        this._setBoundTo(parent._boundTo);
-    }
-}
-
-function bindingPropagateFrom(parent, flags) {
-    if ((flags & 2) !== 0 && parent._isBound()) {
-        this._setBoundTo(parent._boundTo);
-    }
-}
-var propagateFromFunction = bindingPropagateFrom;
-
-function boundValueFunction() {
-    var ret = this._boundTo;
-    if (ret !== undefined) {
-        if (ret instanceof Promise) {
-            if (ret.isFulfilled()) {
-                return ret.value();
-            } else {
-                return undefined;
-            }
-        }
-    }
-    return ret;
-}
-
-function longStackTracesCaptureStackTrace() {
-    this._trace = new CapturedTrace(this._peekContext());
-}
-
-function longStackTracesAttachExtraTrace(error, ignoreSelf) {
-    if (canAttachTrace(error)) {
-        var trace = this._trace;
-        if (trace !== undefined) {
-            if (ignoreSelf) trace = trace._parent;
-        }
-        if (trace !== undefined) {
-            trace.attachExtraTrace(error);
-        } else if (!error.__stackCleaned__) {
-            var parsed = parseStackAndMessage(error);
-            util.notEnumerableProp(error, "stack",
-                parsed.message + "\n" + parsed.stack.join("\n"));
-            util.notEnumerableProp(error, "__stackCleaned__", true);
-        }
-    }
-}
-
-function longStackTracesDereferenceTrace() {
-    this._trace = undefined;
-}
-
-function checkForgottenReturns(returnValue, promiseCreated, name, promise,
-                               parent) {
-    if (returnValue === undefined && promiseCreated !== null &&
-        wForgottenReturn) {
-        if (parent !== undefined && parent._returnedNonUndefined()) return;
-        if ((promise._bitField & 65535) === 0) return;
-
-        if (name) name = name + " ";
-        var handlerLine = "";
-        var creatorLine = "";
-        if (promiseCreated._trace) {
-            var traceLines = promiseCreated._trace.stack.split("\n");
-            var stack = cleanStack(traceLines);
-            for (var i = stack.length - 1; i >= 0; --i) {
-                var line = stack[i];
-                if (!nodeFramePattern.test(line)) {
-                    var lineMatches = line.match(parseLinePattern);
-                    if (lineMatches) {
-                        handlerLine  = "at " + lineMatches[1] +
-                            ":" + lineMatches[2] + ":" + lineMatches[3] + " ";
-                    }
-                    break;
-                }
-            }
-
-            if (stack.length > 0) {
-                var firstUserLine = stack[0];
-                for (var i = 0; i < traceLines.length; ++i) {
-
-                    if (traceLines[i] === firstUserLine) {
-                        if (i > 0) {
-                            creatorLine = "\n" + traceLines[i - 1];
-                        }
-                        break;
-                    }
-                }
-
-            }
-        }
-        var msg = "a promise was created in a " + name +
-            "handler " + handlerLine + "but was not returned from it, " +
-            "see http://goo.gl/rRqMUw" +
-            creatorLine;
-        promise._warn(msg, true, promiseCreated);
-    }
-}
-
-function deprecated(name, replacement) {
-    var message = name +
-        " is deprecated and will be removed in a future version.";
-    if (replacement) message += " Use " + replacement + " instead.";
-    return warn(message);
-}
-
-function warn(message, shouldUseOwnTrace, promise) {
-    if (!config.warnings) return;
-    var warning = new Warning(message);
-    var ctx;
-    if (shouldUseOwnTrace) {
-        promise._attachExtraTrace(warning);
-    } else if (config.longStackTraces && (ctx = Promise._peekContext())) {
-        ctx.attachExtraTrace(warning);
-    } else {
-        var parsed = parseStackAndMessage(warning);
-        warning.stack = parsed.message + "\n" + parsed.stack.join("\n");
-    }
-
-    if (!activeFireEvent("warning", warning)) {
-        formatAndLogError(warning, "", true);
-    }
-}
-
-function reconstructStack(message, stacks) {
-    for (var i = 0; i < stacks.length - 1; ++i) {
-        stacks[i].push("From previous event:");
-        stacks[i] = stacks[i].join("\n");
-    }
-    if (i < stacks.length) {
-        stacks[i] = stacks[i].join("\n");
-    }
-    return message + "\n" + stacks.join("\n");
-}
-
-function removeDuplicateOrEmptyJumps(stacks) {
-    for (var i = 0; i < stacks.length; ++i) {
-        if (stacks[i].length === 0 ||
-            ((i + 1 < stacks.length) && stacks[i][0] === stacks[i+1][0])) {
-            stacks.splice(i, 1);
-            i--;
-        }
-    }
-}
-
-function removeCommonRoots(stacks) {
-    var current = stacks[0];
-    for (var i = 1; i < stacks.length; ++i) {
-        var prev = stacks[i];
-        var currentLastIndex = current.length - 1;
-        var currentLastLine = current[currentLastIndex];
-        var commonRootMeetPoint = -1;
-
-        for (var j = prev.length - 1; j >= 0; --j) {
-            if (prev[j] === currentLastLine) {
-                commonRootMeetPoint = j;
-                break;
-            }
-        }
-
-        for (var j = commonRootMeetPoint; j >= 0; --j) {
-            var line = prev[j];
-            if (current[currentLastIndex] === line) {
-                current.pop();
-                currentLastIndex--;
-            } else {
-                break;
-            }
-        }
-        current = prev;
-    }
-}
-
-function cleanStack(stack) {
-    var ret = [];
-    for (var i = 0; i < stack.length; ++i) {
-        var line = stack[i];
-        var isTraceLine = "    (No stack trace)" === line ||
-            stackFramePattern.test(line);
-        var isInternalFrame = isTraceLine && shouldIgnore(line);
-        if (isTraceLine && !isInternalFrame) {
-            if (indentStackFrames && line.charAt(0) !== " ") {
-                line = "    " + line;
-            }
-            ret.push(line);
-        }
-    }
-    return ret;
-}
-
-function stackFramesAsArray(error) {
-    var stack = error.stack.replace(/\s+$/g, "").split("\n");
-    for (var i = 0; i < stack.length; ++i) {
-        var line = stack[i];
-        if ("    (No stack trace)" === line || stackFramePattern.test(line)) {
-            break;
-        }
-    }
-    if (i > 0 && error.name != "SyntaxError") {
-        stack = stack.slice(i);
-    }
-    return stack;
-}
-
-function parseStackAndMessage(error) {
-    var stack = error.stack;
-    var message = error.toString();
-    stack = typeof stack === "string" && stack.length > 0
-                ? stackFramesAsArray(error) : ["    (No stack trace)"];
-    return {
-        message: message,
-        stack: error.name == "SyntaxError" ? stack : cleanStack(stack)
-    };
-}
-
-function formatAndLogError(error, title, isSoft) {
-    if (typeof console !== "undefined") {
-        var message;
-        if (util.isObject(error)) {
-            var stack = error.stack;
-            message = title + formatStack(stack, error);
-        } else {
-            message = title + String(error);
-        }
-        if (typeof printWarning === "function") {
-            printWarning(message, isSoft);
-        } else if (typeof console.log === "function" ||
-            typeof console.log === "object") {
-            console.log(message);
-        }
-    }
-}
-
-function fireRejectionEvent(name, localHandler, reason, promise) {
-    var localEventFired = false;
-    try {
-        if (typeof localHandler === "function") {
-            localEventFired = true;
-            if (name === "rejectionHandled") {
-                localHandler(promise);
-            } else {
-                localHandler(reason, promise);
-            }
-        }
-    } catch (e) {
-        async.throwLater(e);
-    }
-
-    if (name === "unhandledRejection") {
-        if (!activeFireEvent(name, reason, promise) && !localEventFired) {
-            formatAndLogError(reason, "Unhandled rejection ");
-        }
-    } else {
-        activeFireEvent(name, promise);
-    }
-}
-
-function formatNonError(obj) {
-    var str;
-    if (typeof obj === "function") {
-        str = "[function " +
-            (obj.name || "anonymous") +
-            "]";
-    } else {
-        str = obj && typeof obj.toString === "function"
-            ? obj.toString() : util.toString(obj);
-        var ruselessToString = /\[object [a-zA-Z0-9$_]+\]/;
-        if (ruselessToString.test(str)) {
-            try {
-                var newStr = JSON.stringify(obj);
-                str = newStr;
-            }
-            catch(e) {
-
-            }
-        }
-        if (str.length === 0) {
-            str = "(empty array)";
-        }
-    }
-    return ("(<" + snip(str) + ">, no stack trace)");
-}
-
-function snip(str) {
-    var maxChars = 41;
-    if (str.length < maxChars) {
-        return str;
-    }
-    return str.substr(0, maxChars - 3) + "...";
-}
-
-function longStackTracesIsSupported() {
-    return typeof captureStackTrace === "function";
-}
-
-var shouldIgnore = function() { return false; };
-var parseLineInfoRegex = /[\/<\(]([^:\/]+):(\d+):(?:\d+)\)?\s*$/;
-function parseLineInfo(line) {
-    var matches = line.match(parseLineInfoRegex);
-    if (matches) {
-        return {
-            fileName: matches[1],
-            line: parseInt(matches[2], 10)
-        };
-    }
-}
-
-function setBounds(firstLineError, lastLineError) {
-    if (!longStackTracesIsSupported()) return;
-    var firstStackLines = (firstLineError.stack || "").split("\n");
-    var lastStackLines = (lastLineError.stack || "").split("\n");
-    var firstIndex = -1;
-    var lastIndex = -1;
-    var firstFileName;
-    var lastFileName;
-    for (var i = 0; i < firstStackLines.length; ++i) {
-        var result = parseLineInfo(firstStackLines[i]);
-        if (result) {
-            firstFileName = result.fileName;
-            firstIndex = result.line;
-            break;
-        }
-    }
-    for (var i = 0; i < lastStackLines.length; ++i) {
-        var result = parseLineInfo(lastStackLines[i]);
-        if (result) {
-            lastFileName = result.fileName;
-            lastIndex = result.line;
-            break;
-        }
-    }
-    if (firstIndex < 0 || lastIndex < 0 || !firstFileName || !lastFileName ||
-        firstFileName !== lastFileName || firstIndex >= lastIndex) {
-        return;
-    }
-
-    shouldIgnore = function(line) {
-        if (bluebirdFramePattern.test(line)) return true;
-        var info = parseLineInfo(line);
-        if (info) {
-            if (info.fileName === firstFileName &&
-                (firstIndex <= info.line && info.line <= lastIndex)) {
-                return true;
-            }
-        }
-        return false;
-    };
-}
-
-function CapturedTrace(parent) {
-    this._parent = parent;
-    this._promisesCreated = 0;
-    var length = this._length = 1 + (parent === undefined ? 0 : parent._length);
-    captureStackTrace(this, CapturedTrace);
-    if (length > 32) this.uncycle();
-}
-util.inherits(CapturedTrace, Error);
-Context.CapturedTrace = CapturedTrace;
-
-CapturedTrace.prototype.uncycle = function() {
-    var length = this._length;
-    if (length < 2) return;
-    var nodes = [];
-    var stackToIndex = {};
-
-    for (var i = 0, node = this; node !== undefined; ++i) {
-        nodes.push(node);
-        node = node._parent;
-    }
-    length = this._length = i;
-    for (var i = length - 1; i >= 0; --i) {
-        var stack = nodes[i].stack;
-        if (stackToIndex[stack] === undefined) {
-            stackToIndex[stack] = i;
-        }
-    }
-    for (var i = 0; i < length; ++i) {
-        var currentStack = nodes[i].stack;
-        var index = stackToIndex[currentStack];
-        if (index !== undefined && index !== i) {
-            if (index > 0) {
-                nodes[index - 1]._parent = undefined;
-                nodes[index - 1]._length = 1;
-            }
-            nodes[i]._parent = undefined;
-            nodes[i]._length = 1;
-            var cycleEdgeNode = i > 0 ? nodes[i - 1] : this;
-
-            if (index < length - 1) {
-                cycleEdgeNode._parent = nodes[index + 1];
-                cycleEdgeNode._parent.uncycle();
-                cycleEdgeNode._length =
-                    cycleEdgeNode._parent._length + 1;
-            } else {
-                cycleEdgeNode._parent = undefined;
-                cycleEdgeNode._length = 1;
-            }
-            var currentChildLength = cycleEdgeNode._length + 1;
-            for (var j = i - 2; j >= 0; --j) {
-                nodes[j]._length = currentChildLength;
-                currentChildLength++;
-            }
-            return;
-        }
-    }
-};
-
-CapturedTrace.prototype.attachExtraTrace = function(error) {
-    if (error.__stackCleaned__) return;
-    this.uncycle();
-    var parsed = parseStackAndMessage(error);
-    var message = parsed.message;
-    var stacks = [parsed.stack];
-
-    var trace = this;
-    while (trace !== undefined) {
-        stacks.push(cleanStack(trace.stack.split("\n")));
-        trace = trace._parent;
-    }
-    removeCommonRoots(stacks);
-    removeDuplicateOrEmptyJumps(stacks);
-    util.notEnumerableProp(error, "stack", reconstructStack(message, stacks));
-    util.notEnumerableProp(error, "__stackCleaned__", true);
-};
-
-var captureStackTrace = (function stackDetection() {
-    var v8stackFramePattern = /^\s*at\s*/;
-    var v8stackFormatter = function(stack, error) {
-        if (typeof stack === "string") return stack;
-
-        if (error.name !== undefined &&
-            error.message !== undefined) {
-            return error.toString();
-        }
-        return formatNonError(error);
-    };
-
-    if (typeof Error.stackTraceLimit === "number" &&
-        typeof Error.captureStackTrace === "function") {
-        Error.stackTraceLimit += 6;
-        stackFramePattern = v8stackFramePattern;
-        formatStack = v8stackFormatter;
-        var captureStackTrace = Error.captureStackTrace;
-
-        shouldIgnore = function(line) {
-            return bluebirdFramePattern.test(line);
-        };
-        return function(receiver, ignoreUntil) {
-            Error.stackTraceLimit += 6;
-            captureStackTrace(receiver, ignoreUntil);
-            Error.stackTraceLimit -= 6;
-        };
-    }
-    var err = new Error();
-
-    if (typeof err.stack === "string" &&
-        err.stack.split("\n")[0].indexOf("stackDetection@") >= 0) {
-        stackFramePattern = /@/;
-        formatStack = v8stackFormatter;
-        indentStackFrames = true;
-        return function captureStackTrace(o) {
-            o.stack = new Error().stack;
-        };
-    }
-
-    var hasStackAfterThrow;
-    try { throw new Error(); }
-    catch(e) {
-        hasStackAfterThrow = ("stack" in e);
-    }
-    if (!("stack" in err) && hasStackAfterThrow &&
-        typeof Error.stackTraceLimit === "number") {
-        stackFramePattern = v8stackFramePattern;
-        formatStack = v8stackFormatter;
-        return function captureStackTrace(o) {
-            Error.stackTraceLimit += 6;
-            try { throw new Error(); }
-            catch(e) { o.stack = e.stack; }
-            Error.stackTraceLimit -= 6;
-        };
-    }
-
-    formatStack = function(stack, error) {
-        if (typeof stack === "string") return stack;
-
-        if ((typeof error === "object" ||
-            typeof error === "function") &&
-            error.name !== undefined &&
-            error.message !== undefined) {
-            return error.toString();
-        }
-        return formatNonError(error);
-    };
-
-    return null;
-
-})([]);
-
-if (typeof console !== "undefined" && typeof console.warn !== "undefined") {
-    printWarning = function (message) {
-        console.warn(message);
-    };
-    if (util.isNode && process.stderr.isTTY) {
-        printWarning = function(message, isSoft) {
-            var color = isSoft ? "\u001b[33m" : "\u001b[31m";
-            console.warn(color + message + "\u001b[0m\n");
-        };
-    } else if (!util.isNode && typeof (new Error().stack) === "string") {
-        printWarning = function(message, isSoft) {
-            console.warn("%c" + message,
-                        isSoft ? "color: darkorange" : "color: red");
-        };
-    }
-}
-
-var config = {
-    warnings: warnings,
-    longStackTraces: false,
-    cancellation: false,
-    monitoring: false,
-    asyncHooks: false
-};
-
-if (longStackTraces) Promise.longStackTraces();
-
-return {
-    asyncHooks: function() {
-        return config.asyncHooks;
-    },
-    longStackTraces: function() {
-        return config.longStackTraces;
-    },
-    warnings: function() {
-        return config.warnings;
-    },
-    cancellation: function() {
-        return config.cancellation;
-    },
-    monitoring: function() {
-        return config.monitoring;
-    },
-    propagateFromFunction: function() {
-        return propagateFromFunction;
-    },
-    boundValueFunction: function() {
-        return boundValueFunction;
-    },
-    checkForgottenReturns: checkForgottenReturns,
-    setBounds: setBounds,
-    warn: warn,
-    deprecated: deprecated,
-    CapturedTrace: CapturedTrace,
-    fireDomEvent: fireDomEvent,
-    fireGlobalEvent: fireGlobalEvent
-};
-};
 
 
 /***/ }),
@@ -36003,7 +37955,7 @@ return {
 
 // Load modules
 
-const Hoek = __webpack_require__(11);
+const Hoek = __webpack_require__(970);
 const Any = __webpack_require__(227);
 const Cast = __webpack_require__(436);
 const Errors = __webpack_require__(420);
@@ -36018,7 +37970,7 @@ const internals = {
     array: __webpack_require__(451),
     boolean: __webpack_require__(21),
     binary: __webpack_require__(888),
-    date: __webpack_require__(794),
+    date: __webpack_require__(847),
     number: __webpack_require__(383),
     object: __webpack_require__(177),
     string: __webpack_require__(979)
@@ -36536,45 +38488,1491 @@ module.exports = function (fn, errMsg) {
 /***/ }),
 /* 279 */,
 /* 280 */
-/***/ (function(module, __unusedexports, __webpack_require__) {
+/***/ (function(module, exports) {
 
-var Symbol = __webpack_require__(498),
-    arrayMap = __webpack_require__(727),
-    isArray = __webpack_require__(143),
-    isSymbol = __webpack_require__(186);
+exports = module.exports = SemVer
 
-/** Used as references for various `Number` constants. */
-var INFINITY = 1 / 0;
-
-/** Used to convert symbols to primitives and strings. */
-var symbolProto = Symbol ? Symbol.prototype : undefined,
-    symbolToString = symbolProto ? symbolProto.toString : undefined;
-
-/**
- * The base implementation of `_.toString` which doesn't convert nullish
- * values to empty strings.
- *
- * @private
- * @param {*} value The value to process.
- * @returns {string} Returns the string.
- */
-function baseToString(value) {
-  // Exit early for strings to avoid a performance hit in some environments.
-  if (typeof value == 'string') {
-    return value;
+var debug
+/* istanbul ignore next */
+if (typeof process === 'object' &&
+    process.env &&
+    process.env.NODE_DEBUG &&
+    /\bsemver\b/i.test(process.env.NODE_DEBUG)) {
+  debug = function () {
+    var args = Array.prototype.slice.call(arguments, 0)
+    args.unshift('SEMVER')
+    console.log.apply(console, args)
   }
-  if (isArray(value)) {
-    // Recursively convert values (susceptible to call stack limits).
-    return arrayMap(value, baseToString) + '';
-  }
-  if (isSymbol(value)) {
-    return symbolToString ? symbolToString.call(value) : '';
-  }
-  var result = (value + '');
-  return (result == '0' && (1 / value) == -INFINITY) ? '-0' : result;
+} else {
+  debug = function () {}
 }
 
-module.exports = baseToString;
+// Note: this is the semver.org version of the spec that it implements
+// Not necessarily the package version of this code.
+exports.SEMVER_SPEC_VERSION = '2.0.0'
+
+var MAX_LENGTH = 256
+var MAX_SAFE_INTEGER = Number.MAX_SAFE_INTEGER ||
+  /* istanbul ignore next */ 9007199254740991
+
+// Max safe segment length for coercion.
+var MAX_SAFE_COMPONENT_LENGTH = 16
+
+// The actual regexps go on exports.re
+var re = exports.re = []
+var src = exports.src = []
+var R = 0
+
+// The following Regular Expressions can be used for tokenizing,
+// validating, and parsing SemVer version strings.
+
+// ## Numeric Identifier
+// A single `0`, or a non-zero digit followed by zero or more digits.
+
+var NUMERICIDENTIFIER = R++
+src[NUMERICIDENTIFIER] = '0|[1-9]\\d*'
+var NUMERICIDENTIFIERLOOSE = R++
+src[NUMERICIDENTIFIERLOOSE] = '[0-9]+'
+
+// ## Non-numeric Identifier
+// Zero or more digits, followed by a letter or hyphen, and then zero or
+// more letters, digits, or hyphens.
+
+var NONNUMERICIDENTIFIER = R++
+src[NONNUMERICIDENTIFIER] = '\\d*[a-zA-Z-][a-zA-Z0-9-]*'
+
+// ## Main Version
+// Three dot-separated numeric identifiers.
+
+var MAINVERSION = R++
+src[MAINVERSION] = '(' + src[NUMERICIDENTIFIER] + ')\\.' +
+                   '(' + src[NUMERICIDENTIFIER] + ')\\.' +
+                   '(' + src[NUMERICIDENTIFIER] + ')'
+
+var MAINVERSIONLOOSE = R++
+src[MAINVERSIONLOOSE] = '(' + src[NUMERICIDENTIFIERLOOSE] + ')\\.' +
+                        '(' + src[NUMERICIDENTIFIERLOOSE] + ')\\.' +
+                        '(' + src[NUMERICIDENTIFIERLOOSE] + ')'
+
+// ## Pre-release Version Identifier
+// A numeric identifier, or a non-numeric identifier.
+
+var PRERELEASEIDENTIFIER = R++
+src[PRERELEASEIDENTIFIER] = '(?:' + src[NUMERICIDENTIFIER] +
+                            '|' + src[NONNUMERICIDENTIFIER] + ')'
+
+var PRERELEASEIDENTIFIERLOOSE = R++
+src[PRERELEASEIDENTIFIERLOOSE] = '(?:' + src[NUMERICIDENTIFIERLOOSE] +
+                                 '|' + src[NONNUMERICIDENTIFIER] + ')'
+
+// ## Pre-release Version
+// Hyphen, followed by one or more dot-separated pre-release version
+// identifiers.
+
+var PRERELEASE = R++
+src[PRERELEASE] = '(?:-(' + src[PRERELEASEIDENTIFIER] +
+                  '(?:\\.' + src[PRERELEASEIDENTIFIER] + ')*))'
+
+var PRERELEASELOOSE = R++
+src[PRERELEASELOOSE] = '(?:-?(' + src[PRERELEASEIDENTIFIERLOOSE] +
+                       '(?:\\.' + src[PRERELEASEIDENTIFIERLOOSE] + ')*))'
+
+// ## Build Metadata Identifier
+// Any combination of digits, letters, or hyphens.
+
+var BUILDIDENTIFIER = R++
+src[BUILDIDENTIFIER] = '[0-9A-Za-z-]+'
+
+// ## Build Metadata
+// Plus sign, followed by one or more period-separated build metadata
+// identifiers.
+
+var BUILD = R++
+src[BUILD] = '(?:\\+(' + src[BUILDIDENTIFIER] +
+             '(?:\\.' + src[BUILDIDENTIFIER] + ')*))'
+
+// ## Full Version String
+// A main version, followed optionally by a pre-release version and
+// build metadata.
+
+// Note that the only major, minor, patch, and pre-release sections of
+// the version string are capturing groups.  The build metadata is not a
+// capturing group, because it should not ever be used in version
+// comparison.
+
+var FULL = R++
+var FULLPLAIN = 'v?' + src[MAINVERSION] +
+                src[PRERELEASE] + '?' +
+                src[BUILD] + '?'
+
+src[FULL] = '^' + FULLPLAIN + '$'
+
+// like full, but allows v1.2.3 and =1.2.3, which people do sometimes.
+// also, 1.0.0alpha1 (prerelease without the hyphen) which is pretty
+// common in the npm registry.
+var LOOSEPLAIN = '[v=\\s]*' + src[MAINVERSIONLOOSE] +
+                 src[PRERELEASELOOSE] + '?' +
+                 src[BUILD] + '?'
+
+var LOOSE = R++
+src[LOOSE] = '^' + LOOSEPLAIN + '$'
+
+var GTLT = R++
+src[GTLT] = '((?:<|>)?=?)'
+
+// Something like "2.*" or "1.2.x".
+// Note that "x.x" is a valid xRange identifer, meaning "any version"
+// Only the first item is strictly required.
+var XRANGEIDENTIFIERLOOSE = R++
+src[XRANGEIDENTIFIERLOOSE] = src[NUMERICIDENTIFIERLOOSE] + '|x|X|\\*'
+var XRANGEIDENTIFIER = R++
+src[XRANGEIDENTIFIER] = src[NUMERICIDENTIFIER] + '|x|X|\\*'
+
+var XRANGEPLAIN = R++
+src[XRANGEPLAIN] = '[v=\\s]*(' + src[XRANGEIDENTIFIER] + ')' +
+                   '(?:\\.(' + src[XRANGEIDENTIFIER] + ')' +
+                   '(?:\\.(' + src[XRANGEIDENTIFIER] + ')' +
+                   '(?:' + src[PRERELEASE] + ')?' +
+                   src[BUILD] + '?' +
+                   ')?)?'
+
+var XRANGEPLAINLOOSE = R++
+src[XRANGEPLAINLOOSE] = '[v=\\s]*(' + src[XRANGEIDENTIFIERLOOSE] + ')' +
+                        '(?:\\.(' + src[XRANGEIDENTIFIERLOOSE] + ')' +
+                        '(?:\\.(' + src[XRANGEIDENTIFIERLOOSE] + ')' +
+                        '(?:' + src[PRERELEASELOOSE] + ')?' +
+                        src[BUILD] + '?' +
+                        ')?)?'
+
+var XRANGE = R++
+src[XRANGE] = '^' + src[GTLT] + '\\s*' + src[XRANGEPLAIN] + '$'
+var XRANGELOOSE = R++
+src[XRANGELOOSE] = '^' + src[GTLT] + '\\s*' + src[XRANGEPLAINLOOSE] + '$'
+
+// Coercion.
+// Extract anything that could conceivably be a part of a valid semver
+var COERCE = R++
+src[COERCE] = '(?:^|[^\\d])' +
+              '(\\d{1,' + MAX_SAFE_COMPONENT_LENGTH + '})' +
+              '(?:\\.(\\d{1,' + MAX_SAFE_COMPONENT_LENGTH + '}))?' +
+              '(?:\\.(\\d{1,' + MAX_SAFE_COMPONENT_LENGTH + '}))?' +
+              '(?:$|[^\\d])'
+
+// Tilde ranges.
+// Meaning is "reasonably at or greater than"
+var LONETILDE = R++
+src[LONETILDE] = '(?:~>?)'
+
+var TILDETRIM = R++
+src[TILDETRIM] = '(\\s*)' + src[LONETILDE] + '\\s+'
+re[TILDETRIM] = new RegExp(src[TILDETRIM], 'g')
+var tildeTrimReplace = '$1~'
+
+var TILDE = R++
+src[TILDE] = '^' + src[LONETILDE] + src[XRANGEPLAIN] + '$'
+var TILDELOOSE = R++
+src[TILDELOOSE] = '^' + src[LONETILDE] + src[XRANGEPLAINLOOSE] + '$'
+
+// Caret ranges.
+// Meaning is "at least and backwards compatible with"
+var LONECARET = R++
+src[LONECARET] = '(?:\\^)'
+
+var CARETTRIM = R++
+src[CARETTRIM] = '(\\s*)' + src[LONECARET] + '\\s+'
+re[CARETTRIM] = new RegExp(src[CARETTRIM], 'g')
+var caretTrimReplace = '$1^'
+
+var CARET = R++
+src[CARET] = '^' + src[LONECARET] + src[XRANGEPLAIN] + '$'
+var CARETLOOSE = R++
+src[CARETLOOSE] = '^' + src[LONECARET] + src[XRANGEPLAINLOOSE] + '$'
+
+// A simple gt/lt/eq thing, or just "" to indicate "any version"
+var COMPARATORLOOSE = R++
+src[COMPARATORLOOSE] = '^' + src[GTLT] + '\\s*(' + LOOSEPLAIN + ')$|^$'
+var COMPARATOR = R++
+src[COMPARATOR] = '^' + src[GTLT] + '\\s*(' + FULLPLAIN + ')$|^$'
+
+// An expression to strip any whitespace between the gtlt and the thing
+// it modifies, so that `> 1.2.3` ==> `>1.2.3`
+var COMPARATORTRIM = R++
+src[COMPARATORTRIM] = '(\\s*)' + src[GTLT] +
+                      '\\s*(' + LOOSEPLAIN + '|' + src[XRANGEPLAIN] + ')'
+
+// this one has to use the /g flag
+re[COMPARATORTRIM] = new RegExp(src[COMPARATORTRIM], 'g')
+var comparatorTrimReplace = '$1$2$3'
+
+// Something like `1.2.3 - 1.2.4`
+// Note that these all use the loose form, because they'll be
+// checked against either the strict or loose comparator form
+// later.
+var HYPHENRANGE = R++
+src[HYPHENRANGE] = '^\\s*(' + src[XRANGEPLAIN] + ')' +
+                   '\\s+-\\s+' +
+                   '(' + src[XRANGEPLAIN] + ')' +
+                   '\\s*$'
+
+var HYPHENRANGELOOSE = R++
+src[HYPHENRANGELOOSE] = '^\\s*(' + src[XRANGEPLAINLOOSE] + ')' +
+                        '\\s+-\\s+' +
+                        '(' + src[XRANGEPLAINLOOSE] + ')' +
+                        '\\s*$'
+
+// Star ranges basically just allow anything at all.
+var STAR = R++
+src[STAR] = '(<|>)?=?\\s*\\*'
+
+// Compile to actual regexp objects.
+// All are flag-free, unless they were created above with a flag.
+for (var i = 0; i < R; i++) {
+  debug(i, src[i])
+  if (!re[i]) {
+    re[i] = new RegExp(src[i])
+  }
+}
+
+exports.parse = parse
+function parse (version, options) {
+  if (!options || typeof options !== 'object') {
+    options = {
+      loose: !!options,
+      includePrerelease: false
+    }
+  }
+
+  if (version instanceof SemVer) {
+    return version
+  }
+
+  if (typeof version !== 'string') {
+    return null
+  }
+
+  if (version.length > MAX_LENGTH) {
+    return null
+  }
+
+  var r = options.loose ? re[LOOSE] : re[FULL]
+  if (!r.test(version)) {
+    return null
+  }
+
+  try {
+    return new SemVer(version, options)
+  } catch (er) {
+    return null
+  }
+}
+
+exports.valid = valid
+function valid (version, options) {
+  var v = parse(version, options)
+  return v ? v.version : null
+}
+
+exports.clean = clean
+function clean (version, options) {
+  var s = parse(version.trim().replace(/^[=v]+/, ''), options)
+  return s ? s.version : null
+}
+
+exports.SemVer = SemVer
+
+function SemVer (version, options) {
+  if (!options || typeof options !== 'object') {
+    options = {
+      loose: !!options,
+      includePrerelease: false
+    }
+  }
+  if (version instanceof SemVer) {
+    if (version.loose === options.loose) {
+      return version
+    } else {
+      version = version.version
+    }
+  } else if (typeof version !== 'string') {
+    throw new TypeError('Invalid Version: ' + version)
+  }
+
+  if (version.length > MAX_LENGTH) {
+    throw new TypeError('version is longer than ' + MAX_LENGTH + ' characters')
+  }
+
+  if (!(this instanceof SemVer)) {
+    return new SemVer(version, options)
+  }
+
+  debug('SemVer', version, options)
+  this.options = options
+  this.loose = !!options.loose
+
+  var m = version.trim().match(options.loose ? re[LOOSE] : re[FULL])
+
+  if (!m) {
+    throw new TypeError('Invalid Version: ' + version)
+  }
+
+  this.raw = version
+
+  // these are actually numbers
+  this.major = +m[1]
+  this.minor = +m[2]
+  this.patch = +m[3]
+
+  if (this.major > MAX_SAFE_INTEGER || this.major < 0) {
+    throw new TypeError('Invalid major version')
+  }
+
+  if (this.minor > MAX_SAFE_INTEGER || this.minor < 0) {
+    throw new TypeError('Invalid minor version')
+  }
+
+  if (this.patch > MAX_SAFE_INTEGER || this.patch < 0) {
+    throw new TypeError('Invalid patch version')
+  }
+
+  // numberify any prerelease numeric ids
+  if (!m[4]) {
+    this.prerelease = []
+  } else {
+    this.prerelease = m[4].split('.').map(function (id) {
+      if (/^[0-9]+$/.test(id)) {
+        var num = +id
+        if (num >= 0 && num < MAX_SAFE_INTEGER) {
+          return num
+        }
+      }
+      return id
+    })
+  }
+
+  this.build = m[5] ? m[5].split('.') : []
+  this.format()
+}
+
+SemVer.prototype.format = function () {
+  this.version = this.major + '.' + this.minor + '.' + this.patch
+  if (this.prerelease.length) {
+    this.version += '-' + this.prerelease.join('.')
+  }
+  return this.version
+}
+
+SemVer.prototype.toString = function () {
+  return this.version
+}
+
+SemVer.prototype.compare = function (other) {
+  debug('SemVer.compare', this.version, this.options, other)
+  if (!(other instanceof SemVer)) {
+    other = new SemVer(other, this.options)
+  }
+
+  return this.compareMain(other) || this.comparePre(other)
+}
+
+SemVer.prototype.compareMain = function (other) {
+  if (!(other instanceof SemVer)) {
+    other = new SemVer(other, this.options)
+  }
+
+  return compareIdentifiers(this.major, other.major) ||
+         compareIdentifiers(this.minor, other.minor) ||
+         compareIdentifiers(this.patch, other.patch)
+}
+
+SemVer.prototype.comparePre = function (other) {
+  if (!(other instanceof SemVer)) {
+    other = new SemVer(other, this.options)
+  }
+
+  // NOT having a prerelease is > having one
+  if (this.prerelease.length && !other.prerelease.length) {
+    return -1
+  } else if (!this.prerelease.length && other.prerelease.length) {
+    return 1
+  } else if (!this.prerelease.length && !other.prerelease.length) {
+    return 0
+  }
+
+  var i = 0
+  do {
+    var a = this.prerelease[i]
+    var b = other.prerelease[i]
+    debug('prerelease compare', i, a, b)
+    if (a === undefined && b === undefined) {
+      return 0
+    } else if (b === undefined) {
+      return 1
+    } else if (a === undefined) {
+      return -1
+    } else if (a === b) {
+      continue
+    } else {
+      return compareIdentifiers(a, b)
+    }
+  } while (++i)
+}
+
+// preminor will bump the version up to the next minor release, and immediately
+// down to pre-release. premajor and prepatch work the same way.
+SemVer.prototype.inc = function (release, identifier) {
+  switch (release) {
+    case 'premajor':
+      this.prerelease.length = 0
+      this.patch = 0
+      this.minor = 0
+      this.major++
+      this.inc('pre', identifier)
+      break
+    case 'preminor':
+      this.prerelease.length = 0
+      this.patch = 0
+      this.minor++
+      this.inc('pre', identifier)
+      break
+    case 'prepatch':
+      // If this is already a prerelease, it will bump to the next version
+      // drop any prereleases that might already exist, since they are not
+      // relevant at this point.
+      this.prerelease.length = 0
+      this.inc('patch', identifier)
+      this.inc('pre', identifier)
+      break
+    // If the input is a non-prerelease version, this acts the same as
+    // prepatch.
+    case 'prerelease':
+      if (this.prerelease.length === 0) {
+        this.inc('patch', identifier)
+      }
+      this.inc('pre', identifier)
+      break
+
+    case 'major':
+      // If this is a pre-major version, bump up to the same major version.
+      // Otherwise increment major.
+      // 1.0.0-5 bumps to 1.0.0
+      // 1.1.0 bumps to 2.0.0
+      if (this.minor !== 0 ||
+          this.patch !== 0 ||
+          this.prerelease.length === 0) {
+        this.major++
+      }
+      this.minor = 0
+      this.patch = 0
+      this.prerelease = []
+      break
+    case 'minor':
+      // If this is a pre-minor version, bump up to the same minor version.
+      // Otherwise increment minor.
+      // 1.2.0-5 bumps to 1.2.0
+      // 1.2.1 bumps to 1.3.0
+      if (this.patch !== 0 || this.prerelease.length === 0) {
+        this.minor++
+      }
+      this.patch = 0
+      this.prerelease = []
+      break
+    case 'patch':
+      // If this is not a pre-release version, it will increment the patch.
+      // If it is a pre-release it will bump up to the same patch version.
+      // 1.2.0-5 patches to 1.2.0
+      // 1.2.0 patches to 1.2.1
+      if (this.prerelease.length === 0) {
+        this.patch++
+      }
+      this.prerelease = []
+      break
+    // This probably shouldn't be used publicly.
+    // 1.0.0 "pre" would become 1.0.0-0 which is the wrong direction.
+    case 'pre':
+      if (this.prerelease.length === 0) {
+        this.prerelease = [0]
+      } else {
+        var i = this.prerelease.length
+        while (--i >= 0) {
+          if (typeof this.prerelease[i] === 'number') {
+            this.prerelease[i]++
+            i = -2
+          }
+        }
+        if (i === -1) {
+          // didn't increment anything
+          this.prerelease.push(0)
+        }
+      }
+      if (identifier) {
+        // 1.2.0-beta.1 bumps to 1.2.0-beta.2,
+        // 1.2.0-beta.fooblz or 1.2.0-beta bumps to 1.2.0-beta.0
+        if (this.prerelease[0] === identifier) {
+          if (isNaN(this.prerelease[1])) {
+            this.prerelease = [identifier, 0]
+          }
+        } else {
+          this.prerelease = [identifier, 0]
+        }
+      }
+      break
+
+    default:
+      throw new Error('invalid increment argument: ' + release)
+  }
+  this.format()
+  this.raw = this.version
+  return this
+}
+
+exports.inc = inc
+function inc (version, release, loose, identifier) {
+  if (typeof (loose) === 'string') {
+    identifier = loose
+    loose = undefined
+  }
+
+  try {
+    return new SemVer(version, loose).inc(release, identifier).version
+  } catch (er) {
+    return null
+  }
+}
+
+exports.diff = diff
+function diff (version1, version2) {
+  if (eq(version1, version2)) {
+    return null
+  } else {
+    var v1 = parse(version1)
+    var v2 = parse(version2)
+    var prefix = ''
+    if (v1.prerelease.length || v2.prerelease.length) {
+      prefix = 'pre'
+      var defaultResult = 'prerelease'
+    }
+    for (var key in v1) {
+      if (key === 'major' || key === 'minor' || key === 'patch') {
+        if (v1[key] !== v2[key]) {
+          return prefix + key
+        }
+      }
+    }
+    return defaultResult // may be undefined
+  }
+}
+
+exports.compareIdentifiers = compareIdentifiers
+
+var numeric = /^[0-9]+$/
+function compareIdentifiers (a, b) {
+  var anum = numeric.test(a)
+  var bnum = numeric.test(b)
+
+  if (anum && bnum) {
+    a = +a
+    b = +b
+  }
+
+  return a === b ? 0
+    : (anum && !bnum) ? -1
+    : (bnum && !anum) ? 1
+    : a < b ? -1
+    : 1
+}
+
+exports.rcompareIdentifiers = rcompareIdentifiers
+function rcompareIdentifiers (a, b) {
+  return compareIdentifiers(b, a)
+}
+
+exports.major = major
+function major (a, loose) {
+  return new SemVer(a, loose).major
+}
+
+exports.minor = minor
+function minor (a, loose) {
+  return new SemVer(a, loose).minor
+}
+
+exports.patch = patch
+function patch (a, loose) {
+  return new SemVer(a, loose).patch
+}
+
+exports.compare = compare
+function compare (a, b, loose) {
+  return new SemVer(a, loose).compare(new SemVer(b, loose))
+}
+
+exports.compareLoose = compareLoose
+function compareLoose (a, b) {
+  return compare(a, b, true)
+}
+
+exports.rcompare = rcompare
+function rcompare (a, b, loose) {
+  return compare(b, a, loose)
+}
+
+exports.sort = sort
+function sort (list, loose) {
+  return list.sort(function (a, b) {
+    return exports.compare(a, b, loose)
+  })
+}
+
+exports.rsort = rsort
+function rsort (list, loose) {
+  return list.sort(function (a, b) {
+    return exports.rcompare(a, b, loose)
+  })
+}
+
+exports.gt = gt
+function gt (a, b, loose) {
+  return compare(a, b, loose) > 0
+}
+
+exports.lt = lt
+function lt (a, b, loose) {
+  return compare(a, b, loose) < 0
+}
+
+exports.eq = eq
+function eq (a, b, loose) {
+  return compare(a, b, loose) === 0
+}
+
+exports.neq = neq
+function neq (a, b, loose) {
+  return compare(a, b, loose) !== 0
+}
+
+exports.gte = gte
+function gte (a, b, loose) {
+  return compare(a, b, loose) >= 0
+}
+
+exports.lte = lte
+function lte (a, b, loose) {
+  return compare(a, b, loose) <= 0
+}
+
+exports.cmp = cmp
+function cmp (a, op, b, loose) {
+  switch (op) {
+    case '===':
+      if (typeof a === 'object')
+        a = a.version
+      if (typeof b === 'object')
+        b = b.version
+      return a === b
+
+    case '!==':
+      if (typeof a === 'object')
+        a = a.version
+      if (typeof b === 'object')
+        b = b.version
+      return a !== b
+
+    case '':
+    case '=':
+    case '==':
+      return eq(a, b, loose)
+
+    case '!=':
+      return neq(a, b, loose)
+
+    case '>':
+      return gt(a, b, loose)
+
+    case '>=':
+      return gte(a, b, loose)
+
+    case '<':
+      return lt(a, b, loose)
+
+    case '<=':
+      return lte(a, b, loose)
+
+    default:
+      throw new TypeError('Invalid operator: ' + op)
+  }
+}
+
+exports.Comparator = Comparator
+function Comparator (comp, options) {
+  if (!options || typeof options !== 'object') {
+    options = {
+      loose: !!options,
+      includePrerelease: false
+    }
+  }
+
+  if (comp instanceof Comparator) {
+    if (comp.loose === !!options.loose) {
+      return comp
+    } else {
+      comp = comp.value
+    }
+  }
+
+  if (!(this instanceof Comparator)) {
+    return new Comparator(comp, options)
+  }
+
+  debug('comparator', comp, options)
+  this.options = options
+  this.loose = !!options.loose
+  this.parse(comp)
+
+  if (this.semver === ANY) {
+    this.value = ''
+  } else {
+    this.value = this.operator + this.semver.version
+  }
+
+  debug('comp', this)
+}
+
+var ANY = {}
+Comparator.prototype.parse = function (comp) {
+  var r = this.options.loose ? re[COMPARATORLOOSE] : re[COMPARATOR]
+  var m = comp.match(r)
+
+  if (!m) {
+    throw new TypeError('Invalid comparator: ' + comp)
+  }
+
+  this.operator = m[1]
+  if (this.operator === '=') {
+    this.operator = ''
+  }
+
+  // if it literally is just '>' or '' then allow anything.
+  if (!m[2]) {
+    this.semver = ANY
+  } else {
+    this.semver = new SemVer(m[2], this.options.loose)
+  }
+}
+
+Comparator.prototype.toString = function () {
+  return this.value
+}
+
+Comparator.prototype.test = function (version) {
+  debug('Comparator.test', version, this.options.loose)
+
+  if (this.semver === ANY) {
+    return true
+  }
+
+  if (typeof version === 'string') {
+    version = new SemVer(version, this.options)
+  }
+
+  return cmp(version, this.operator, this.semver, this.options)
+}
+
+Comparator.prototype.intersects = function (comp, options) {
+  if (!(comp instanceof Comparator)) {
+    throw new TypeError('a Comparator is required')
+  }
+
+  if (!options || typeof options !== 'object') {
+    options = {
+      loose: !!options,
+      includePrerelease: false
+    }
+  }
+
+  var rangeTmp
+
+  if (this.operator === '') {
+    rangeTmp = new Range(comp.value, options)
+    return satisfies(this.value, rangeTmp, options)
+  } else if (comp.operator === '') {
+    rangeTmp = new Range(this.value, options)
+    return satisfies(comp.semver, rangeTmp, options)
+  }
+
+  var sameDirectionIncreasing =
+    (this.operator === '>=' || this.operator === '>') &&
+    (comp.operator === '>=' || comp.operator === '>')
+  var sameDirectionDecreasing =
+    (this.operator === '<=' || this.operator === '<') &&
+    (comp.operator === '<=' || comp.operator === '<')
+  var sameSemVer = this.semver.version === comp.semver.version
+  var differentDirectionsInclusive =
+    (this.operator === '>=' || this.operator === '<=') &&
+    (comp.operator === '>=' || comp.operator === '<=')
+  var oppositeDirectionsLessThan =
+    cmp(this.semver, '<', comp.semver, options) &&
+    ((this.operator === '>=' || this.operator === '>') &&
+    (comp.operator === '<=' || comp.operator === '<'))
+  var oppositeDirectionsGreaterThan =
+    cmp(this.semver, '>', comp.semver, options) &&
+    ((this.operator === '<=' || this.operator === '<') &&
+    (comp.operator === '>=' || comp.operator === '>'))
+
+  return sameDirectionIncreasing || sameDirectionDecreasing ||
+    (sameSemVer && differentDirectionsInclusive) ||
+    oppositeDirectionsLessThan || oppositeDirectionsGreaterThan
+}
+
+exports.Range = Range
+function Range (range, options) {
+  if (!options || typeof options !== 'object') {
+    options = {
+      loose: !!options,
+      includePrerelease: false
+    }
+  }
+
+  if (range instanceof Range) {
+    if (range.loose === !!options.loose &&
+        range.includePrerelease === !!options.includePrerelease) {
+      return range
+    } else {
+      return new Range(range.raw, options)
+    }
+  }
+
+  if (range instanceof Comparator) {
+    return new Range(range.value, options)
+  }
+
+  if (!(this instanceof Range)) {
+    return new Range(range, options)
+  }
+
+  this.options = options
+  this.loose = !!options.loose
+  this.includePrerelease = !!options.includePrerelease
+
+  // First, split based on boolean or ||
+  this.raw = range
+  this.set = range.split(/\s*\|\|\s*/).map(function (range) {
+    return this.parseRange(range.trim())
+  }, this).filter(function (c) {
+    // throw out any that are not relevant for whatever reason
+    return c.length
+  })
+
+  if (!this.set.length) {
+    throw new TypeError('Invalid SemVer Range: ' + range)
+  }
+
+  this.format()
+}
+
+Range.prototype.format = function () {
+  this.range = this.set.map(function (comps) {
+    return comps.join(' ').trim()
+  }).join('||').trim()
+  return this.range
+}
+
+Range.prototype.toString = function () {
+  return this.range
+}
+
+Range.prototype.parseRange = function (range) {
+  var loose = this.options.loose
+  range = range.trim()
+  // `1.2.3 - 1.2.4` => `>=1.2.3 <=1.2.4`
+  var hr = loose ? re[HYPHENRANGELOOSE] : re[HYPHENRANGE]
+  range = range.replace(hr, hyphenReplace)
+  debug('hyphen replace', range)
+  // `> 1.2.3 < 1.2.5` => `>1.2.3 <1.2.5`
+  range = range.replace(re[COMPARATORTRIM], comparatorTrimReplace)
+  debug('comparator trim', range, re[COMPARATORTRIM])
+
+  // `~ 1.2.3` => `~1.2.3`
+  range = range.replace(re[TILDETRIM], tildeTrimReplace)
+
+  // `^ 1.2.3` => `^1.2.3`
+  range = range.replace(re[CARETTRIM], caretTrimReplace)
+
+  // normalize spaces
+  range = range.split(/\s+/).join(' ')
+
+  // At this point, the range is completely trimmed and
+  // ready to be split into comparators.
+
+  var compRe = loose ? re[COMPARATORLOOSE] : re[COMPARATOR]
+  var set = range.split(' ').map(function (comp) {
+    return parseComparator(comp, this.options)
+  }, this).join(' ').split(/\s+/)
+  if (this.options.loose) {
+    // in loose mode, throw out any that are not valid comparators
+    set = set.filter(function (comp) {
+      return !!comp.match(compRe)
+    })
+  }
+  set = set.map(function (comp) {
+    return new Comparator(comp, this.options)
+  }, this)
+
+  return set
+}
+
+Range.prototype.intersects = function (range, options) {
+  if (!(range instanceof Range)) {
+    throw new TypeError('a Range is required')
+  }
+
+  return this.set.some(function (thisComparators) {
+    return thisComparators.every(function (thisComparator) {
+      return range.set.some(function (rangeComparators) {
+        return rangeComparators.every(function (rangeComparator) {
+          return thisComparator.intersects(rangeComparator, options)
+        })
+      })
+    })
+  })
+}
+
+// Mostly just for testing and legacy API reasons
+exports.toComparators = toComparators
+function toComparators (range, options) {
+  return new Range(range, options).set.map(function (comp) {
+    return comp.map(function (c) {
+      return c.value
+    }).join(' ').trim().split(' ')
+  })
+}
+
+// comprised of xranges, tildes, stars, and gtlt's at this point.
+// already replaced the hyphen ranges
+// turn into a set of JUST comparators.
+function parseComparator (comp, options) {
+  debug('comp', comp, options)
+  comp = replaceCarets(comp, options)
+  debug('caret', comp)
+  comp = replaceTildes(comp, options)
+  debug('tildes', comp)
+  comp = replaceXRanges(comp, options)
+  debug('xrange', comp)
+  comp = replaceStars(comp, options)
+  debug('stars', comp)
+  return comp
+}
+
+function isX (id) {
+  return !id || id.toLowerCase() === 'x' || id === '*'
+}
+
+// ~, ~> --> * (any, kinda silly)
+// ~2, ~2.x, ~2.x.x, ~>2, ~>2.x ~>2.x.x --> >=2.0.0 <3.0.0
+// ~2.0, ~2.0.x, ~>2.0, ~>2.0.x --> >=2.0.0 <2.1.0
+// ~1.2, ~1.2.x, ~>1.2, ~>1.2.x --> >=1.2.0 <1.3.0
+// ~1.2.3, ~>1.2.3 --> >=1.2.3 <1.3.0
+// ~1.2.0, ~>1.2.0 --> >=1.2.0 <1.3.0
+function replaceTildes (comp, options) {
+  return comp.trim().split(/\s+/).map(function (comp) {
+    return replaceTilde(comp, options)
+  }).join(' ')
+}
+
+function replaceTilde (comp, options) {
+  var r = options.loose ? re[TILDELOOSE] : re[TILDE]
+  return comp.replace(r, function (_, M, m, p, pr) {
+    debug('tilde', comp, _, M, m, p, pr)
+    var ret
+
+    if (isX(M)) {
+      ret = ''
+    } else if (isX(m)) {
+      ret = '>=' + M + '.0.0 <' + (+M + 1) + '.0.0'
+    } else if (isX(p)) {
+      // ~1.2 == >=1.2.0 <1.3.0
+      ret = '>=' + M + '.' + m + '.0 <' + M + '.' + (+m + 1) + '.0'
+    } else if (pr) {
+      debug('replaceTilde pr', pr)
+      ret = '>=' + M + '.' + m + '.' + p + '-' + pr +
+            ' <' + M + '.' + (+m + 1) + '.0'
+    } else {
+      // ~1.2.3 == >=1.2.3 <1.3.0
+      ret = '>=' + M + '.' + m + '.' + p +
+            ' <' + M + '.' + (+m + 1) + '.0'
+    }
+
+    debug('tilde return', ret)
+    return ret
+  })
+}
+
+// ^ --> * (any, kinda silly)
+// ^2, ^2.x, ^2.x.x --> >=2.0.0 <3.0.0
+// ^2.0, ^2.0.x --> >=2.0.0 <3.0.0
+// ^1.2, ^1.2.x --> >=1.2.0 <2.0.0
+// ^1.2.3 --> >=1.2.3 <2.0.0
+// ^1.2.0 --> >=1.2.0 <2.0.0
+function replaceCarets (comp, options) {
+  return comp.trim().split(/\s+/).map(function (comp) {
+    return replaceCaret(comp, options)
+  }).join(' ')
+}
+
+function replaceCaret (comp, options) {
+  debug('caret', comp, options)
+  var r = options.loose ? re[CARETLOOSE] : re[CARET]
+  return comp.replace(r, function (_, M, m, p, pr) {
+    debug('caret', comp, _, M, m, p, pr)
+    var ret
+
+    if (isX(M)) {
+      ret = ''
+    } else if (isX(m)) {
+      ret = '>=' + M + '.0.0 <' + (+M + 1) + '.0.0'
+    } else if (isX(p)) {
+      if (M === '0') {
+        ret = '>=' + M + '.' + m + '.0 <' + M + '.' + (+m + 1) + '.0'
+      } else {
+        ret = '>=' + M + '.' + m + '.0 <' + (+M + 1) + '.0.0'
+      }
+    } else if (pr) {
+      debug('replaceCaret pr', pr)
+      if (M === '0') {
+        if (m === '0') {
+          ret = '>=' + M + '.' + m + '.' + p + '-' + pr +
+                ' <' + M + '.' + m + '.' + (+p + 1)
+        } else {
+          ret = '>=' + M + '.' + m + '.' + p + '-' + pr +
+                ' <' + M + '.' + (+m + 1) + '.0'
+        }
+      } else {
+        ret = '>=' + M + '.' + m + '.' + p + '-' + pr +
+              ' <' + (+M + 1) + '.0.0'
+      }
+    } else {
+      debug('no pr')
+      if (M === '0') {
+        if (m === '0') {
+          ret = '>=' + M + '.' + m + '.' + p +
+                ' <' + M + '.' + m + '.' + (+p + 1)
+        } else {
+          ret = '>=' + M + '.' + m + '.' + p +
+                ' <' + M + '.' + (+m + 1) + '.0'
+        }
+      } else {
+        ret = '>=' + M + '.' + m + '.' + p +
+              ' <' + (+M + 1) + '.0.0'
+      }
+    }
+
+    debug('caret return', ret)
+    return ret
+  })
+}
+
+function replaceXRanges (comp, options) {
+  debug('replaceXRanges', comp, options)
+  return comp.split(/\s+/).map(function (comp) {
+    return replaceXRange(comp, options)
+  }).join(' ')
+}
+
+function replaceXRange (comp, options) {
+  comp = comp.trim()
+  var r = options.loose ? re[XRANGELOOSE] : re[XRANGE]
+  return comp.replace(r, function (ret, gtlt, M, m, p, pr) {
+    debug('xRange', comp, ret, gtlt, M, m, p, pr)
+    var xM = isX(M)
+    var xm = xM || isX(m)
+    var xp = xm || isX(p)
+    var anyX = xp
+
+    if (gtlt === '=' && anyX) {
+      gtlt = ''
+    }
+
+    if (xM) {
+      if (gtlt === '>' || gtlt === '<') {
+        // nothing is allowed
+        ret = '<0.0.0'
+      } else {
+        // nothing is forbidden
+        ret = '*'
+      }
+    } else if (gtlt && anyX) {
+      // we know patch is an x, because we have any x at all.
+      // replace X with 0
+      if (xm) {
+        m = 0
+      }
+      p = 0
+
+      if (gtlt === '>') {
+        // >1 => >=2.0.0
+        // >1.2 => >=1.3.0
+        // >1.2.3 => >= 1.2.4
+        gtlt = '>='
+        if (xm) {
+          M = +M + 1
+          m = 0
+          p = 0
+        } else {
+          m = +m + 1
+          p = 0
+        }
+      } else if (gtlt === '<=') {
+        // <=0.7.x is actually <0.8.0, since any 0.7.x should
+        // pass.  Similarly, <=7.x is actually <8.0.0, etc.
+        gtlt = '<'
+        if (xm) {
+          M = +M + 1
+        } else {
+          m = +m + 1
+        }
+      }
+
+      ret = gtlt + M + '.' + m + '.' + p
+    } else if (xm) {
+      ret = '>=' + M + '.0.0 <' + (+M + 1) + '.0.0'
+    } else if (xp) {
+      ret = '>=' + M + '.' + m + '.0 <' + M + '.' + (+m + 1) + '.0'
+    }
+
+    debug('xRange return', ret)
+
+    return ret
+  })
+}
+
+// Because * is AND-ed with everything else in the comparator,
+// and '' means "any version", just remove the *s entirely.
+function replaceStars (comp, options) {
+  debug('replaceStars', comp, options)
+  // Looseness is ignored here.  star is always as loose as it gets!
+  return comp.trim().replace(re[STAR], '')
+}
+
+// This function is passed to string.replace(re[HYPHENRANGE])
+// M, m, patch, prerelease, build
+// 1.2 - 3.4.5 => >=1.2.0 <=3.4.5
+// 1.2.3 - 3.4 => >=1.2.0 <3.5.0 Any 3.4.x will do
+// 1.2 - 3.4 => >=1.2.0 <3.5.0
+function hyphenReplace ($0,
+  from, fM, fm, fp, fpr, fb,
+  to, tM, tm, tp, tpr, tb) {
+  if (isX(fM)) {
+    from = ''
+  } else if (isX(fm)) {
+    from = '>=' + fM + '.0.0'
+  } else if (isX(fp)) {
+    from = '>=' + fM + '.' + fm + '.0'
+  } else {
+    from = '>=' + from
+  }
+
+  if (isX(tM)) {
+    to = ''
+  } else if (isX(tm)) {
+    to = '<' + (+tM + 1) + '.0.0'
+  } else if (isX(tp)) {
+    to = '<' + tM + '.' + (+tm + 1) + '.0'
+  } else if (tpr) {
+    to = '<=' + tM + '.' + tm + '.' + tp + '-' + tpr
+  } else {
+    to = '<=' + to
+  }
+
+  return (from + ' ' + to).trim()
+}
+
+// if ANY of the sets match ALL of its comparators, then pass
+Range.prototype.test = function (version) {
+  if (!version) {
+    return false
+  }
+
+  if (typeof version === 'string') {
+    version = new SemVer(version, this.options)
+  }
+
+  for (var i = 0; i < this.set.length; i++) {
+    if (testSet(this.set[i], version, this.options)) {
+      return true
+    }
+  }
+  return false
+}
+
+function testSet (set, version, options) {
+  for (var i = 0; i < set.length; i++) {
+    if (!set[i].test(version)) {
+      return false
+    }
+  }
+
+  if (version.prerelease.length && !options.includePrerelease) {
+    // Find the set of versions that are allowed to have prereleases
+    // For example, ^1.2.3-pr.1 desugars to >=1.2.3-pr.1 <2.0.0
+    // That should allow `1.2.3-pr.2` to pass.
+    // However, `1.2.4-alpha.notready` should NOT be allowed,
+    // even though it's within the range set by the comparators.
+    for (i = 0; i < set.length; i++) {
+      debug(set[i].semver)
+      if (set[i].semver === ANY) {
+        continue
+      }
+
+      if (set[i].semver.prerelease.length > 0) {
+        var allowed = set[i].semver
+        if (allowed.major === version.major &&
+            allowed.minor === version.minor &&
+            allowed.patch === version.patch) {
+          return true
+        }
+      }
+    }
+
+    // Version has a -pre, but it's not one of the ones we like.
+    return false
+  }
+
+  return true
+}
+
+exports.satisfies = satisfies
+function satisfies (version, range, options) {
+  try {
+    range = new Range(range, options)
+  } catch (er) {
+    return false
+  }
+  return range.test(version)
+}
+
+exports.maxSatisfying = maxSatisfying
+function maxSatisfying (versions, range, options) {
+  var max = null
+  var maxSV = null
+  try {
+    var rangeObj = new Range(range, options)
+  } catch (er) {
+    return null
+  }
+  versions.forEach(function (v) {
+    if (rangeObj.test(v)) {
+      // satisfies(v, range, options)
+      if (!max || maxSV.compare(v) === -1) {
+        // compare(max, v, true)
+        max = v
+        maxSV = new SemVer(max, options)
+      }
+    }
+  })
+  return max
+}
+
+exports.minSatisfying = minSatisfying
+function minSatisfying (versions, range, options) {
+  var min = null
+  var minSV = null
+  try {
+    var rangeObj = new Range(range, options)
+  } catch (er) {
+    return null
+  }
+  versions.forEach(function (v) {
+    if (rangeObj.test(v)) {
+      // satisfies(v, range, options)
+      if (!min || minSV.compare(v) === 1) {
+        // compare(min, v, true)
+        min = v
+        minSV = new SemVer(min, options)
+      }
+    }
+  })
+  return min
+}
+
+exports.minVersion = minVersion
+function minVersion (range, loose) {
+  range = new Range(range, loose)
+
+  var minver = new SemVer('0.0.0')
+  if (range.test(minver)) {
+    return minver
+  }
+
+  minver = new SemVer('0.0.0-0')
+  if (range.test(minver)) {
+    return minver
+  }
+
+  minver = null
+  for (var i = 0; i < range.set.length; ++i) {
+    var comparators = range.set[i]
+
+    comparators.forEach(function (comparator) {
+      // Clone to avoid manipulating the comparator's semver object.
+      var compver = new SemVer(comparator.semver.version)
+      switch (comparator.operator) {
+        case '>':
+          if (compver.prerelease.length === 0) {
+            compver.patch++
+          } else {
+            compver.prerelease.push(0)
+          }
+          compver.raw = compver.format()
+          /* fallthrough */
+        case '':
+        case '>=':
+          if (!minver || gt(minver, compver)) {
+            minver = compver
+          }
+          break
+        case '<':
+        case '<=':
+          /* Ignore maximum versions */
+          break
+        /* istanbul ignore next */
+        default:
+          throw new Error('Unexpected operation: ' + comparator.operator)
+      }
+    })
+  }
+
+  if (minver && range.test(minver)) {
+    return minver
+  }
+
+  return null
+}
+
+exports.validRange = validRange
+function validRange (range, options) {
+  try {
+    // Return '*' instead of '' so that truthiness works.
+    // This will throw if it's invalid anyway
+    return new Range(range, options).range || '*'
+  } catch (er) {
+    return null
+  }
+}
+
+// Determine if version is less than all the versions possible in the range
+exports.ltr = ltr
+function ltr (version, range, options) {
+  return outside(version, range, '<', options)
+}
+
+// Determine if version is greater than all the versions possible in the range.
+exports.gtr = gtr
+function gtr (version, range, options) {
+  return outside(version, range, '>', options)
+}
+
+exports.outside = outside
+function outside (version, range, hilo, options) {
+  version = new SemVer(version, options)
+  range = new Range(range, options)
+
+  var gtfn, ltefn, ltfn, comp, ecomp
+  switch (hilo) {
+    case '>':
+      gtfn = gt
+      ltefn = lte
+      ltfn = lt
+      comp = '>'
+      ecomp = '>='
+      break
+    case '<':
+      gtfn = lt
+      ltefn = gte
+      ltfn = gt
+      comp = '<'
+      ecomp = '<='
+      break
+    default:
+      throw new TypeError('Must provide a hilo val of "<" or ">"')
+  }
+
+  // If it satisifes the range it is not outside
+  if (satisfies(version, range, options)) {
+    return false
+  }
+
+  // From now on, variable terms are as if we're in "gtr" mode.
+  // but note that everything is flipped for the "ltr" function.
+
+  for (var i = 0; i < range.set.length; ++i) {
+    var comparators = range.set[i]
+
+    var high = null
+    var low = null
+
+    comparators.forEach(function (comparator) {
+      if (comparator.semver === ANY) {
+        comparator = new Comparator('>=0.0.0')
+      }
+      high = high || comparator
+      low = low || comparator
+      if (gtfn(comparator.semver, high.semver, options)) {
+        high = comparator
+      } else if (ltfn(comparator.semver, low.semver, options)) {
+        low = comparator
+      }
+    })
+
+    // If the edge version comparator has a operator then our version
+    // isn't outside it
+    if (high.operator === comp || high.operator === ecomp) {
+      return false
+    }
+
+    // If the lowest version comparator has an operator and our version
+    // is less than it then it isn't higher than the range
+    if ((!low.operator || low.operator === comp) &&
+        ltefn(version, low.semver)) {
+      return false
+    } else if (low.operator === ecomp && ltfn(version, low.semver)) {
+      return false
+    }
+  }
+  return true
+}
+
+exports.prerelease = prerelease
+function prerelease (version, options) {
+  var parsed = parse(version, options)
+  return (parsed && parsed.prerelease.length) ? parsed.prerelease : null
+}
+
+exports.intersects = intersects
+function intersects (r1, r2, options) {
+  r1 = new Range(r1, options)
+  r2 = new Range(r2, options)
+  return r1.intersects(r2)
+}
+
+exports.coerce = coerce
+function coerce (version) {
+  if (version instanceof SemVer) {
+    return version
+  }
+
+  if (typeof version !== 'string') {
+    return null
+  }
+
+  var match = version.match(re[COERCE])
+
+  if (match == null) {
+    return null
+  }
+
+  return parse(match[1] +
+    '.' + (match[2] || '0') +
+    '.' + (match[3] || '0'))
+}
 
 
 /***/ }),
@@ -36693,31 +40091,44 @@ module.exports = normalizeString
 /* 286 */,
 /* 287 */,
 /* 288 */
-/***/ (function(__unusedmodule, exports, __webpack_require__) {
+/***/ (function(module, __unusedexports, __webpack_require__) {
 
 "use strict";
 
+var _ = __webpack_require__(557);
 
-// Update this array if you add/rename/remove files in this directory.
-// We support Browserify by skipping automatic module discovery and requiring modules directly.
-var modules = [
-    __webpack_require__(162),
-    __webpack_require__(797),
-    __webpack_require__(645),
-    __webpack_require__(877),
-    __webpack_require__(762),
-    __webpack_require__(28),
-    __webpack_require__(1),
-    __webpack_require__(92),
-];
+/**
+ * Choice object
+ * Normalize input as choice object
+ * @constructor
+ * @param {String|Object} val  Choice value. If an object is passed, it should contains
+ *                             at least one of `value` or `name` property
+ */
 
-// Put all encoding/alias/codec definitions to single object and export it. 
-for (var i = 0; i < modules.length; i++) {
-    var module = modules[i];
-    for (var enc in module)
-        if (Object.prototype.hasOwnProperty.call(module, enc))
-            exports[enc] = module[enc];
-}
+var Choice = module.exports = function (val, answers) {
+  // Don't process Choice and Separator object
+  if (val instanceof Choice || val.type === 'separator') {
+    return val;
+  }
+
+  if (_.isString(val)) {
+    this.name = val;
+    this.value = val;
+    this.short = val;
+  } else {
+    _.extend(this, val, {
+      name: val.name || val.value,
+      value: 'value' in val ? val.value : val.name,
+      short: val.short || val.name || val.value
+    });
+  }
+
+  if (_.isFunction(val.disabled)) {
+    this.disabled = val.disabled(answers);
+  } else {
+    this.disabled = val.disabled;
+  }
+};
 
 
 /***/ }),
@@ -37669,44 +41080,139 @@ module.exports = overArg;
 
 /***/ }),
 /* 299 */
-/***/ (function(module, __unusedexports, __webpack_require__) {
+/***/ (function(__unusedmodule, exports) {
 
 "use strict";
 
-var _ = __webpack_require__(557);
+
+Object.defineProperty(exports, '__esModule', { value: true });
+
+const VERSION = "2.2.3";
 
 /**
- * Choice object
- * Normalize input as choice object
- * @constructor
- * @param {String|Object} val  Choice value. If an object is passed, it should contains
- *                             at least one of `value` or `name` property
+ * Some “list” response that can be paginated have a different response structure
+ *
+ * They have a `total_count` key in the response (search also has `incomplete_results`,
+ * /installation/repositories also has `repository_selection`), as well as a key with
+ * the list of the items which name varies from endpoint to endpoint.
+ *
+ * Octokit normalizes these responses so that paginated results are always returned following
+ * the same structure. One challenge is that if the list response has only one page, no Link
+ * header is provided, so this header alone is not sufficient to check wether a response is
+ * paginated or not.
+ *
+ * We check if a "total_count" key is present in the response data, but also make sure that
+ * a "url" property is not, as the "Get the combined status for a specific ref" endpoint would
+ * otherwise match: https://developer.github.com/v3/repos/statuses/#get-the-combined-status-for-a-specific-ref
+ */
+function normalizePaginatedListResponse(response) {
+  const responseNeedsNormalization = "total_count" in response.data && !("url" in response.data);
+  if (!responseNeedsNormalization) return response; // keep the additional properties intact as there is currently no other way
+  // to retrieve the same information.
+
+  const incompleteResults = response.data.incomplete_results;
+  const repositorySelection = response.data.repository_selection;
+  const totalCount = response.data.total_count;
+  delete response.data.incomplete_results;
+  delete response.data.repository_selection;
+  delete response.data.total_count;
+  const namespaceKey = Object.keys(response.data)[0];
+  const data = response.data[namespaceKey];
+  response.data = data;
+
+  if (typeof incompleteResults !== "undefined") {
+    response.data.incomplete_results = incompleteResults;
+  }
+
+  if (typeof repositorySelection !== "undefined") {
+    response.data.repository_selection = repositorySelection;
+  }
+
+  response.data.total_count = totalCount;
+  return response;
+}
+
+function iterator(octokit, route, parameters) {
+  const options = typeof route === "function" ? route.endpoint(parameters) : octokit.request.endpoint(route, parameters);
+  const requestMethod = typeof route === "function" ? route : octokit.request;
+  const method = options.method;
+  const headers = options.headers;
+  let url = options.url;
+  return {
+    [Symbol.asyncIterator]: () => ({
+      next() {
+        if (!url) {
+          return Promise.resolve({
+            done: true
+          });
+        }
+
+        return requestMethod({
+          method,
+          url,
+          headers
+        }).then(normalizePaginatedListResponse).then(response => {
+          // `response.headers.link` format:
+          // '<https://api.github.com/users/aseemk/followers?page=2>; rel="next", <https://api.github.com/users/aseemk/followers?page=2>; rel="last"'
+          // sets `url` to undefined if "next" URL is not present or `link` header is not set
+          url = ((response.headers.link || "").match(/<([^>]+)>;\s*rel="next"/) || [])[1];
+          return {
+            value: response
+          };
+        });
+      }
+
+    })
+  };
+}
+
+function paginate(octokit, route, parameters, mapFn) {
+  if (typeof parameters === "function") {
+    mapFn = parameters;
+    parameters = undefined;
+  }
+
+  return gather(octokit, [], iterator(octokit, route, parameters)[Symbol.asyncIterator](), mapFn);
+}
+
+function gather(octokit, results, iterator, mapFn) {
+  return iterator.next().then(result => {
+    if (result.done) {
+      return results;
+    }
+
+    let earlyExit = false;
+
+    function done() {
+      earlyExit = true;
+    }
+
+    results = results.concat(mapFn ? mapFn(result.value, done) : result.value.data);
+
+    if (earlyExit) {
+      return results;
+    }
+
+    return gather(octokit, results, iterator, mapFn);
+  });
+}
+
+/**
+ * @param octokit Octokit instance
+ * @param options Options passed to Octokit constructor
  */
 
-var Choice = module.exports = function (val, answers) {
-  // Don't process Choice and Separator object
-  if (val instanceof Choice || val.type === 'separator') {
-    return val;
-  }
+function paginateRest(octokit) {
+  return {
+    paginate: Object.assign(paginate.bind(null, octokit), {
+      iterator: iterator.bind(null, octokit)
+    })
+  };
+}
+paginateRest.VERSION = VERSION;
 
-  if (_.isString(val)) {
-    this.name = val;
-    this.value = val;
-    this.short = val;
-  } else {
-    _.extend(this, val, {
-      name: val.name || val.value,
-      value: 'value' in val ? val.value : val.name,
-      short: val.short || val.name || val.value
-    });
-  }
-
-  if (_.isFunction(val.disabled)) {
-    this.disabled = val.disabled(answers);
-  } else {
-    this.disabled = val.disabled;
-  }
-};
+exports.paginateRest = paginateRest;
+//# sourceMappingURL=index.js.map
 
 
 /***/ }),
@@ -37797,7 +41303,17 @@ module.exports = require("async_hooks");
 module.exports = require("string_decoder");
 
 /***/ }),
-/* 305 */,
+/* 305 */
+/***/ (function(module, __unusedexports, __webpack_require__) {
+
+module.exports = {
+    highlight: __webpack_require__(994)
+  , highlightFile: __webpack_require__(163)
+  , highlightFileSync: __webpack_require__(122)
+};
+
+
+/***/ }),
 /* 306 */
 /***/ (function(module, __unusedexports, __webpack_require__) {
 
@@ -53746,7 +57262,7 @@ module.exports = __webpack_require__(87);
 /*! no static exports found */
 /***/ (function(module, exports) {
 
-module.exports = __webpack_require__(413);
+module.exports = __webpack_require__(794);
 
 /***/ }),
 
@@ -53806,7 +57322,7 @@ module.exports = __webpack_require__(761);
 
 
 var Buffer = __webpack_require__(293).Buffer,
-    Transform = __webpack_require__(413).Transform;
+    Transform = __webpack_require__(794).Transform;
 
 
 // == Exports ==================================================================
@@ -53940,7 +57456,7 @@ const inquirer = __webpack_require__(641);
 const Listr = __webpack_require__(911);
 const contentful_client_1 = __webpack_require__(550);
 const { version } = __webpack_require__(849);
-const { SpaceAccessError } = __webpack_require__(197);
+const { SpaceAccessError } = __webpack_require__(718);
 const migration_parser_1 = __webpack_require__(38);
 const render_migration_1 = __webpack_require__(300);
 const steps_errors_1 = __webpack_require__(24);
@@ -53987,7 +57503,7 @@ const createRun = ({ shouldThrow }) => async function run(argv) {
     const client = contentful_client_1.createManagementClient(clientConfig);
     const makeRequest = function (requestConfig) {
         const config = Object.assign({}, requestConfig, {
-            url: path.join(clientConfig.spaceId, 'environments', clientConfig.environmentId, requestConfig.url)
+            url: [clientConfig.spaceId, 'environments', clientConfig.environmentId, requestConfig.url].join('/')
         });
         return client.rawRequest(config);
     };
@@ -54525,7 +58041,7 @@ module.exports = function (iconv) {
 
         // -- Readable -------------------------------------------------------------
         if (iconv.supportsStreams) {
-            var Readable = __webpack_require__(413).Readable;
+            var Readable = __webpack_require__(794).Readable;
 
             original.ReadableSetEncoding = Readable.prototype.setEncoding;
             Readable.prototype.setEncoding = function setEncoding(enc, options) {
@@ -54559,7 +58075,7 @@ module.exports = function (iconv) {
         Buffer.prototype.write = original.BufferWrite;
 
         if (iconv.supportsStreams) {
-            var Readable = __webpack_require__(413).Readable;
+            var Readable = __webpack_require__(794).Readable;
 
             Readable.prototype.setEncoding = original.ReadableSetEncoding;
             delete Readable.prototype.collect;
@@ -54581,7 +58097,7 @@ module.exports = function (iconv) {
 Object.defineProperty(exports, "__esModule", { value: true });
 const composed_intent_1 = __webpack_require__(974);
 const action_1 = __webpack_require__(64);
-const content_type_save_1 = __webpack_require__(9);
+const content_type_save_1 = __webpack_require__(132);
 const content_type_publish_1 = __webpack_require__(907);
 class IntentList {
     constructor(intents) {
@@ -55018,7 +58534,159 @@ module.exports = startOfWeek
 
 
 /***/ }),
-/* 341 */,
+/* 341 */
+/***/ (function(module) {
+
+var toString = Object.prototype.toString;
+
+/**
+ * Get the native `typeof` a value.
+ *
+ * @param  {*} `val`
+ * @return {*} Native javascript type
+ */
+
+module.exports = function kindOf(val) {
+  var type = typeof val;
+
+  // primitivies
+  if (type === 'undefined') {
+    return 'undefined';
+  }
+  if (val === null) {
+    return 'null';
+  }
+  if (val === true || val === false || val instanceof Boolean) {
+    return 'boolean';
+  }
+  if (type === 'string' || val instanceof String) {
+    return 'string';
+  }
+  if (type === 'number' || val instanceof Number) {
+    return 'number';
+  }
+
+  // functions
+  if (type === 'function' || val instanceof Function) {
+    if (typeof val.constructor.name !== 'undefined' && val.constructor.name.slice(0, 9) === 'Generator') {
+      return 'generatorfunction';
+    }
+    return 'function';
+  }
+
+  // array
+  if (typeof Array.isArray !== 'undefined' && Array.isArray(val)) {
+    return 'array';
+  }
+
+  // check for instances of RegExp and Date before calling `toString`
+  if (val instanceof RegExp) {
+    return 'regexp';
+  }
+  if (val instanceof Date) {
+    return 'date';
+  }
+
+  // other objects
+  type = toString.call(val);
+
+  if (type === '[object RegExp]') {
+    return 'regexp';
+  }
+  if (type === '[object Date]') {
+    return 'date';
+  }
+  if (type === '[object Arguments]') {
+    return 'arguments';
+  }
+  if (type === '[object Error]') {
+    return 'error';
+  }
+  if (type === '[object Promise]') {
+    return 'promise';
+  }
+
+  // buffer
+  if (isBuffer(val)) {
+    return 'buffer';
+  }
+
+  // es6: Map, WeakMap, Set, WeakSet
+  if (type === '[object Set]') {
+    return 'set';
+  }
+  if (type === '[object WeakSet]') {
+    return 'weakset';
+  }
+  if (type === '[object Map]') {
+    return 'map';
+  }
+  if (type === '[object WeakMap]') {
+    return 'weakmap';
+  }
+  if (type === '[object Symbol]') {
+    return 'symbol';
+  }
+  
+  if (type === '[object Map Iterator]') {
+    return 'mapiterator';
+  }
+  if (type === '[object Set Iterator]') {
+    return 'setiterator';
+  }
+  if (type === '[object String Iterator]') {
+    return 'stringiterator';
+  }
+  if (type === '[object Array Iterator]') {
+    return 'arrayiterator';
+  }
+  
+  // typed arrays
+  if (type === '[object Int8Array]') {
+    return 'int8array';
+  }
+  if (type === '[object Uint8Array]') {
+    return 'uint8array';
+  }
+  if (type === '[object Uint8ClampedArray]') {
+    return 'uint8clampedarray';
+  }
+  if (type === '[object Int16Array]') {
+    return 'int16array';
+  }
+  if (type === '[object Uint16Array]') {
+    return 'uint16array';
+  }
+  if (type === '[object Int32Array]') {
+    return 'int32array';
+  }
+  if (type === '[object Uint32Array]') {
+    return 'uint32array';
+  }
+  if (type === '[object Float32Array]') {
+    return 'float32array';
+  }
+  if (type === '[object Float64Array]') {
+    return 'float64array';
+  }
+
+  // must be a plain object
+  return 'object';
+};
+
+/**
+ * If you need to support Safari 5-7 (8-10 yr-old browser),
+ * take a look at https://github.com/feross/is-buffer
+ */
+
+function isBuffer(val) {
+  return val.constructor
+    && typeof val.constructor.isBuffer === 'function'
+    && val.constructor.isBuffer(val);
+}
+
+
+/***/ }),
 /* 342 */,
 /* 343 */
 /***/ (function(module, __unusedexports, __webpack_require__) {
@@ -55189,7 +58857,7 @@ module.exports = nodeUtil;
 /* 351 */
 /***/ (function(module, __unusedexports, __webpack_require__) {
 
-var isPrototype = __webpack_require__(796),
+var isPrototype = __webpack_require__(793),
     nativeKeys = __webpack_require__(773);
 
 /** Used for built-in method references. */
@@ -55230,7 +58898,7 @@ module.exports = baseKeys;
 Object.defineProperty(exports, "__esModule", { value: true });
 const base_intent_1 = __webpack_require__(19);
 const content_type_unpublish_1 = __webpack_require__(236);
-const content_type_delete_1 = __webpack_require__(753);
+const content_type_delete_1 = __webpack_require__(142);
 const chalk_1 = __webpack_require__(946);
 class ContentTypeDeleteIntent extends base_intent_1.default {
     isContentTypeDelete() {
@@ -55881,53 +59549,34 @@ util.inherits(module.exports.gb_18030, mbcs);
 /* 363 */
 /***/ (function(module) {
 
-"use strict";
+module.exports = register
 
-/* eslint-disable yoda */
-module.exports = x => {
-	if (Number.isNaN(x)) {
-		return false;
-	}
+function register (state, name, method, options) {
+  if (typeof method !== 'function') {
+    throw new Error('method for before hook must be a function')
+  }
 
-	// code points are derived from:
-	// http://www.unix.org/Public/UNIDATA/EastAsianWidth.txt
-	if (
-		x >= 0x1100 && (
-			x <= 0x115f ||  // Hangul Jamo
-			x === 0x2329 || // LEFT-POINTING ANGLE BRACKET
-			x === 0x232a || // RIGHT-POINTING ANGLE BRACKET
-			// CJK Radicals Supplement .. Enclosed CJK Letters and Months
-			(0x2e80 <= x && x <= 0x3247 && x !== 0x303f) ||
-			// Enclosed CJK Letters and Months .. CJK Unified Ideographs Extension A
-			(0x3250 <= x && x <= 0x4dbf) ||
-			// CJK Unified Ideographs .. Yi Radicals
-			(0x4e00 <= x && x <= 0xa4c6) ||
-			// Hangul Jamo Extended-A
-			(0xa960 <= x && x <= 0xa97c) ||
-			// Hangul Syllables
-			(0xac00 <= x && x <= 0xd7a3) ||
-			// CJK Compatibility Ideographs
-			(0xf900 <= x && x <= 0xfaff) ||
-			// Vertical Forms
-			(0xfe10 <= x && x <= 0xfe19) ||
-			// CJK Compatibility Forms .. Small Form Variants
-			(0xfe30 <= x && x <= 0xfe6b) ||
-			// Halfwidth and Fullwidth Forms
-			(0xff01 <= x && x <= 0xff60) ||
-			(0xffe0 <= x && x <= 0xffe6) ||
-			// Kana Supplement
-			(0x1b000 <= x && x <= 0x1b001) ||
-			// Enclosed Ideographic Supplement
-			(0x1f200 <= x && x <= 0x1f251) ||
-			// CJK Unified Ideographs Extension B .. Tertiary Ideographic Plane
-			(0x20000 <= x && x <= 0x3fffd)
-		)
-	) {
-		return true;
-	}
+  if (!options) {
+    options = {}
+  }
 
-	return false;
-};
+  if (Array.isArray(name)) {
+    return name.reverse().reduce(function (callback, name) {
+      return register.bind(null, state, name, callback, options)
+    }, method)()
+  }
+
+  return Promise.resolve()
+    .then(function () {
+      if (!state.registry[name]) {
+        return method(options)
+      }
+
+      return (state.registry[name]).reduce(function (method, registered) {
+        return registered.hook.bind(null, method, options)
+      }, method)()
+    })
+}
 
 
 /***/ }),
@@ -55981,7 +59630,157 @@ module.exports = (flag, argv) => {
 
 
 /***/ }),
-/* 366 */,
+/* 366 */
+/***/ (function(module, __unusedexports, __webpack_require__) {
+
+var Stream = __webpack_require__(794)
+
+module.exports = MuteStream
+
+// var out = new MuteStream(process.stdout)
+// argument auto-pipes
+function MuteStream (opts) {
+  Stream.apply(this)
+  opts = opts || {}
+  this.writable = this.readable = true
+  this.muted = false
+  this.on('pipe', this._onpipe)
+  this.replace = opts.replace
+
+  // For readline-type situations
+  // This much at the start of a line being redrawn after a ctrl char
+  // is seen (such as backspace) won't be redrawn as the replacement
+  this._prompt = opts.prompt || null
+  this._hadControl = false
+}
+
+MuteStream.prototype = Object.create(Stream.prototype)
+
+Object.defineProperty(MuteStream.prototype, 'constructor', {
+  value: MuteStream,
+  enumerable: false
+})
+
+MuteStream.prototype.mute = function () {
+  this.muted = true
+}
+
+MuteStream.prototype.unmute = function () {
+  this.muted = false
+}
+
+Object.defineProperty(MuteStream.prototype, '_onpipe', {
+  value: onPipe,
+  enumerable: false,
+  writable: true,
+  configurable: true
+})
+
+function onPipe (src) {
+  this._src = src
+}
+
+Object.defineProperty(MuteStream.prototype, 'isTTY', {
+  get: getIsTTY,
+  set: setIsTTY,
+  enumerable: true,
+  configurable: true
+})
+
+function getIsTTY () {
+  return( (this._dest) ? this._dest.isTTY
+        : (this._src) ? this._src.isTTY
+        : false
+        )
+}
+
+// basically just get replace the getter/setter with a regular value
+function setIsTTY (isTTY) {
+  Object.defineProperty(this, 'isTTY', {
+    value: isTTY,
+    enumerable: true,
+    writable: true,
+    configurable: true
+  })
+}
+
+Object.defineProperty(MuteStream.prototype, 'rows', {
+  get: function () {
+    return( this._dest ? this._dest.rows
+          : this._src ? this._src.rows
+          : undefined )
+  }, enumerable: true, configurable: true })
+
+Object.defineProperty(MuteStream.prototype, 'columns', {
+  get: function () {
+    return( this._dest ? this._dest.columns
+          : this._src ? this._src.columns
+          : undefined )
+  }, enumerable: true, configurable: true })
+
+
+MuteStream.prototype.pipe = function (dest, options) {
+  this._dest = dest
+  return Stream.prototype.pipe.call(this, dest, options)
+}
+
+MuteStream.prototype.pause = function () {
+  if (this._src) return this._src.pause()
+}
+
+MuteStream.prototype.resume = function () {
+  if (this._src) return this._src.resume()
+}
+
+MuteStream.prototype.write = function (c) {
+  if (this.muted) {
+    if (!this.replace) return true
+    if (c.match(/^\u001b/)) {
+      if(c.indexOf(this._prompt) === 0) {
+        c = c.substr(this._prompt.length);
+        c = c.replace(/./g, this.replace);
+        c = this._prompt + c;
+      }
+      this._hadControl = true
+      return this.emit('data', c)
+    } else {
+      if (this._prompt && this._hadControl &&
+          c.indexOf(this._prompt) === 0) {
+        this._hadControl = false
+        this.emit('data', this._prompt)
+        c = c.substr(this._prompt.length)
+      }
+      c = c.toString().replace(/./g, this.replace)
+    }
+  }
+  this.emit('data', c)
+}
+
+MuteStream.prototype.end = function (c) {
+  if (this.muted) {
+    if (c && this.replace) {
+      c = c.toString().replace(/./g, this.replace)
+    } else {
+      c = null
+    }
+  }
+  if (c) this.emit('data', c)
+  this.emit('end')
+}
+
+function proxy (fn) { return function () {
+  var d = this._dest
+  var s = this._src
+  if (d && d[fn]) d[fn].apply(d, arguments)
+  if (s && s[fn]) s[fn].apply(s, arguments)
+}}
+
+MuteStream.prototype.destroy = proxy('destroy')
+MuteStream.prototype.destroySoon = proxy('destroySoon')
+MuteStream.prototype.close = proxy('close')
+
+
+/***/ }),
 /* 367 */
 /***/ (function(module, exports, __webpack_require__) {
 
@@ -55990,7 +59789,7 @@ module.exports = (flag, argv) => {
 
 // Load modules
 
-const Hoek = __webpack_require__(11);
+const Hoek = __webpack_require__(970);
 
 
 // Declare internals
@@ -56224,7 +60023,40 @@ internals.Topo.prototype._sort = function () {
 /* 371 */,
 /* 372 */,
 /* 373 */,
-/* 374 */,
+/* 374 */
+/***/ (function(module) {
+
+"use strict";
+
+module.exports = (str, count, opts) => {
+	// Support older versions: use the third parameter as options.indent
+	// TODO: Remove the workaround in the next major version
+	const options = typeof opts === 'object' ? Object.assign({indent: ' '}, opts) : {indent: opts || ' '};
+	count = count === undefined ? 1 : count;
+
+	if (typeof str !== 'string') {
+		throw new TypeError(`Expected \`input\` to be a \`string\`, got \`${typeof str}\``);
+	}
+
+	if (typeof count !== 'number') {
+		throw new TypeError(`Expected \`count\` to be a \`number\`, got \`${typeof count}\``);
+	}
+
+	if (typeof options.indent !== 'string') {
+		throw new TypeError(`Expected \`options.indent\` to be a \`string\`, got \`${typeof options.indent}\``);
+	}
+
+	if (count === 0) {
+		return str;
+	}
+
+	const regex = options.includeEmptyLines ? /^/mg : /^(?!\s*$)/mg;
+	return str.replace(regex, options.indent.repeat(count));
+}
+;
+
+
+/***/ }),
 /* 375 */
 /***/ (function(__unusedmodule, exports, __webpack_require__) {
 
@@ -56503,7 +60335,7 @@ module.exports.supportsColor = supportsColor;
 var assert = __webpack_require__(357);
 var _ = __webpack_require__(557);
 var Separator = __webpack_require__(836);
-var Choice = __webpack_require__(299);
+var Choice = __webpack_require__(288);
 
 /**
  * Choices collection
@@ -56624,7 +60456,7 @@ Choices.prototype.push = function () {
 
 const Any = __webpack_require__(227);
 const Ref = __webpack_require__(953);
-const Hoek = __webpack_require__(11);
+const Hoek = __webpack_require__(970);
 
 
 // Declare internals
@@ -56804,7 +60636,7 @@ module.exports = new internals.Number();
 // Solution would be installing npm modules "buffer" and "stream" explicitly.
 var Buffer = __webpack_require__(215).Buffer;
 
-var bomHandling = __webpack_require__(454),
+var bomHandling = __webpack_require__(536),
     iconv = module.exports;
 
 // All codecs and aliases are kept here, keyed by encoding name/alias.
@@ -56862,7 +60694,7 @@ iconv.fromEncoding = iconv.decode;
 iconv._codecDataCache = {};
 iconv.getCodec = function getCodec(encoding) {
     if (!iconv.encodings)
-        iconv.encodings = __webpack_require__(288); // Lazy load all encoding definitions.
+        iconv.encodings = __webpack_require__(924); // Lazy load all encoding definitions.
     
     // Canonicalize encoding name: strip all non-alphanumeric chars and appended year.
     var enc = iconv._canonicalizeEncoding(encoding);
@@ -56952,7 +60784,392 @@ if (false) {}
 
 
 /***/ }),
-/* 385 */,
+/* 385 */
+/***/ (function(__unusedmodule, exports, __webpack_require__) {
+
+"use strict";
+
+
+Object.defineProperty(exports, '__esModule', { value: true });
+
+function _interopDefault (ex) { return (ex && (typeof ex === 'object') && 'default' in ex) ? ex['default'] : ex; }
+
+var isPlainObject = _interopDefault(__webpack_require__(626));
+var universalUserAgent = __webpack_require__(796);
+
+function lowercaseKeys(object) {
+  if (!object) {
+    return {};
+  }
+
+  return Object.keys(object).reduce((newObj, key) => {
+    newObj[key.toLowerCase()] = object[key];
+    return newObj;
+  }, {});
+}
+
+function mergeDeep(defaults, options) {
+  const result = Object.assign({}, defaults);
+  Object.keys(options).forEach(key => {
+    if (isPlainObject(options[key])) {
+      if (!(key in defaults)) Object.assign(result, {
+        [key]: options[key]
+      });else result[key] = mergeDeep(defaults[key], options[key]);
+    } else {
+      Object.assign(result, {
+        [key]: options[key]
+      });
+    }
+  });
+  return result;
+}
+
+function merge(defaults, route, options) {
+  if (typeof route === "string") {
+    let [method, url] = route.split(" ");
+    options = Object.assign(url ? {
+      method,
+      url
+    } : {
+      url: method
+    }, options);
+  } else {
+    options = Object.assign({}, route);
+  } // lowercase header names before merging with defaults to avoid duplicates
+
+
+  options.headers = lowercaseKeys(options.headers);
+  const mergedOptions = mergeDeep(defaults || {}, options); // mediaType.previews arrays are merged, instead of overwritten
+
+  if (defaults && defaults.mediaType.previews.length) {
+    mergedOptions.mediaType.previews = defaults.mediaType.previews.filter(preview => !mergedOptions.mediaType.previews.includes(preview)).concat(mergedOptions.mediaType.previews);
+  }
+
+  mergedOptions.mediaType.previews = mergedOptions.mediaType.previews.map(preview => preview.replace(/-preview/, ""));
+  return mergedOptions;
+}
+
+function addQueryParameters(url, parameters) {
+  const separator = /\?/.test(url) ? "&" : "?";
+  const names = Object.keys(parameters);
+
+  if (names.length === 0) {
+    return url;
+  }
+
+  return url + separator + names.map(name => {
+    if (name === "q") {
+      return "q=" + parameters.q.split("+").map(encodeURIComponent).join("+");
+    }
+
+    return `${name}=${encodeURIComponent(parameters[name])}`;
+  }).join("&");
+}
+
+const urlVariableRegex = /\{[^}]+\}/g;
+
+function removeNonChars(variableName) {
+  return variableName.replace(/^\W+|\W+$/g, "").split(/,/);
+}
+
+function extractUrlVariableNames(url) {
+  const matches = url.match(urlVariableRegex);
+
+  if (!matches) {
+    return [];
+  }
+
+  return matches.map(removeNonChars).reduce((a, b) => a.concat(b), []);
+}
+
+function omit(object, keysToOmit) {
+  return Object.keys(object).filter(option => !keysToOmit.includes(option)).reduce((obj, key) => {
+    obj[key] = object[key];
+    return obj;
+  }, {});
+}
+
+// Based on https://github.com/bramstein/url-template, licensed under BSD
+// TODO: create separate package.
+//
+// Copyright (c) 2012-2014, Bram Stein
+// All rights reserved.
+// Redistribution and use in source and binary forms, with or without
+// modification, are permitted provided that the following conditions
+// are met:
+//  1. Redistributions of source code must retain the above copyright
+//     notice, this list of conditions and the following disclaimer.
+//  2. Redistributions in binary form must reproduce the above copyright
+//     notice, this list of conditions and the following disclaimer in the
+//     documentation and/or other materials provided with the distribution.
+//  3. The name of the author may not be used to endorse or promote products
+//     derived from this software without specific prior written permission.
+// THIS SOFTWARE IS PROVIDED BY THE AUTHOR "AS IS" AND ANY EXPRESS OR IMPLIED
+// WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
+// MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO
+// EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT,
+// INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
+// BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+// DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY
+// OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+// NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE,
+// EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+/* istanbul ignore file */
+function encodeReserved(str) {
+  return str.split(/(%[0-9A-Fa-f]{2})/g).map(function (part) {
+    if (!/%[0-9A-Fa-f]/.test(part)) {
+      part = encodeURI(part).replace(/%5B/g, "[").replace(/%5D/g, "]");
+    }
+
+    return part;
+  }).join("");
+}
+
+function encodeUnreserved(str) {
+  return encodeURIComponent(str).replace(/[!'()*]/g, function (c) {
+    return "%" + c.charCodeAt(0).toString(16).toUpperCase();
+  });
+}
+
+function encodeValue(operator, value, key) {
+  value = operator === "+" || operator === "#" ? encodeReserved(value) : encodeUnreserved(value);
+
+  if (key) {
+    return encodeUnreserved(key) + "=" + value;
+  } else {
+    return value;
+  }
+}
+
+function isDefined(value) {
+  return value !== undefined && value !== null;
+}
+
+function isKeyOperator(operator) {
+  return operator === ";" || operator === "&" || operator === "?";
+}
+
+function getValues(context, operator, key, modifier) {
+  var value = context[key],
+      result = [];
+
+  if (isDefined(value) && value !== "") {
+    if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+      value = value.toString();
+
+      if (modifier && modifier !== "*") {
+        value = value.substring(0, parseInt(modifier, 10));
+      }
+
+      result.push(encodeValue(operator, value, isKeyOperator(operator) ? key : ""));
+    } else {
+      if (modifier === "*") {
+        if (Array.isArray(value)) {
+          value.filter(isDefined).forEach(function (value) {
+            result.push(encodeValue(operator, value, isKeyOperator(operator) ? key : ""));
+          });
+        } else {
+          Object.keys(value).forEach(function (k) {
+            if (isDefined(value[k])) {
+              result.push(encodeValue(operator, value[k], k));
+            }
+          });
+        }
+      } else {
+        const tmp = [];
+
+        if (Array.isArray(value)) {
+          value.filter(isDefined).forEach(function (value) {
+            tmp.push(encodeValue(operator, value));
+          });
+        } else {
+          Object.keys(value).forEach(function (k) {
+            if (isDefined(value[k])) {
+              tmp.push(encodeUnreserved(k));
+              tmp.push(encodeValue(operator, value[k].toString()));
+            }
+          });
+        }
+
+        if (isKeyOperator(operator)) {
+          result.push(encodeUnreserved(key) + "=" + tmp.join(","));
+        } else if (tmp.length !== 0) {
+          result.push(tmp.join(","));
+        }
+      }
+    }
+  } else {
+    if (operator === ";") {
+      if (isDefined(value)) {
+        result.push(encodeUnreserved(key));
+      }
+    } else if (value === "" && (operator === "&" || operator === "?")) {
+      result.push(encodeUnreserved(key) + "=");
+    } else if (value === "") {
+      result.push("");
+    }
+  }
+
+  return result;
+}
+
+function parseUrl(template) {
+  return {
+    expand: expand.bind(null, template)
+  };
+}
+
+function expand(template, context) {
+  var operators = ["+", "#", ".", "/", ";", "?", "&"];
+  return template.replace(/\{([^\{\}]+)\}|([^\{\}]+)/g, function (_, expression, literal) {
+    if (expression) {
+      let operator = "";
+      const values = [];
+
+      if (operators.indexOf(expression.charAt(0)) !== -1) {
+        operator = expression.charAt(0);
+        expression = expression.substr(1);
+      }
+
+      expression.split(/,/g).forEach(function (variable) {
+        var tmp = /([^:\*]*)(?::(\d+)|(\*))?/.exec(variable);
+        values.push(getValues(context, operator, tmp[1], tmp[2] || tmp[3]));
+      });
+
+      if (operator && operator !== "+") {
+        var separator = ",";
+
+        if (operator === "?") {
+          separator = "&";
+        } else if (operator !== "#") {
+          separator = operator;
+        }
+
+        return (values.length !== 0 ? operator : "") + values.join(separator);
+      } else {
+        return values.join(",");
+      }
+    } else {
+      return encodeReserved(literal);
+    }
+  });
+}
+
+function parse(options) {
+  // https://fetch.spec.whatwg.org/#methods
+  let method = options.method.toUpperCase(); // replace :varname with {varname} to make it RFC 6570 compatible
+
+  let url = (options.url || "/").replace(/:([a-z]\w+)/g, "{+$1}");
+  let headers = Object.assign({}, options.headers);
+  let body;
+  let parameters = omit(options, ["method", "baseUrl", "url", "headers", "request", "mediaType"]); // extract variable names from URL to calculate remaining variables later
+
+  const urlVariableNames = extractUrlVariableNames(url);
+  url = parseUrl(url).expand(parameters);
+
+  if (!/^http/.test(url)) {
+    url = options.baseUrl + url;
+  }
+
+  const omittedParameters = Object.keys(options).filter(option => urlVariableNames.includes(option)).concat("baseUrl");
+  const remainingParameters = omit(parameters, omittedParameters);
+  const isBinaryRequset = /application\/octet-stream/i.test(headers.accept);
+
+  if (!isBinaryRequset) {
+    if (options.mediaType.format) {
+      // e.g. application/vnd.github.v3+json => application/vnd.github.v3.raw
+      headers.accept = headers.accept.split(/,/).map(preview => preview.replace(/application\/vnd(\.\w+)(\.v3)?(\.\w+)?(\+json)?$/, `application/vnd$1$2.${options.mediaType.format}`)).join(",");
+    }
+
+    if (options.mediaType.previews.length) {
+      const previewsFromAcceptHeader = headers.accept.match(/[\w-]+(?=-preview)/g) || [];
+      headers.accept = previewsFromAcceptHeader.concat(options.mediaType.previews).map(preview => {
+        const format = options.mediaType.format ? `.${options.mediaType.format}` : "+json";
+        return `application/vnd.github.${preview}-preview${format}`;
+      }).join(",");
+    }
+  } // for GET/HEAD requests, set URL query parameters from remaining parameters
+  // for PATCH/POST/PUT/DELETE requests, set request body from remaining parameters
+
+
+  if (["GET", "HEAD"].includes(method)) {
+    url = addQueryParameters(url, remainingParameters);
+  } else {
+    if ("data" in remainingParameters) {
+      body = remainingParameters.data;
+    } else {
+      if (Object.keys(remainingParameters).length) {
+        body = remainingParameters;
+      } else {
+        headers["content-length"] = 0;
+      }
+    }
+  } // default content-type for JSON if body is set
+
+
+  if (!headers["content-type"] && typeof body !== "undefined") {
+    headers["content-type"] = "application/json; charset=utf-8";
+  } // GitHub expects 'content-length: 0' header for PUT/PATCH requests without body.
+  // fetch does not allow to set `content-length` header, but we can set body to an empty string
+
+
+  if (["PATCH", "PUT"].includes(method) && typeof body === "undefined") {
+    body = "";
+  } // Only return body/request keys if present
+
+
+  return Object.assign({
+    method,
+    url,
+    headers
+  }, typeof body !== "undefined" ? {
+    body
+  } : null, options.request ? {
+    request: options.request
+  } : null);
+}
+
+function endpointWithDefaults(defaults, route, options) {
+  return parse(merge(defaults, route, options));
+}
+
+function withDefaults(oldDefaults, newDefaults) {
+  const DEFAULTS = merge(oldDefaults, newDefaults);
+  const endpoint = endpointWithDefaults.bind(null, DEFAULTS);
+  return Object.assign(endpoint, {
+    DEFAULTS,
+    defaults: withDefaults.bind(null, DEFAULTS),
+    merge: merge.bind(null, DEFAULTS),
+    parse
+  });
+}
+
+const VERSION = "6.0.3";
+
+const userAgent = `octokit-endpoint.js/${VERSION} ${universalUserAgent.getUserAgent()}`; // DEFAULTS has all properties set that EndpointOptions has, except url.
+// So we use RequestParameters and add method as additional required property.
+
+const DEFAULTS = {
+  method: "GET",
+  baseUrl: "https://api.github.com",
+  headers: {
+    accept: "application/vnd.github.v3+json",
+    "user-agent": userAgent
+  },
+  mediaType: {
+    format: "",
+    previews: []
+  }
+};
+
+const endpoint = withDefaults(null, DEFAULTS);
+
+exports.endpoint = endpoint;
+//# sourceMappingURL=index.js.map
+
+
+/***/ }),
 /* 386 */,
 /* 387 */
 /***/ (function(__unusedmodule, exports, __webpack_require__) {
@@ -56962,7 +61179,7 @@ if (false) {}
 Object.defineProperty(exports, "__esModule", { value: true });
 const Joi = __webpack_require__(274);
 const didYouMean = __webpack_require__(82);
-const kindOf = __webpack_require__(224);
+const kindOf = __webpack_require__(341);
 const validationErrors = {
     INVALID_MOVEMENT_TYPE: (typeName) => {
         return `"${typeName}" is not a valid type for field movement. Expected "string".`;
@@ -57082,61 +61299,124 @@ exports.toggle = function (force) {
 /* 389 */
 /***/ (function(module, __unusedexports, __webpack_require__) {
 
-var baseTimes = __webpack_require__(6),
-    isArguments = __webpack_require__(460),
-    isArray = __webpack_require__(143),
-    isBuffer = __webpack_require__(408),
-    isIndex = __webpack_require__(160),
-    isTypedArray = __webpack_require__(850);
+"use strict";
 
-/** Used for built-in method references. */
-var objectProto = Object.prototype;
 
-/** Used to check objects for own properties. */
-var hasOwnProperty = objectProto.hasOwnProperty;
+const fs = __webpack_require__(747);
+const shebangCommand = __webpack_require__(866);
 
-/**
- * Creates an array of the enumerable property names of the array-like `value`.
- *
- * @private
- * @param {*} value The value to query.
- * @param {boolean} inherited Specify returning inherited property names.
- * @returns {Array} Returns the array of property names.
- */
-function arrayLikeKeys(value, inherited) {
-  var isArr = isArray(value),
-      isArg = !isArr && isArguments(value),
-      isBuff = !isArr && !isArg && isBuffer(value),
-      isType = !isArr && !isArg && !isBuff && isTypedArray(value),
-      skipIndexes = isArr || isArg || isBuff || isType,
-      result = skipIndexes ? baseTimes(value.length, String) : [],
-      length = result.length;
+function readShebang(command) {
+    // Read the first 150 bytes from the file
+    const size = 150;
+    let buffer;
 
-  for (var key in value) {
-    if ((inherited || hasOwnProperty.call(value, key)) &&
-        !(skipIndexes && (
-           // Safari 9 has enumerable `arguments.length` in strict mode.
-           key == 'length' ||
-           // Node.js 0.10 has enumerable non-index properties on buffers.
-           (isBuff && (key == 'offset' || key == 'parent')) ||
-           // PhantomJS 2 has enumerable non-index properties on typed arrays.
-           (isType && (key == 'buffer' || key == 'byteLength' || key == 'byteOffset')) ||
-           // Skip index properties.
-           isIndex(key, length)
-        ))) {
-      result.push(key);
+    if (Buffer.alloc) {
+        // Node.js v4.5+ / v5.10+
+        buffer = Buffer.alloc(size);
+    } else {
+        // Old Node.js API
+        buffer = new Buffer(size);
+        buffer.fill(0); // zero-fill
     }
-  }
-  return result;
+
+    let fd;
+
+    try {
+        fd = fs.openSync(command, 'r');
+        fs.readSync(fd, buffer, 0, size, 0);
+        fs.closeSync(fd);
+    } catch (e) { /* Empty */ }
+
+    // Attempt to extract shebang (null is returned if not a shebang)
+    return shebangCommand(buffer.toString());
 }
 
-module.exports = arrayLikeKeys;
+module.exports = readShebang;
 
 
 /***/ }),
 /* 390 */,
 /* 391 */,
-/* 392 */,
+/* 392 */
+/***/ (function(module) {
+
+"use strict";
+
+function arrayMove(src, srcIndex, dst, dstIndex, len) {
+    for (var j = 0; j < len; ++j) {
+        dst[j + dstIndex] = src[j + srcIndex];
+        src[j + srcIndex] = void 0;
+    }
+}
+
+function Queue(capacity) {
+    this._capacity = capacity;
+    this._length = 0;
+    this._front = 0;
+}
+
+Queue.prototype._willBeOverCapacity = function (size) {
+    return this._capacity < size;
+};
+
+Queue.prototype._pushOne = function (arg) {
+    var length = this.length();
+    this._checkCapacity(length + 1);
+    var i = (this._front + length) & (this._capacity - 1);
+    this[i] = arg;
+    this._length = length + 1;
+};
+
+Queue.prototype.push = function (fn, receiver, arg) {
+    var length = this.length() + 3;
+    if (this._willBeOverCapacity(length)) {
+        this._pushOne(fn);
+        this._pushOne(receiver);
+        this._pushOne(arg);
+        return;
+    }
+    var j = this._front + length - 3;
+    this._checkCapacity(length);
+    var wrapMask = this._capacity - 1;
+    this[(j + 0) & wrapMask] = fn;
+    this[(j + 1) & wrapMask] = receiver;
+    this[(j + 2) & wrapMask] = arg;
+    this._length = length;
+};
+
+Queue.prototype.shift = function () {
+    var front = this._front,
+        ret = this[front];
+
+    this[front] = undefined;
+    this._front = (front + 1) & (this._capacity - 1);
+    this._length--;
+    return ret;
+};
+
+Queue.prototype.length = function () {
+    return this._length;
+};
+
+Queue.prototype._checkCapacity = function (size) {
+    if (this._capacity < size) {
+        this._resizeTo(this._capacity << 1);
+    }
+};
+
+Queue.prototype._resizeTo = function (capacity) {
+    var oldCapacity = this._capacity;
+    this._capacity = capacity;
+    var front = this._front;
+    var length = this._length;
+    var moveItemsCount = (front + length) & (oldCapacity - 1);
+    arrayMove(this, 0, this, oldCapacity, moveItemsCount);
+};
+
+module.exports = Queue;
+
+
+/***/ }),
 /* 393 */
 /***/ (function(module) {
 
@@ -57259,7 +61539,7 @@ Prompt.prototype.onKeypress = function () {
 /* 396 */
 /***/ (function(module, __unusedexports, __webpack_require__) {
 
-var root = __webpack_require__(824);
+var root = __webpack_require__(66);
 
 /** Used to detect overreaching core-js shims. */
 var coreJsData = root['__core-js_shared__'];
@@ -57391,12 +61671,106 @@ module.exports.detectFileSync = function(filepath, opts) {
 
 
 /***/ }),
-/* 398 */,
+/* 398 */
+/***/ (function(__unusedmodule, exports, __webpack_require__) {
+
+"use strict";
+
+Object.defineProperty(exports, "__esModule", { value: true });
+const Joi = __webpack_require__(274);
+const didYouMean = __webpack_require__(82);
+const kindOf = __webpack_require__(341);
+const validationErrors = {
+    INVALID_PROPERTY_NAME: (propName, article, typeName) => {
+        return `"${propName}" is not a valid property name for ${article} ${typeName}.`;
+    },
+    INVALID_PROPERTY_NAME_WITH_SUGGESTION: (propName, article, typeName, suggestion) => {
+        return `${validationErrors.INVALID_PROPERTY_NAME(propName, article, typeName)} Did you mean "${suggestion}"?`;
+    },
+    INVALID_PROPERTY_TYPE: (propName, typeName, actualType, expectedType) => {
+        return `"${actualType}" is not a valid type for the ${typeName} property "${propName}". Expected "${expectedType}".`;
+    },
+    INVALID_VALUE_IN_ALTERNATIVES: (propName, typeName, value, schemaInnerMatches) => {
+        const expectedTypes = schemaInnerMatches.map((match) => {
+            const validsSet = match.schema._valids._set;
+            return validsSet.length > 0 ? `${match.schema._type} value ${validsSet.map(validValue => `"${validValue}"`).join(' or ')}` : `type ${match.schema._type}`;
+        });
+        return `"${value}" is not a valid value for the ${typeName} property "${propName}". Expected ${expectedTypes.join(' or ')}.`;
+    }
+};
+/*
+  Abstract Base Class for schema validation of steps
+  Needs getters for `schema` and `displayName` implemented in subclasses
+*/
+class SchemaValidator {
+    get validationErrors() {
+        return validationErrors;
+    }
+    get propertyNameToValidate() {
+        return 'props';
+    }
+    get schema() {
+        return {};
+    }
+    validate(intent) {
+        const step = intent.toRaw();
+        const validations = this.schema;
+        const validationErrors = this.validationErrors;
+        const displayName = this.displayName;
+        const article = this.article;
+        const errors = [];
+        const propertyToValidate = step.payload[this.propertyNameToValidate];
+        const propNames = Object.keys(propertyToValidate);
+        const validProps = Object.keys(validations);
+        for (const propName of propNames) {
+            if (!validProps.includes(propName)) {
+                let message;
+                const suggestion = didYouMean(propName, validProps);
+                if (suggestion) {
+                    message = validationErrors.INVALID_PROPERTY_NAME_WITH_SUGGESTION(propName, article, displayName, suggestion);
+                }
+                else {
+                    message = validationErrors.INVALID_PROPERTY_NAME(propName, article, displayName);
+                }
+                errors.push({
+                    type: 'InvalidProperty',
+                    message,
+                    details: { intent }
+                });
+            }
+            else {
+                const schema = validations[propName];
+                const { value, error } = Joi.validate(propertyToValidate[propName], schema);
+                if (error) {
+                    let expectedType = schema._type;
+                    // Joi's schema type for a function is `object` with a `func` flag
+                    if (schema._flags.func) {
+                        expectedType = 'function';
+                    }
+                    const actualType = kindOf(value);
+                    const message = expectedType === 'alternatives' ?
+                        validationErrors.INVALID_VALUE_IN_ALTERNATIVES(propName, displayName, error._object, schema._inner.matches)
+                        : validationErrors.INVALID_PROPERTY_TYPE(propName, displayName, actualType, expectedType);
+                    errors.push({
+                        type: 'InvalidType',
+                        message,
+                        details: { intent }
+                    });
+                }
+            }
+        }
+        return errors;
+    }
+}
+exports.default = SchemaValidator;
+//# sourceMappingURL=schema-validator.js.map
+
+/***/ }),
 /* 399 */,
 /* 400 */
 /***/ (function(module, exports, __webpack_require__) {
 
-var Stream = __webpack_require__(413)
+var Stream = __webpack_require__(794)
 
 // through
 //
@@ -57723,7 +62097,7 @@ module.exports = internals.rfc3986;
 /***/ (function(module, exports, __webpack_require__) {
 
 /* module decorator */ module = __webpack_require__.nmd(module);
-var root = __webpack_require__(824),
+var root = __webpack_require__(66),
     stubFalse = __webpack_require__(183);
 
 /** Detect free variable `exports`. */
@@ -58050,7 +62424,7 @@ formatters.O = function (v) {
 /***/ (function(module, __unusedexports, __webpack_require__) {
 
 var baseGetTag = __webpack_require__(190),
-    isLength = __webpack_require__(611),
+    isLength = __webpack_require__(198),
     isObjectLike = __webpack_require__(154);
 
 /** `Object#toString` result references. */
@@ -58113,9 +62487,10 @@ module.exports = baseIsTypedArray;
 
 /***/ }),
 /* 413 */
-/***/ (function(module) {
+/***/ (function(module, __unusedexports, __webpack_require__) {
 
-module.exports = require("stream");
+module.exports = __webpack_require__(141);
+
 
 /***/ }),
 /* 414 */
@@ -58169,7 +62544,7 @@ module.exports = require("crypto");
 
 // Load modules
 
-const Hoek = __webpack_require__(11);
+const Hoek = __webpack_require__(970);
 const Language = __webpack_require__(870);
 
 
@@ -58785,11 +63160,56 @@ exports.default = SpaceAccessError;
 
 /***/ }),
 /* 426 */,
-/* 427 */,
+/* 427 */
+/***/ (function(module, __unusedexports, __webpack_require__) {
+
+"use strict";
+
+// Older verions of Node.js might not have `util.getSystemErrorName()`.
+// In that case, fall back to a deprecated internal.
+const util = __webpack_require__(669);
+
+let uv;
+
+if (typeof util.getSystemErrorName === 'function') {
+	module.exports = util.getSystemErrorName;
+} else {
+	try {
+		uv = process.binding('uv');
+
+		if (typeof uv.errname !== 'function') {
+			throw new TypeError('uv.errname is not a function');
+		}
+	} catch (err) {
+		console.error('execa/lib/errname: unable to establish process.binding(\'uv\')', err);
+		uv = null;
+	}
+
+	module.exports = code => errname(uv, code);
+}
+
+// Used for testing the fallback behavior
+module.exports.__test__ = errname;
+
+function errname(uv, code) {
+	if (uv) {
+		return uv.errname(code);
+	}
+
+	if (!(code < 0)) {
+		throw new Error('err >= 0');
+	}
+
+	return `Unknown system error ${code}`;
+}
+
+
+
+/***/ }),
 /* 428 */
 /***/ (function(module, __unusedexports, __webpack_require__) {
 
-var baseToString = __webpack_require__(280);
+var baseToString = __webpack_require__(68);
 
 /**
  * Converts `value` to a string. An empty string is returned for `null`
@@ -58874,17 +63294,24 @@ exports.default = EditorInterfaceCopyIntent;
 
 "use strict";
 
+var __importStar = (this && this.__importStar) || function (mod) {
+    if (mod && mod.__esModule) return mod;
+    var result = {};
+    if (mod != null) for (var k in mod) if (Object.hasOwnProperty.call(mod, k)) result[k] = mod[k];
+    result["default"] = mod;
+    return result;
+};
 Object.defineProperty(exports, "__esModule", { value: true });
-const os = __webpack_require__(87);
+const os = __importStar(__webpack_require__(87));
 /**
  * Commands
  *
  * Command Format:
- *   ##[name key=value;key=value]message
+ *   ::name key=value,key=value::message
  *
  * Examples:
- *   ##[warning]This is the user warning message
- *   ##[set-secret name=mypassword]definitelyNotAPassword!
+ *   ::warning::This is the message
+ *   ::set-env name=MY_VAR::some value
  */
 function issueCommand(command, properties, message) {
     const cmd = new Command(command, properties, message);
@@ -58909,34 +63336,53 @@ class Command {
         let cmdStr = CMD_STRING + this.command;
         if (this.properties && Object.keys(this.properties).length > 0) {
             cmdStr += ' ';
+            let first = true;
             for (const key in this.properties) {
                 if (this.properties.hasOwnProperty(key)) {
                     const val = this.properties[key];
                     if (val) {
-                        // safely append the val - avoid blowing up when attempting to
-                        // call .replace() if message is not a string for some reason
-                        cmdStr += `${key}=${escape(`${val || ''}`)},`;
+                        if (first) {
+                            first = false;
+                        }
+                        else {
+                            cmdStr += ',';
+                        }
+                        cmdStr += `${key}=${escapeProperty(val)}`;
                     }
                 }
             }
         }
-        cmdStr += CMD_STRING;
-        // safely append the message - avoid blowing up when attempting to
-        // call .replace() if message is not a string for some reason
-        const message = `${this.message || ''}`;
-        cmdStr += escapeData(message);
+        cmdStr += `${CMD_STRING}${escapeData(this.message)}`;
         return cmdStr;
     }
 }
-function escapeData(s) {
-    return s.replace(/\r/g, '%0D').replace(/\n/g, '%0A');
+/**
+ * Sanitizes an input into a string so it can be passed into issueCommand safely
+ * @param input input to sanitize into a string
+ */
+function toCommandValue(input) {
+    if (input === null || input === undefined) {
+        return '';
+    }
+    else if (typeof input === 'string' || input instanceof String) {
+        return input;
+    }
+    return JSON.stringify(input);
 }
-function escape(s) {
-    return s
+exports.toCommandValue = toCommandValue;
+function escapeData(s) {
+    return toCommandValue(s)
+        .replace(/%/g, '%25')
+        .replace(/\r/g, '%0D')
+        .replace(/\n/g, '%0A');
+}
+function escapeProperty(s) {
+    return toCommandValue(s)
+        .replace(/%/g, '%25')
         .replace(/\r/g, '%0D')
         .replace(/\n/g, '%0A')
-        .replace(/]/g, '%5D')
-        .replace(/;/g, '%3B');
+        .replace(/:/g, '%3A')
+        .replace(/,/g, '%2C');
 }
 //# sourceMappingURL=command.js.map
 
@@ -58953,7 +63399,7 @@ function escape(s) {
 
 // Load modules
 
-const Hoek = __webpack_require__(11);
+const Hoek = __webpack_require__(970);
 const Ref = __webpack_require__(953);
 
 // Type modules are delay-loaded to prevent circular dependencies
@@ -58963,7 +63409,7 @@ const Ref = __webpack_require__(953);
 
 const internals = {
     any: null,
-    date: __webpack_require__(794),
+    date: __webpack_require__(847),
     string: __webpack_require__(979),
     number: __webpack_require__(383),
     boolean: __webpack_require__(21),
@@ -59078,7 +63524,7 @@ exports.default = contentTypeSchema;
 "use strict";
 
 Object.defineProperty(exports, "__esModule", { value: true });
-const schema_validator_1 = __webpack_require__(536);
+const schema_validator_1 = __webpack_require__(398);
 const Joi = __webpack_require__(274);
 class ContentTypeUpdateStepValidator extends schema_validator_1.default {
     constructor() {
@@ -59103,7 +63549,188 @@ exports.default = ContentTypeUpdateStepValidator;
 /***/ }),
 /* 446 */,
 /* 447 */,
-/* 448 */,
+/* 448 */
+/***/ (function(__unusedmodule, exports, __webpack_require__) {
+
+"use strict";
+
+
+Object.defineProperty(exports, '__esModule', { value: true });
+
+var universalUserAgent = __webpack_require__(796);
+var beforeAfterHook = __webpack_require__(523);
+var request = __webpack_require__(753);
+var graphql = __webpack_require__(898);
+var authToken = __webpack_require__(813);
+
+function _defineProperty(obj, key, value) {
+  if (key in obj) {
+    Object.defineProperty(obj, key, {
+      value: value,
+      enumerable: true,
+      configurable: true,
+      writable: true
+    });
+  } else {
+    obj[key] = value;
+  }
+
+  return obj;
+}
+
+function ownKeys(object, enumerableOnly) {
+  var keys = Object.keys(object);
+
+  if (Object.getOwnPropertySymbols) {
+    var symbols = Object.getOwnPropertySymbols(object);
+    if (enumerableOnly) symbols = symbols.filter(function (sym) {
+      return Object.getOwnPropertyDescriptor(object, sym).enumerable;
+    });
+    keys.push.apply(keys, symbols);
+  }
+
+  return keys;
+}
+
+function _objectSpread2(target) {
+  for (var i = 1; i < arguments.length; i++) {
+    var source = arguments[i] != null ? arguments[i] : {};
+
+    if (i % 2) {
+      ownKeys(Object(source), true).forEach(function (key) {
+        _defineProperty(target, key, source[key]);
+      });
+    } else if (Object.getOwnPropertyDescriptors) {
+      Object.defineProperties(target, Object.getOwnPropertyDescriptors(source));
+    } else {
+      ownKeys(Object(source)).forEach(function (key) {
+        Object.defineProperty(target, key, Object.getOwnPropertyDescriptor(source, key));
+      });
+    }
+  }
+
+  return target;
+}
+
+const VERSION = "2.5.4";
+
+class Octokit {
+  constructor(options = {}) {
+    const hook = new beforeAfterHook.Collection();
+    const requestDefaults = {
+      baseUrl: request.request.endpoint.DEFAULTS.baseUrl,
+      headers: {},
+      request: Object.assign({}, options.request, {
+        hook: hook.bind(null, "request")
+      }),
+      mediaType: {
+        previews: [],
+        format: ""
+      }
+    }; // prepend default user agent with `options.userAgent` if set
+
+    requestDefaults.headers["user-agent"] = [options.userAgent, `octokit-core.js/${VERSION} ${universalUserAgent.getUserAgent()}`].filter(Boolean).join(" ");
+
+    if (options.baseUrl) {
+      requestDefaults.baseUrl = options.baseUrl;
+    }
+
+    if (options.previews) {
+      requestDefaults.mediaType.previews = options.previews;
+    }
+
+    if (options.timeZone) {
+      requestDefaults.headers["time-zone"] = options.timeZone;
+    }
+
+    this.request = request.request.defaults(requestDefaults);
+    this.graphql = graphql.withCustomRequest(this.request).defaults(_objectSpread2(_objectSpread2({}, requestDefaults), {}, {
+      baseUrl: requestDefaults.baseUrl.replace(/\/api\/v3$/, "/api")
+    }));
+    this.log = Object.assign({
+      debug: () => {},
+      info: () => {},
+      warn: console.warn.bind(console),
+      error: console.error.bind(console)
+    }, options.log);
+    this.hook = hook; // (1) If neither `options.authStrategy` nor `options.auth` are set, the `octokit` instance
+    //     is unauthenticated. The `this.auth()` method is a no-op and no request hook is registred.
+    // (2) If only `options.auth` is set, use the default token authentication strategy.
+    // (3) If `options.authStrategy` is set then use it and pass in `options.auth`. Always pass own request as many strategies accept a custom request instance.
+    // TODO: type `options.auth` based on `options.authStrategy`.
+
+    if (!options.authStrategy) {
+      if (!options.auth) {
+        // (1)
+        this.auth = async () => ({
+          type: "unauthenticated"
+        });
+      } else {
+        // (2)
+        const auth = authToken.createTokenAuth(options.auth); // @ts-ignore  ¯\_(ツ)_/¯
+
+        hook.wrap("request", auth.hook);
+        this.auth = auth;
+      }
+    } else {
+      const auth = options.authStrategy(Object.assign({
+        request: this.request
+      }, options.auth)); // @ts-ignore  ¯\_(ツ)_/¯
+
+      hook.wrap("request", auth.hook);
+      this.auth = auth;
+    } // apply plugins
+    // https://stackoverflow.com/a/16345172
+
+
+    const classConstructor = this.constructor;
+    classConstructor.plugins.forEach(plugin => {
+      Object.assign(this, plugin(this, options));
+    });
+  }
+
+  static defaults(defaults) {
+    const OctokitWithDefaults = class extends this {
+      constructor(...args) {
+        const options = args[0] || {};
+        super(Object.assign({}, defaults, options, options.userAgent && defaults.userAgent ? {
+          userAgent: `${options.userAgent} ${defaults.userAgent}`
+        } : null));
+      }
+
+    };
+    return OctokitWithDefaults;
+  }
+  /**
+   * Attach a plugin (or many) to your Octokit instance.
+   *
+   * @example
+   * const API = Octokit.plugin(plugin1, plugin2, plugin3, ...)
+   */
+
+
+  static plugin(p1, ...p2) {
+    var _a;
+
+    if (p1 instanceof Array) {
+      console.warn(["Passing an array of plugins to Octokit.plugin() has been deprecated.", "Instead of:", "  Octokit.plugin([plugin1, plugin2, ...])", "Use:", "  Octokit.plugin(plugin1, plugin2, ...)"].join("\n"));
+    }
+
+    const currentPlugins = this.plugins;
+    let newPlugins = [...(p1 instanceof Array ? p1 : [p1]), ...p2];
+    const NewOctokit = (_a = class extends this {}, _a.plugins = currentPlugins.concat(newPlugins.filter(plugin => !currentPlugins.includes(plugin))), _a);
+    return NewOctokit;
+  }
+
+}
+Octokit.VERSION = VERSION;
+Octokit.plugins = [];
+
+exports.Octokit = Octokit;
+//# sourceMappingURL=index.js.map
+
+
+/***/ }),
 /* 449 */,
 /* 450 */,
 /* 451 */
@@ -59117,7 +63744,7 @@ exports.default = ContentTypeUpdateStepValidator;
 const Any = __webpack_require__(227);
 const Cast = __webpack_require__(436);
 const Ref = __webpack_require__(953);
-const Hoek = __webpack_require__(11);
+const Hoek = __webpack_require__(970);
 
 
 // Declare internals
@@ -59773,90 +64400,1739 @@ module.exports = new internals.Array();
 /***/ }),
 /* 452 */,
 /* 453 */
-/***/ (function(__unusedmodule, exports, __webpack_require__) {
+/***/ (function(module, __unusedexports, __webpack_require__) {
 
-"use strict";
+var once = __webpack_require__(969)
+var eos = __webpack_require__(9)
+var fs = __webpack_require__(747) // we only need fs to get the ReadStream and WriteStream prototypes
 
-Object.defineProperty(exports, "__esModule", { value: true });
-const action_1 = __webpack_require__(64);
-class EntryFieldRenameAction extends action_1.APIAction {
-    constructor(contentTypeId, fieldId, props) {
-        super();
-        this.contentTypeId = contentTypeId;
-        this.fieldId = fieldId;
-        this.props = props;
-    }
-    async applyTo(api) {
-        const entries = await api.getEntriesForContentType(this.contentTypeId);
-        for (const entry of entries) {
-            const { newId } = this.props;
-            const field = entry.fields[this.fieldId];
-            const newFields = Object.assign({}, entry.fields, { [newId]: field });
-            delete newFields[this.fieldId];
-            entry.fields = newFields;
-        }
-    }
+var noop = function () {}
+var ancient = /^v?\.0/.test(process.version)
+
+var isFn = function (fn) {
+  return typeof fn === 'function'
 }
-exports.EntryFieldRenameAction = EntryFieldRenameAction;
-//# sourceMappingURL=entry-field-rename.js.map
+
+var isFS = function (stream) {
+  if (!ancient) return false // newer node version do not need to care about fs is a special way
+  if (!fs) return false // browser
+  return (stream instanceof (fs.ReadStream || noop) || stream instanceof (fs.WriteStream || noop)) && isFn(stream.close)
+}
+
+var isRequest = function (stream) {
+  return stream.setHeader && isFn(stream.abort)
+}
+
+var destroyer = function (stream, reading, writing, callback) {
+  callback = once(callback)
+
+  var closed = false
+  stream.on('close', function () {
+    closed = true
+  })
+
+  eos(stream, {readable: reading, writable: writing}, function (err) {
+    if (err) return callback(err)
+    closed = true
+    callback()
+  })
+
+  var destroyed = false
+  return function (err) {
+    if (closed) return
+    if (destroyed) return
+    destroyed = true
+
+    if (isFS(stream)) return stream.close(noop) // use close for fs streams to avoid fd leaks
+    if (isRequest(stream)) return stream.abort() // request.destroy just do .end - .abort is what we want
+
+    if (isFn(stream.destroy)) return stream.destroy()
+
+    callback(err || new Error('stream was destroyed'))
+  }
+}
+
+var call = function (fn) {
+  fn()
+}
+
+var pipe = function (from, to) {
+  return from.pipe(to)
+}
+
+var pump = function () {
+  var streams = Array.prototype.slice.call(arguments)
+  var callback = isFn(streams[streams.length - 1] || noop) && streams.pop() || noop
+
+  if (Array.isArray(streams[0])) streams = streams[0]
+  if (streams.length < 2) throw new Error('pump requires two streams per minimum')
+
+  var error
+  var destroys = streams.map(function (stream, i) {
+    var reading = i < streams.length - 1
+    var writing = i > 0
+    return destroyer(stream, reading, writing, function (err) {
+      if (!error) error = err
+      if (err) destroys.forEach(call)
+      if (reading) return
+      destroys.forEach(call)
+      callback(error)
+    })
+  })
+
+  return streams.reduce(pipe)
+}
+
+module.exports = pump
+
 
 /***/ }),
 /* 454 */
-/***/ (function(__unusedmodule, exports) {
+/***/ (function(module, exports, __webpack_require__) {
 
 "use strict";
 
 
-var BOMChar = '\uFEFF';
+Object.defineProperty(exports, '__esModule', { value: true });
 
-exports.PrependBOM = PrependBOMWrapper
-function PrependBOMWrapper(encoder, options) {
-    this.encoder = encoder;
-    this.addBOM = true;
+function _interopDefault (ex) { return (ex && (typeof ex === 'object') && 'default' in ex) ? ex['default'] : ex; }
+
+var Stream = _interopDefault(__webpack_require__(794));
+var http = _interopDefault(__webpack_require__(605));
+var Url = _interopDefault(__webpack_require__(835));
+var https = _interopDefault(__webpack_require__(211));
+var zlib = _interopDefault(__webpack_require__(761));
+
+// Based on https://github.com/tmpvar/jsdom/blob/aa85b2abf07766ff7bf5c1f6daafb3726f2f2db5/lib/jsdom/living/blob.js
+
+// fix for "Readable" isn't a named export issue
+const Readable = Stream.Readable;
+
+const BUFFER = Symbol('buffer');
+const TYPE = Symbol('type');
+
+class Blob {
+	constructor() {
+		this[TYPE] = '';
+
+		const blobParts = arguments[0];
+		const options = arguments[1];
+
+		const buffers = [];
+		let size = 0;
+
+		if (blobParts) {
+			const a = blobParts;
+			const length = Number(a.length);
+			for (let i = 0; i < length; i++) {
+				const element = a[i];
+				let buffer;
+				if (element instanceof Buffer) {
+					buffer = element;
+				} else if (ArrayBuffer.isView(element)) {
+					buffer = Buffer.from(element.buffer, element.byteOffset, element.byteLength);
+				} else if (element instanceof ArrayBuffer) {
+					buffer = Buffer.from(element);
+				} else if (element instanceof Blob) {
+					buffer = element[BUFFER];
+				} else {
+					buffer = Buffer.from(typeof element === 'string' ? element : String(element));
+				}
+				size += buffer.length;
+				buffers.push(buffer);
+			}
+		}
+
+		this[BUFFER] = Buffer.concat(buffers);
+
+		let type = options && options.type !== undefined && String(options.type).toLowerCase();
+		if (type && !/[^\u0020-\u007E]/.test(type)) {
+			this[TYPE] = type;
+		}
+	}
+	get size() {
+		return this[BUFFER].length;
+	}
+	get type() {
+		return this[TYPE];
+	}
+	text() {
+		return Promise.resolve(this[BUFFER].toString());
+	}
+	arrayBuffer() {
+		const buf = this[BUFFER];
+		const ab = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
+		return Promise.resolve(ab);
+	}
+	stream() {
+		const readable = new Readable();
+		readable._read = function () {};
+		readable.push(this[BUFFER]);
+		readable.push(null);
+		return readable;
+	}
+	toString() {
+		return '[object Blob]';
+	}
+	slice() {
+		const size = this.size;
+
+		const start = arguments[0];
+		const end = arguments[1];
+		let relativeStart, relativeEnd;
+		if (start === undefined) {
+			relativeStart = 0;
+		} else if (start < 0) {
+			relativeStart = Math.max(size + start, 0);
+		} else {
+			relativeStart = Math.min(start, size);
+		}
+		if (end === undefined) {
+			relativeEnd = size;
+		} else if (end < 0) {
+			relativeEnd = Math.max(size + end, 0);
+		} else {
+			relativeEnd = Math.min(end, size);
+		}
+		const span = Math.max(relativeEnd - relativeStart, 0);
+
+		const buffer = this[BUFFER];
+		const slicedBuffer = buffer.slice(relativeStart, relativeStart + span);
+		const blob = new Blob([], { type: arguments[2] });
+		blob[BUFFER] = slicedBuffer;
+		return blob;
+	}
 }
 
-PrependBOMWrapper.prototype.write = function(str) {
-    if (this.addBOM) {
-        str = BOMChar + str;
-        this.addBOM = false;
-    }
+Object.defineProperties(Blob.prototype, {
+	size: { enumerable: true },
+	type: { enumerable: true },
+	slice: { enumerable: true }
+});
 
-    return this.encoder.write(str);
+Object.defineProperty(Blob.prototype, Symbol.toStringTag, {
+	value: 'Blob',
+	writable: false,
+	enumerable: false,
+	configurable: true
+});
+
+/**
+ * fetch-error.js
+ *
+ * FetchError interface for operational errors
+ */
+
+/**
+ * Create FetchError instance
+ *
+ * @param   String      message      Error message for human
+ * @param   String      type         Error type for machine
+ * @param   String      systemError  For Node.js system error
+ * @return  FetchError
+ */
+function FetchError(message, type, systemError) {
+  Error.call(this, message);
+
+  this.message = message;
+  this.type = type;
+
+  // when err.type is `system`, err.code contains system error code
+  if (systemError) {
+    this.code = this.errno = systemError.code;
+  }
+
+  // hide custom error implementation details from end-users
+  Error.captureStackTrace(this, this.constructor);
 }
 
-PrependBOMWrapper.prototype.end = function() {
-    return this.encoder.end();
+FetchError.prototype = Object.create(Error.prototype);
+FetchError.prototype.constructor = FetchError;
+FetchError.prototype.name = 'FetchError';
+
+let convert;
+try {
+	convert = __webpack_require__(18).convert;
+} catch (e) {}
+
+const INTERNALS = Symbol('Body internals');
+
+// fix an issue where "PassThrough" isn't a named export for node <10
+const PassThrough = Stream.PassThrough;
+
+/**
+ * Body mixin
+ *
+ * Ref: https://fetch.spec.whatwg.org/#body
+ *
+ * @param   Stream  body  Readable stream
+ * @param   Object  opts  Response options
+ * @return  Void
+ */
+function Body(body) {
+	var _this = this;
+
+	var _ref = arguments.length > 1 && arguments[1] !== undefined ? arguments[1] : {},
+	    _ref$size = _ref.size;
+
+	let size = _ref$size === undefined ? 0 : _ref$size;
+	var _ref$timeout = _ref.timeout;
+	let timeout = _ref$timeout === undefined ? 0 : _ref$timeout;
+
+	if (body == null) {
+		// body is undefined or null
+		body = null;
+	} else if (isURLSearchParams(body)) {
+		// body is a URLSearchParams
+		body = Buffer.from(body.toString());
+	} else if (isBlob(body)) ; else if (Buffer.isBuffer(body)) ; else if (Object.prototype.toString.call(body) === '[object ArrayBuffer]') {
+		// body is ArrayBuffer
+		body = Buffer.from(body);
+	} else if (ArrayBuffer.isView(body)) {
+		// body is ArrayBufferView
+		body = Buffer.from(body.buffer, body.byteOffset, body.byteLength);
+	} else if (body instanceof Stream) ; else {
+		// none of the above
+		// coerce to string then buffer
+		body = Buffer.from(String(body));
+	}
+	this[INTERNALS] = {
+		body,
+		disturbed: false,
+		error: null
+	};
+	this.size = size;
+	this.timeout = timeout;
+
+	if (body instanceof Stream) {
+		body.on('error', function (err) {
+			const error = err.name === 'AbortError' ? err : new FetchError(`Invalid response body while trying to fetch ${_this.url}: ${err.message}`, 'system', err);
+			_this[INTERNALS].error = error;
+		});
+	}
 }
 
+Body.prototype = {
+	get body() {
+		return this[INTERNALS].body;
+	},
 
-//------------------------------------------------------------------------------
+	get bodyUsed() {
+		return this[INTERNALS].disturbed;
+	},
 
-exports.StripBOM = StripBOMWrapper;
-function StripBOMWrapper(decoder, options) {
-    this.decoder = decoder;
-    this.pass = false;
-    this.options = options || {};
+	/**
+  * Decode response as ArrayBuffer
+  *
+  * @return  Promise
+  */
+	arrayBuffer() {
+		return consumeBody.call(this).then(function (buf) {
+			return buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
+		});
+	},
+
+	/**
+  * Return raw response as Blob
+  *
+  * @return Promise
+  */
+	blob() {
+		let ct = this.headers && this.headers.get('content-type') || '';
+		return consumeBody.call(this).then(function (buf) {
+			return Object.assign(
+			// Prevent copying
+			new Blob([], {
+				type: ct.toLowerCase()
+			}), {
+				[BUFFER]: buf
+			});
+		});
+	},
+
+	/**
+  * Decode response as json
+  *
+  * @return  Promise
+  */
+	json() {
+		var _this2 = this;
+
+		return consumeBody.call(this).then(function (buffer) {
+			try {
+				return JSON.parse(buffer.toString());
+			} catch (err) {
+				return Body.Promise.reject(new FetchError(`invalid json response body at ${_this2.url} reason: ${err.message}`, 'invalid-json'));
+			}
+		});
+	},
+
+	/**
+  * Decode response as text
+  *
+  * @return  Promise
+  */
+	text() {
+		return consumeBody.call(this).then(function (buffer) {
+			return buffer.toString();
+		});
+	},
+
+	/**
+  * Decode response as buffer (non-spec api)
+  *
+  * @return  Promise
+  */
+	buffer() {
+		return consumeBody.call(this);
+	},
+
+	/**
+  * Decode response as text, while automatically detecting the encoding and
+  * trying to decode to UTF-8 (non-spec api)
+  *
+  * @return  Promise
+  */
+	textConverted() {
+		var _this3 = this;
+
+		return consumeBody.call(this).then(function (buffer) {
+			return convertBody(buffer, _this3.headers);
+		});
+	}
+};
+
+// In browsers, all properties are enumerable.
+Object.defineProperties(Body.prototype, {
+	body: { enumerable: true },
+	bodyUsed: { enumerable: true },
+	arrayBuffer: { enumerable: true },
+	blob: { enumerable: true },
+	json: { enumerable: true },
+	text: { enumerable: true }
+});
+
+Body.mixIn = function (proto) {
+	for (const name of Object.getOwnPropertyNames(Body.prototype)) {
+		// istanbul ignore else: future proof
+		if (!(name in proto)) {
+			const desc = Object.getOwnPropertyDescriptor(Body.prototype, name);
+			Object.defineProperty(proto, name, desc);
+		}
+	}
+};
+
+/**
+ * Consume and convert an entire Body to a Buffer.
+ *
+ * Ref: https://fetch.spec.whatwg.org/#concept-body-consume-body
+ *
+ * @return  Promise
+ */
+function consumeBody() {
+	var _this4 = this;
+
+	if (this[INTERNALS].disturbed) {
+		return Body.Promise.reject(new TypeError(`body used already for: ${this.url}`));
+	}
+
+	this[INTERNALS].disturbed = true;
+
+	if (this[INTERNALS].error) {
+		return Body.Promise.reject(this[INTERNALS].error);
+	}
+
+	let body = this.body;
+
+	// body is null
+	if (body === null) {
+		return Body.Promise.resolve(Buffer.alloc(0));
+	}
+
+	// body is blob
+	if (isBlob(body)) {
+		body = body.stream();
+	}
+
+	// body is buffer
+	if (Buffer.isBuffer(body)) {
+		return Body.Promise.resolve(body);
+	}
+
+	// istanbul ignore if: should never happen
+	if (!(body instanceof Stream)) {
+		return Body.Promise.resolve(Buffer.alloc(0));
+	}
+
+	// body is stream
+	// get ready to actually consume the body
+	let accum = [];
+	let accumBytes = 0;
+	let abort = false;
+
+	return new Body.Promise(function (resolve, reject) {
+		let resTimeout;
+
+		// allow timeout on slow response body
+		if (_this4.timeout) {
+			resTimeout = setTimeout(function () {
+				abort = true;
+				reject(new FetchError(`Response timeout while trying to fetch ${_this4.url} (over ${_this4.timeout}ms)`, 'body-timeout'));
+			}, _this4.timeout);
+		}
+
+		// handle stream errors
+		body.on('error', function (err) {
+			if (err.name === 'AbortError') {
+				// if the request was aborted, reject with this Error
+				abort = true;
+				reject(err);
+			} else {
+				// other errors, such as incorrect content-encoding
+				reject(new FetchError(`Invalid response body while trying to fetch ${_this4.url}: ${err.message}`, 'system', err));
+			}
+		});
+
+		body.on('data', function (chunk) {
+			if (abort || chunk === null) {
+				return;
+			}
+
+			if (_this4.size && accumBytes + chunk.length > _this4.size) {
+				abort = true;
+				reject(new FetchError(`content size at ${_this4.url} over limit: ${_this4.size}`, 'max-size'));
+				return;
+			}
+
+			accumBytes += chunk.length;
+			accum.push(chunk);
+		});
+
+		body.on('end', function () {
+			if (abort) {
+				return;
+			}
+
+			clearTimeout(resTimeout);
+
+			try {
+				resolve(Buffer.concat(accum, accumBytes));
+			} catch (err) {
+				// handle streams that have accumulated too much data (issue #414)
+				reject(new FetchError(`Could not create Buffer from response body for ${_this4.url}: ${err.message}`, 'system', err));
+			}
+		});
+	});
 }
 
-StripBOMWrapper.prototype.write = function(buf) {
-    var res = this.decoder.write(buf);
-    if (this.pass || !res)
-        return res;
+/**
+ * Detect buffer encoding and convert to target encoding
+ * ref: http://www.w3.org/TR/2011/WD-html5-20110113/parsing.html#determining-the-character-encoding
+ *
+ * @param   Buffer  buffer    Incoming buffer
+ * @param   String  encoding  Target encoding
+ * @return  String
+ */
+function convertBody(buffer, headers) {
+	if (typeof convert !== 'function') {
+		throw new Error('The package `encoding` must be installed to use the textConverted() function');
+	}
 
-    if (res[0] === BOMChar) {
-        res = res.slice(1);
-        if (typeof this.options.stripBOM === 'function')
-            this.options.stripBOM();
-    }
+	const ct = headers.get('content-type');
+	let charset = 'utf-8';
+	let res, str;
 
-    this.pass = true;
-    return res;
+	// header
+	if (ct) {
+		res = /charset=([^;]*)/i.exec(ct);
+	}
+
+	// no charset in content type, peek at response body for at most 1024 bytes
+	str = buffer.slice(0, 1024).toString();
+
+	// html5
+	if (!res && str) {
+		res = /<meta.+?charset=(['"])(.+?)\1/i.exec(str);
+	}
+
+	// html4
+	if (!res && str) {
+		res = /<meta[\s]+?http-equiv=(['"])content-type\1[\s]+?content=(['"])(.+?)\2/i.exec(str);
+
+		if (res) {
+			res = /charset=(.*)/i.exec(res.pop());
+		}
+	}
+
+	// xml
+	if (!res && str) {
+		res = /<\?xml.+?encoding=(['"])(.+?)\1/i.exec(str);
+	}
+
+	// found charset
+	if (res) {
+		charset = res.pop();
+
+		// prevent decode issues when sites use incorrect encoding
+		// ref: https://hsivonen.fi/encoding-menu/
+		if (charset === 'gb2312' || charset === 'gbk') {
+			charset = 'gb18030';
+		}
+	}
+
+	// turn raw buffers into a single utf-8 buffer
+	return convert(buffer, 'UTF-8', charset).toString();
 }
 
-StripBOMWrapper.prototype.end = function() {
-    return this.decoder.end();
+/**
+ * Detect a URLSearchParams object
+ * ref: https://github.com/bitinn/node-fetch/issues/296#issuecomment-307598143
+ *
+ * @param   Object  obj     Object to detect by type or brand
+ * @return  String
+ */
+function isURLSearchParams(obj) {
+	// Duck-typing as a necessary condition.
+	if (typeof obj !== 'object' || typeof obj.append !== 'function' || typeof obj.delete !== 'function' || typeof obj.get !== 'function' || typeof obj.getAll !== 'function' || typeof obj.has !== 'function' || typeof obj.set !== 'function') {
+		return false;
+	}
+
+	// Brand-checking and more duck-typing as optional condition.
+	return obj.constructor.name === 'URLSearchParams' || Object.prototype.toString.call(obj) === '[object URLSearchParams]' || typeof obj.sort === 'function';
 }
 
+/**
+ * Check if `obj` is a W3C `Blob` object (which `File` inherits from)
+ * @param  {*} obj
+ * @return {boolean}
+ */
+function isBlob(obj) {
+	return typeof obj === 'object' && typeof obj.arrayBuffer === 'function' && typeof obj.type === 'string' && typeof obj.stream === 'function' && typeof obj.constructor === 'function' && typeof obj.constructor.name === 'string' && /^(Blob|File)$/.test(obj.constructor.name) && /^(Blob|File)$/.test(obj[Symbol.toStringTag]);
+}
+
+/**
+ * Clone body given Res/Req instance
+ *
+ * @param   Mixed  instance  Response or Request instance
+ * @return  Mixed
+ */
+function clone(instance) {
+	let p1, p2;
+	let body = instance.body;
+
+	// don't allow cloning a used body
+	if (instance.bodyUsed) {
+		throw new Error('cannot clone body after it is used');
+	}
+
+	// check that body is a stream and not form-data object
+	// note: we can't clone the form-data object without having it as a dependency
+	if (body instanceof Stream && typeof body.getBoundary !== 'function') {
+		// tee instance body
+		p1 = new PassThrough();
+		p2 = new PassThrough();
+		body.pipe(p1);
+		body.pipe(p2);
+		// set instance body to teed body and return the other teed body
+		instance[INTERNALS].body = p1;
+		body = p2;
+	}
+
+	return body;
+}
+
+/**
+ * Performs the operation "extract a `Content-Type` value from |object|" as
+ * specified in the specification:
+ * https://fetch.spec.whatwg.org/#concept-bodyinit-extract
+ *
+ * This function assumes that instance.body is present.
+ *
+ * @param   Mixed  instance  Any options.body input
+ */
+function extractContentType(body) {
+	if (body === null) {
+		// body is null
+		return null;
+	} else if (typeof body === 'string') {
+		// body is string
+		return 'text/plain;charset=UTF-8';
+	} else if (isURLSearchParams(body)) {
+		// body is a URLSearchParams
+		return 'application/x-www-form-urlencoded;charset=UTF-8';
+	} else if (isBlob(body)) {
+		// body is blob
+		return body.type || null;
+	} else if (Buffer.isBuffer(body)) {
+		// body is buffer
+		return null;
+	} else if (Object.prototype.toString.call(body) === '[object ArrayBuffer]') {
+		// body is ArrayBuffer
+		return null;
+	} else if (ArrayBuffer.isView(body)) {
+		// body is ArrayBufferView
+		return null;
+	} else if (typeof body.getBoundary === 'function') {
+		// detect form data input from form-data module
+		return `multipart/form-data;boundary=${body.getBoundary()}`;
+	} else if (body instanceof Stream) {
+		// body is stream
+		// can't really do much about this
+		return null;
+	} else {
+		// Body constructor defaults other things to string
+		return 'text/plain;charset=UTF-8';
+	}
+}
+
+/**
+ * The Fetch Standard treats this as if "total bytes" is a property on the body.
+ * For us, we have to explicitly get it with a function.
+ *
+ * ref: https://fetch.spec.whatwg.org/#concept-body-total-bytes
+ *
+ * @param   Body    instance   Instance of Body
+ * @return  Number?            Number of bytes, or null if not possible
+ */
+function getTotalBytes(instance) {
+	const body = instance.body;
+
+
+	if (body === null) {
+		// body is null
+		return 0;
+	} else if (isBlob(body)) {
+		return body.size;
+	} else if (Buffer.isBuffer(body)) {
+		// body is buffer
+		return body.length;
+	} else if (body && typeof body.getLengthSync === 'function') {
+		// detect form data input from form-data module
+		if (body._lengthRetrievers && body._lengthRetrievers.length == 0 || // 1.x
+		body.hasKnownLength && body.hasKnownLength()) {
+			// 2.x
+			return body.getLengthSync();
+		}
+		return null;
+	} else {
+		// body is stream
+		return null;
+	}
+}
+
+/**
+ * Write a Body to a Node.js WritableStream (e.g. http.Request) object.
+ *
+ * @param   Body    instance   Instance of Body
+ * @return  Void
+ */
+function writeToStream(dest, instance) {
+	const body = instance.body;
+
+
+	if (body === null) {
+		// body is null
+		dest.end();
+	} else if (isBlob(body)) {
+		body.stream().pipe(dest);
+	} else if (Buffer.isBuffer(body)) {
+		// body is buffer
+		dest.write(body);
+		dest.end();
+	} else {
+		// body is stream
+		body.pipe(dest);
+	}
+}
+
+// expose Promise
+Body.Promise = global.Promise;
+
+/**
+ * headers.js
+ *
+ * Headers class offers convenient helpers
+ */
+
+const invalidTokenRegex = /[^\^_`a-zA-Z\-0-9!#$%&'*+.|~]/;
+const invalidHeaderCharRegex = /[^\t\x20-\x7e\x80-\xff]/;
+
+function validateName(name) {
+	name = `${name}`;
+	if (invalidTokenRegex.test(name) || name === '') {
+		throw new TypeError(`${name} is not a legal HTTP header name`);
+	}
+}
+
+function validateValue(value) {
+	value = `${value}`;
+	if (invalidHeaderCharRegex.test(value)) {
+		throw new TypeError(`${value} is not a legal HTTP header value`);
+	}
+}
+
+/**
+ * Find the key in the map object given a header name.
+ *
+ * Returns undefined if not found.
+ *
+ * @param   String  name  Header name
+ * @return  String|Undefined
+ */
+function find(map, name) {
+	name = name.toLowerCase();
+	for (const key in map) {
+		if (key.toLowerCase() === name) {
+			return key;
+		}
+	}
+	return undefined;
+}
+
+const MAP = Symbol('map');
+class Headers {
+	/**
+  * Headers class
+  *
+  * @param   Object  headers  Response headers
+  * @return  Void
+  */
+	constructor() {
+		let init = arguments.length > 0 && arguments[0] !== undefined ? arguments[0] : undefined;
+
+		this[MAP] = Object.create(null);
+
+		if (init instanceof Headers) {
+			const rawHeaders = init.raw();
+			const headerNames = Object.keys(rawHeaders);
+
+			for (const headerName of headerNames) {
+				for (const value of rawHeaders[headerName]) {
+					this.append(headerName, value);
+				}
+			}
+
+			return;
+		}
+
+		// We don't worry about converting prop to ByteString here as append()
+		// will handle it.
+		if (init == null) ; else if (typeof init === 'object') {
+			const method = init[Symbol.iterator];
+			if (method != null) {
+				if (typeof method !== 'function') {
+					throw new TypeError('Header pairs must be iterable');
+				}
+
+				// sequence<sequence<ByteString>>
+				// Note: per spec we have to first exhaust the lists then process them
+				const pairs = [];
+				for (const pair of init) {
+					if (typeof pair !== 'object' || typeof pair[Symbol.iterator] !== 'function') {
+						throw new TypeError('Each header pair must be iterable');
+					}
+					pairs.push(Array.from(pair));
+				}
+
+				for (const pair of pairs) {
+					if (pair.length !== 2) {
+						throw new TypeError('Each header pair must be a name/value tuple');
+					}
+					this.append(pair[0], pair[1]);
+				}
+			} else {
+				// record<ByteString, ByteString>
+				for (const key of Object.keys(init)) {
+					const value = init[key];
+					this.append(key, value);
+				}
+			}
+		} else {
+			throw new TypeError('Provided initializer must be an object');
+		}
+	}
+
+	/**
+  * Return combined header value given name
+  *
+  * @param   String  name  Header name
+  * @return  Mixed
+  */
+	get(name) {
+		name = `${name}`;
+		validateName(name);
+		const key = find(this[MAP], name);
+		if (key === undefined) {
+			return null;
+		}
+
+		return this[MAP][key].join(', ');
+	}
+
+	/**
+  * Iterate over all headers
+  *
+  * @param   Function  callback  Executed for each item with parameters (value, name, thisArg)
+  * @param   Boolean   thisArg   `this` context for callback function
+  * @return  Void
+  */
+	forEach(callback) {
+		let thisArg = arguments.length > 1 && arguments[1] !== undefined ? arguments[1] : undefined;
+
+		let pairs = getHeaders(this);
+		let i = 0;
+		while (i < pairs.length) {
+			var _pairs$i = pairs[i];
+			const name = _pairs$i[0],
+			      value = _pairs$i[1];
+
+			callback.call(thisArg, value, name, this);
+			pairs = getHeaders(this);
+			i++;
+		}
+	}
+
+	/**
+  * Overwrite header values given name
+  *
+  * @param   String  name   Header name
+  * @param   String  value  Header value
+  * @return  Void
+  */
+	set(name, value) {
+		name = `${name}`;
+		value = `${value}`;
+		validateName(name);
+		validateValue(value);
+		const key = find(this[MAP], name);
+		this[MAP][key !== undefined ? key : name] = [value];
+	}
+
+	/**
+  * Append a value onto existing header
+  *
+  * @param   String  name   Header name
+  * @param   String  value  Header value
+  * @return  Void
+  */
+	append(name, value) {
+		name = `${name}`;
+		value = `${value}`;
+		validateName(name);
+		validateValue(value);
+		const key = find(this[MAP], name);
+		if (key !== undefined) {
+			this[MAP][key].push(value);
+		} else {
+			this[MAP][name] = [value];
+		}
+	}
+
+	/**
+  * Check for header name existence
+  *
+  * @param   String   name  Header name
+  * @return  Boolean
+  */
+	has(name) {
+		name = `${name}`;
+		validateName(name);
+		return find(this[MAP], name) !== undefined;
+	}
+
+	/**
+  * Delete all header values given name
+  *
+  * @param   String  name  Header name
+  * @return  Void
+  */
+	delete(name) {
+		name = `${name}`;
+		validateName(name);
+		const key = find(this[MAP], name);
+		if (key !== undefined) {
+			delete this[MAP][key];
+		}
+	}
+
+	/**
+  * Return raw headers (non-spec api)
+  *
+  * @return  Object
+  */
+	raw() {
+		return this[MAP];
+	}
+
+	/**
+  * Get an iterator on keys.
+  *
+  * @return  Iterator
+  */
+	keys() {
+		return createHeadersIterator(this, 'key');
+	}
+
+	/**
+  * Get an iterator on values.
+  *
+  * @return  Iterator
+  */
+	values() {
+		return createHeadersIterator(this, 'value');
+	}
+
+	/**
+  * Get an iterator on entries.
+  *
+  * This is the default iterator of the Headers object.
+  *
+  * @return  Iterator
+  */
+	[Symbol.iterator]() {
+		return createHeadersIterator(this, 'key+value');
+	}
+}
+Headers.prototype.entries = Headers.prototype[Symbol.iterator];
+
+Object.defineProperty(Headers.prototype, Symbol.toStringTag, {
+	value: 'Headers',
+	writable: false,
+	enumerable: false,
+	configurable: true
+});
+
+Object.defineProperties(Headers.prototype, {
+	get: { enumerable: true },
+	forEach: { enumerable: true },
+	set: { enumerable: true },
+	append: { enumerable: true },
+	has: { enumerable: true },
+	delete: { enumerable: true },
+	keys: { enumerable: true },
+	values: { enumerable: true },
+	entries: { enumerable: true }
+});
+
+function getHeaders(headers) {
+	let kind = arguments.length > 1 && arguments[1] !== undefined ? arguments[1] : 'key+value';
+
+	const keys = Object.keys(headers[MAP]).sort();
+	return keys.map(kind === 'key' ? function (k) {
+		return k.toLowerCase();
+	} : kind === 'value' ? function (k) {
+		return headers[MAP][k].join(', ');
+	} : function (k) {
+		return [k.toLowerCase(), headers[MAP][k].join(', ')];
+	});
+}
+
+const INTERNAL = Symbol('internal');
+
+function createHeadersIterator(target, kind) {
+	const iterator = Object.create(HeadersIteratorPrototype);
+	iterator[INTERNAL] = {
+		target,
+		kind,
+		index: 0
+	};
+	return iterator;
+}
+
+const HeadersIteratorPrototype = Object.setPrototypeOf({
+	next() {
+		// istanbul ignore if
+		if (!this || Object.getPrototypeOf(this) !== HeadersIteratorPrototype) {
+			throw new TypeError('Value of `this` is not a HeadersIterator');
+		}
+
+		var _INTERNAL = this[INTERNAL];
+		const target = _INTERNAL.target,
+		      kind = _INTERNAL.kind,
+		      index = _INTERNAL.index;
+
+		const values = getHeaders(target, kind);
+		const len = values.length;
+		if (index >= len) {
+			return {
+				value: undefined,
+				done: true
+			};
+		}
+
+		this[INTERNAL].index = index + 1;
+
+		return {
+			value: values[index],
+			done: false
+		};
+	}
+}, Object.getPrototypeOf(Object.getPrototypeOf([][Symbol.iterator]())));
+
+Object.defineProperty(HeadersIteratorPrototype, Symbol.toStringTag, {
+	value: 'HeadersIterator',
+	writable: false,
+	enumerable: false,
+	configurable: true
+});
+
+/**
+ * Export the Headers object in a form that Node.js can consume.
+ *
+ * @param   Headers  headers
+ * @return  Object
+ */
+function exportNodeCompatibleHeaders(headers) {
+	const obj = Object.assign({ __proto__: null }, headers[MAP]);
+
+	// http.request() only supports string as Host header. This hack makes
+	// specifying custom Host header possible.
+	const hostHeaderKey = find(headers[MAP], 'Host');
+	if (hostHeaderKey !== undefined) {
+		obj[hostHeaderKey] = obj[hostHeaderKey][0];
+	}
+
+	return obj;
+}
+
+/**
+ * Create a Headers object from an object of headers, ignoring those that do
+ * not conform to HTTP grammar productions.
+ *
+ * @param   Object  obj  Object of headers
+ * @return  Headers
+ */
+function createHeadersLenient(obj) {
+	const headers = new Headers();
+	for (const name of Object.keys(obj)) {
+		if (invalidTokenRegex.test(name)) {
+			continue;
+		}
+		if (Array.isArray(obj[name])) {
+			for (const val of obj[name]) {
+				if (invalidHeaderCharRegex.test(val)) {
+					continue;
+				}
+				if (headers[MAP][name] === undefined) {
+					headers[MAP][name] = [val];
+				} else {
+					headers[MAP][name].push(val);
+				}
+			}
+		} else if (!invalidHeaderCharRegex.test(obj[name])) {
+			headers[MAP][name] = [obj[name]];
+		}
+	}
+	return headers;
+}
+
+const INTERNALS$1 = Symbol('Response internals');
+
+// fix an issue where "STATUS_CODES" aren't a named export for node <10
+const STATUS_CODES = http.STATUS_CODES;
+
+/**
+ * Response class
+ *
+ * @param   Stream  body  Readable stream
+ * @param   Object  opts  Response options
+ * @return  Void
+ */
+class Response {
+	constructor() {
+		let body = arguments.length > 0 && arguments[0] !== undefined ? arguments[0] : null;
+		let opts = arguments.length > 1 && arguments[1] !== undefined ? arguments[1] : {};
+
+		Body.call(this, body, opts);
+
+		const status = opts.status || 200;
+		const headers = new Headers(opts.headers);
+
+		if (body != null && !headers.has('Content-Type')) {
+			const contentType = extractContentType(body);
+			if (contentType) {
+				headers.append('Content-Type', contentType);
+			}
+		}
+
+		this[INTERNALS$1] = {
+			url: opts.url,
+			status,
+			statusText: opts.statusText || STATUS_CODES[status],
+			headers,
+			counter: opts.counter
+		};
+	}
+
+	get url() {
+		return this[INTERNALS$1].url || '';
+	}
+
+	get status() {
+		return this[INTERNALS$1].status;
+	}
+
+	/**
+  * Convenience property representing if the request ended normally
+  */
+	get ok() {
+		return this[INTERNALS$1].status >= 200 && this[INTERNALS$1].status < 300;
+	}
+
+	get redirected() {
+		return this[INTERNALS$1].counter > 0;
+	}
+
+	get statusText() {
+		return this[INTERNALS$1].statusText;
+	}
+
+	get headers() {
+		return this[INTERNALS$1].headers;
+	}
+
+	/**
+  * Clone this response
+  *
+  * @return  Response
+  */
+	clone() {
+		return new Response(clone(this), {
+			url: this.url,
+			status: this.status,
+			statusText: this.statusText,
+			headers: this.headers,
+			ok: this.ok,
+			redirected: this.redirected
+		});
+	}
+}
+
+Body.mixIn(Response.prototype);
+
+Object.defineProperties(Response.prototype, {
+	url: { enumerable: true },
+	status: { enumerable: true },
+	ok: { enumerable: true },
+	redirected: { enumerable: true },
+	statusText: { enumerable: true },
+	headers: { enumerable: true },
+	clone: { enumerable: true }
+});
+
+Object.defineProperty(Response.prototype, Symbol.toStringTag, {
+	value: 'Response',
+	writable: false,
+	enumerable: false,
+	configurable: true
+});
+
+const INTERNALS$2 = Symbol('Request internals');
+
+// fix an issue where "format", "parse" aren't a named export for node <10
+const parse_url = Url.parse;
+const format_url = Url.format;
+
+const streamDestructionSupported = 'destroy' in Stream.Readable.prototype;
+
+/**
+ * Check if a value is an instance of Request.
+ *
+ * @param   Mixed   input
+ * @return  Boolean
+ */
+function isRequest(input) {
+	return typeof input === 'object' && typeof input[INTERNALS$2] === 'object';
+}
+
+function isAbortSignal(signal) {
+	const proto = signal && typeof signal === 'object' && Object.getPrototypeOf(signal);
+	return !!(proto && proto.constructor.name === 'AbortSignal');
+}
+
+/**
+ * Request class
+ *
+ * @param   Mixed   input  Url or Request instance
+ * @param   Object  init   Custom options
+ * @return  Void
+ */
+class Request {
+	constructor(input) {
+		let init = arguments.length > 1 && arguments[1] !== undefined ? arguments[1] : {};
+
+		let parsedURL;
+
+		// normalize input
+		if (!isRequest(input)) {
+			if (input && input.href) {
+				// in order to support Node.js' Url objects; though WHATWG's URL objects
+				// will fall into this branch also (since their `toString()` will return
+				// `href` property anyway)
+				parsedURL = parse_url(input.href);
+			} else {
+				// coerce input to a string before attempting to parse
+				parsedURL = parse_url(`${input}`);
+			}
+			input = {};
+		} else {
+			parsedURL = parse_url(input.url);
+		}
+
+		let method = init.method || input.method || 'GET';
+		method = method.toUpperCase();
+
+		if ((init.body != null || isRequest(input) && input.body !== null) && (method === 'GET' || method === 'HEAD')) {
+			throw new TypeError('Request with GET/HEAD method cannot have body');
+		}
+
+		let inputBody = init.body != null ? init.body : isRequest(input) && input.body !== null ? clone(input) : null;
+
+		Body.call(this, inputBody, {
+			timeout: init.timeout || input.timeout || 0,
+			size: init.size || input.size || 0
+		});
+
+		const headers = new Headers(init.headers || input.headers || {});
+
+		if (inputBody != null && !headers.has('Content-Type')) {
+			const contentType = extractContentType(inputBody);
+			if (contentType) {
+				headers.append('Content-Type', contentType);
+			}
+		}
+
+		let signal = isRequest(input) ? input.signal : null;
+		if ('signal' in init) signal = init.signal;
+
+		if (signal != null && !isAbortSignal(signal)) {
+			throw new TypeError('Expected signal to be an instanceof AbortSignal');
+		}
+
+		this[INTERNALS$2] = {
+			method,
+			redirect: init.redirect || input.redirect || 'follow',
+			headers,
+			parsedURL,
+			signal
+		};
+
+		// node-fetch-only options
+		this.follow = init.follow !== undefined ? init.follow : input.follow !== undefined ? input.follow : 20;
+		this.compress = init.compress !== undefined ? init.compress : input.compress !== undefined ? input.compress : true;
+		this.counter = init.counter || input.counter || 0;
+		this.agent = init.agent || input.agent;
+	}
+
+	get method() {
+		return this[INTERNALS$2].method;
+	}
+
+	get url() {
+		return format_url(this[INTERNALS$2].parsedURL);
+	}
+
+	get headers() {
+		return this[INTERNALS$2].headers;
+	}
+
+	get redirect() {
+		return this[INTERNALS$2].redirect;
+	}
+
+	get signal() {
+		return this[INTERNALS$2].signal;
+	}
+
+	/**
+  * Clone this request
+  *
+  * @return  Request
+  */
+	clone() {
+		return new Request(this);
+	}
+}
+
+Body.mixIn(Request.prototype);
+
+Object.defineProperty(Request.prototype, Symbol.toStringTag, {
+	value: 'Request',
+	writable: false,
+	enumerable: false,
+	configurable: true
+});
+
+Object.defineProperties(Request.prototype, {
+	method: { enumerable: true },
+	url: { enumerable: true },
+	headers: { enumerable: true },
+	redirect: { enumerable: true },
+	clone: { enumerable: true },
+	signal: { enumerable: true }
+});
+
+/**
+ * Convert a Request to Node.js http request options.
+ *
+ * @param   Request  A Request instance
+ * @return  Object   The options object to be passed to http.request
+ */
+function getNodeRequestOptions(request) {
+	const parsedURL = request[INTERNALS$2].parsedURL;
+	const headers = new Headers(request[INTERNALS$2].headers);
+
+	// fetch step 1.3
+	if (!headers.has('Accept')) {
+		headers.set('Accept', '*/*');
+	}
+
+	// Basic fetch
+	if (!parsedURL.protocol || !parsedURL.hostname) {
+		throw new TypeError('Only absolute URLs are supported');
+	}
+
+	if (!/^https?:$/.test(parsedURL.protocol)) {
+		throw new TypeError('Only HTTP(S) protocols are supported');
+	}
+
+	if (request.signal && request.body instanceof Stream.Readable && !streamDestructionSupported) {
+		throw new Error('Cancellation of streamed requests with AbortSignal is not supported in node < 8');
+	}
+
+	// HTTP-network-or-cache fetch steps 2.4-2.7
+	let contentLengthValue = null;
+	if (request.body == null && /^(POST|PUT)$/i.test(request.method)) {
+		contentLengthValue = '0';
+	}
+	if (request.body != null) {
+		const totalBytes = getTotalBytes(request);
+		if (typeof totalBytes === 'number') {
+			contentLengthValue = String(totalBytes);
+		}
+	}
+	if (contentLengthValue) {
+		headers.set('Content-Length', contentLengthValue);
+	}
+
+	// HTTP-network-or-cache fetch step 2.11
+	if (!headers.has('User-Agent')) {
+		headers.set('User-Agent', 'node-fetch/1.0 (+https://github.com/bitinn/node-fetch)');
+	}
+
+	// HTTP-network-or-cache fetch step 2.15
+	if (request.compress && !headers.has('Accept-Encoding')) {
+		headers.set('Accept-Encoding', 'gzip,deflate');
+	}
+
+	let agent = request.agent;
+	if (typeof agent === 'function') {
+		agent = agent(parsedURL);
+	}
+
+	if (!headers.has('Connection') && !agent) {
+		headers.set('Connection', 'close');
+	}
+
+	// HTTP-network fetch step 4.2
+	// chunked encoding is handled by Node.js
+
+	return Object.assign({}, parsedURL, {
+		method: request.method,
+		headers: exportNodeCompatibleHeaders(headers),
+		agent
+	});
+}
+
+/**
+ * abort-error.js
+ *
+ * AbortError interface for cancelled requests
+ */
+
+/**
+ * Create AbortError instance
+ *
+ * @param   String      message      Error message for human
+ * @return  AbortError
+ */
+function AbortError(message) {
+  Error.call(this, message);
+
+  this.type = 'aborted';
+  this.message = message;
+
+  // hide custom error implementation details from end-users
+  Error.captureStackTrace(this, this.constructor);
+}
+
+AbortError.prototype = Object.create(Error.prototype);
+AbortError.prototype.constructor = AbortError;
+AbortError.prototype.name = 'AbortError';
+
+// fix an issue where "PassThrough", "resolve" aren't a named export for node <10
+const PassThrough$1 = Stream.PassThrough;
+const resolve_url = Url.resolve;
+
+/**
+ * Fetch function
+ *
+ * @param   Mixed    url   Absolute url or Request instance
+ * @param   Object   opts  Fetch options
+ * @return  Promise
+ */
+function fetch(url, opts) {
+
+	// allow custom promise
+	if (!fetch.Promise) {
+		throw new Error('native promise missing, set fetch.Promise to your favorite alternative');
+	}
+
+	Body.Promise = fetch.Promise;
+
+	// wrap http.request into fetch
+	return new fetch.Promise(function (resolve, reject) {
+		// build request object
+		const request = new Request(url, opts);
+		const options = getNodeRequestOptions(request);
+
+		const send = (options.protocol === 'https:' ? https : http).request;
+		const signal = request.signal;
+
+		let response = null;
+
+		const abort = function abort() {
+			let error = new AbortError('The user aborted a request.');
+			reject(error);
+			if (request.body && request.body instanceof Stream.Readable) {
+				request.body.destroy(error);
+			}
+			if (!response || !response.body) return;
+			response.body.emit('error', error);
+		};
+
+		if (signal && signal.aborted) {
+			abort();
+			return;
+		}
+
+		const abortAndFinalize = function abortAndFinalize() {
+			abort();
+			finalize();
+		};
+
+		// send request
+		const req = send(options);
+		let reqTimeout;
+
+		if (signal) {
+			signal.addEventListener('abort', abortAndFinalize);
+		}
+
+		function finalize() {
+			req.abort();
+			if (signal) signal.removeEventListener('abort', abortAndFinalize);
+			clearTimeout(reqTimeout);
+		}
+
+		if (request.timeout) {
+			req.once('socket', function (socket) {
+				reqTimeout = setTimeout(function () {
+					reject(new FetchError(`network timeout at: ${request.url}`, 'request-timeout'));
+					finalize();
+				}, request.timeout);
+			});
+		}
+
+		req.on('error', function (err) {
+			reject(new FetchError(`request to ${request.url} failed, reason: ${err.message}`, 'system', err));
+			finalize();
+		});
+
+		req.on('response', function (res) {
+			clearTimeout(reqTimeout);
+
+			const headers = createHeadersLenient(res.headers);
+
+			// HTTP fetch step 5
+			if (fetch.isRedirect(res.statusCode)) {
+				// HTTP fetch step 5.2
+				const location = headers.get('Location');
+
+				// HTTP fetch step 5.3
+				const locationURL = location === null ? null : resolve_url(request.url, location);
+
+				// HTTP fetch step 5.5
+				switch (request.redirect) {
+					case 'error':
+						reject(new FetchError(`redirect mode is set to error: ${request.url}`, 'no-redirect'));
+						finalize();
+						return;
+					case 'manual':
+						// node-fetch-specific step: make manual redirect a bit easier to use by setting the Location header value to the resolved URL.
+						if (locationURL !== null) {
+							// handle corrupted header
+							try {
+								headers.set('Location', locationURL);
+							} catch (err) {
+								// istanbul ignore next: nodejs server prevent invalid response headers, we can't test this through normal request
+								reject(err);
+							}
+						}
+						break;
+					case 'follow':
+						// HTTP-redirect fetch step 2
+						if (locationURL === null) {
+							break;
+						}
+
+						// HTTP-redirect fetch step 5
+						if (request.counter >= request.follow) {
+							reject(new FetchError(`maximum redirect reached at: ${request.url}`, 'max-redirect'));
+							finalize();
+							return;
+						}
+
+						// HTTP-redirect fetch step 6 (counter increment)
+						// Create a new Request object.
+						const requestOpts = {
+							headers: new Headers(request.headers),
+							follow: request.follow,
+							counter: request.counter + 1,
+							agent: request.agent,
+							compress: request.compress,
+							method: request.method,
+							body: request.body,
+							signal: request.signal,
+							timeout: request.timeout
+						};
+
+						// HTTP-redirect fetch step 9
+						if (res.statusCode !== 303 && request.body && getTotalBytes(request) === null) {
+							reject(new FetchError('Cannot follow redirect with body being a readable stream', 'unsupported-redirect'));
+							finalize();
+							return;
+						}
+
+						// HTTP-redirect fetch step 11
+						if (res.statusCode === 303 || (res.statusCode === 301 || res.statusCode === 302) && request.method === 'POST') {
+							requestOpts.method = 'GET';
+							requestOpts.body = undefined;
+							requestOpts.headers.delete('content-length');
+						}
+
+						// HTTP-redirect fetch step 15
+						resolve(fetch(new Request(locationURL, requestOpts)));
+						finalize();
+						return;
+				}
+			}
+
+			// prepare response
+			res.once('end', function () {
+				if (signal) signal.removeEventListener('abort', abortAndFinalize);
+			});
+			let body = res.pipe(new PassThrough$1());
+
+			const response_options = {
+				url: request.url,
+				status: res.statusCode,
+				statusText: res.statusMessage,
+				headers: headers,
+				size: request.size,
+				timeout: request.timeout,
+				counter: request.counter
+			};
+
+			// HTTP-network fetch step 12.1.1.3
+			const codings = headers.get('Content-Encoding');
+
+			// HTTP-network fetch step 12.1.1.4: handle content codings
+
+			// in following scenarios we ignore compression support
+			// 1. compression support is disabled
+			// 2. HEAD request
+			// 3. no Content-Encoding header
+			// 4. no content response (204)
+			// 5. content not modified response (304)
+			if (!request.compress || request.method === 'HEAD' || codings === null || res.statusCode === 204 || res.statusCode === 304) {
+				response = new Response(body, response_options);
+				resolve(response);
+				return;
+			}
+
+			// For Node v6+
+			// Be less strict when decoding compressed responses, since sometimes
+			// servers send slightly invalid responses that are still accepted
+			// by common browsers.
+			// Always using Z_SYNC_FLUSH is what cURL does.
+			const zlibOptions = {
+				flush: zlib.Z_SYNC_FLUSH,
+				finishFlush: zlib.Z_SYNC_FLUSH
+			};
+
+			// for gzip
+			if (codings == 'gzip' || codings == 'x-gzip') {
+				body = body.pipe(zlib.createGunzip(zlibOptions));
+				response = new Response(body, response_options);
+				resolve(response);
+				return;
+			}
+
+			// for deflate
+			if (codings == 'deflate' || codings == 'x-deflate') {
+				// handle the infamous raw deflate response from old servers
+				// a hack for old IIS and Apache servers
+				const raw = res.pipe(new PassThrough$1());
+				raw.once('data', function (chunk) {
+					// see http://stackoverflow.com/questions/37519828
+					if ((chunk[0] & 0x0F) === 0x08) {
+						body = body.pipe(zlib.createInflate());
+					} else {
+						body = body.pipe(zlib.createInflateRaw());
+					}
+					response = new Response(body, response_options);
+					resolve(response);
+				});
+				return;
+			}
+
+			// for br
+			if (codings == 'br' && typeof zlib.createBrotliDecompress === 'function') {
+				body = body.pipe(zlib.createBrotliDecompress());
+				response = new Response(body, response_options);
+				resolve(response);
+				return;
+			}
+
+			// otherwise, use response as-is
+			response = new Response(body, response_options);
+			resolve(response);
+		});
+
+		writeToStream(req, request);
+	});
+}
+/**
+ * Redirect code matching
+ *
+ * @param   Number   code  Status code
+ * @return  Boolean
+ */
+fetch.isRedirect = function (code) {
+	return code === 301 || code === 302 || code === 303 || code === 307 || code === 308;
+};
+
+// expose Promise
+fetch.Promise = global.Promise;
+
+module.exports = exports = fetch;
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.default = exports;
+exports.Headers = Headers;
+exports.Request = Request;
+exports.Response = Response;
+exports.FetchError = FetchError;
 
 
 /***/ }),
@@ -59924,8 +66200,120 @@ module.exports = SilentRenderer;
 
 
 /***/ }),
-/* 462 */,
-/* 463 */,
+/* 462 */
+/***/ (function(module) {
+
+"use strict";
+
+
+// See http://www.robvanderwoude.com/escapechars.php
+const metaCharsRegExp = /([()\][%!^"`<>&|;, *?])/g;
+
+function escapeCommand(arg) {
+    // Escape meta chars
+    arg = arg.replace(metaCharsRegExp, '^$1');
+
+    return arg;
+}
+
+function escapeArgument(arg, doubleEscapeMetaChars) {
+    // Convert to string
+    arg = `${arg}`;
+
+    // Algorithm below is based on https://qntm.org/cmd
+
+    // Sequence of backslashes followed by a double quote:
+    // double up all the backslashes and escape the double quote
+    arg = arg.replace(/(\\*)"/g, '$1$1\\"');
+
+    // Sequence of backslashes followed by the end of the string
+    // (which will become a double quote later):
+    // double up all the backslashes
+    arg = arg.replace(/(\\*)$/, '$1$1');
+
+    // All other backslashes occur literally
+
+    // Quote the whole thing:
+    arg = `"${arg}"`;
+
+    // Escape meta chars
+    arg = arg.replace(metaCharsRegExp, '^$1');
+
+    // Double escape meta chars if necessary
+    if (doubleEscapeMetaChars) {
+        arg = arg.replace(metaCharsRegExp, '^$1');
+    }
+
+    return arg;
+}
+
+module.exports.command = escapeCommand;
+module.exports.argument = escapeArgument;
+
+
+/***/ }),
+/* 463 */
+/***/ (function(__unusedmodule, exports, __webpack_require__) {
+
+"use strict";
+
+
+Object.defineProperty(exports, '__esModule', { value: true });
+
+function _interopDefault (ex) { return (ex && (typeof ex === 'object') && 'default' in ex) ? ex['default'] : ex; }
+
+var deprecation = __webpack_require__(692);
+var once = _interopDefault(__webpack_require__(969));
+
+const logOnce = once(deprecation => console.warn(deprecation));
+/**
+ * Error with extra properties to help with debugging
+ */
+
+class RequestError extends Error {
+  constructor(message, statusCode, options) {
+    super(message); // Maintains proper stack trace (only available on V8)
+
+    /* istanbul ignore next */
+
+    if (Error.captureStackTrace) {
+      Error.captureStackTrace(this, this.constructor);
+    }
+
+    this.name = "HttpError";
+    this.status = statusCode;
+    Object.defineProperty(this, "code", {
+      get() {
+        logOnce(new deprecation.Deprecation("[@octokit/request-error] `error.code` is deprecated, use `error.status`."));
+        return statusCode;
+      }
+
+    });
+    this.headers = options.headers || {}; // redact request credentials without mutating original request options
+
+    const requestCopy = Object.assign({}, options.request);
+
+    if (options.request.headers.authorization) {
+      requestCopy.headers = Object.assign({}, options.request.headers, {
+        authorization: options.request.headers.authorization.replace(/ .*$/, " [REDACTED]")
+      });
+    }
+
+    requestCopy.url = requestCopy.url // client_id & client_secret can be passed as URL query parameters to increase rate limit
+    // see https://developer.github.com/v3/#increasing-the-unauthenticated-rate-limit-for-oauth-applications
+    .replace(/\bclient_secret=\w+/g, "client_secret=[REDACTED]") // OAuth tokens can be passed as URL query parameters, although it is not recommended
+    // see https://developer.github.com/v3/#oauth2-token-sent-in-a-header
+    .replace(/\baccess_token=\w+/g, "access_token=[REDACTED]");
+    this.request = requestCopy;
+  }
+
+}
+
+exports.RequestError = RequestError;
+//# sourceMappingURL=index.js.map
+
+
+/***/ }),
 /* 464 */
 /***/ (function(module) {
 
@@ -60070,59 +66458,45 @@ module.exports = deburrLetter;
 /***/ }),
 /* 468 */,
 /* 469 */
-/***/ (function(module, exports, __webpack_require__) {
+/***/ (function(__unusedmodule, exports, __webpack_require__) {
 
 "use strict";
 
-
-exports = module.exports = cliWidth;
-
-function normalizeOpts(options) {
-  var defaultOpts = {
-    defaultWidth: 0,
-    output: process.stdout,
-    tty: __webpack_require__(867)
-  };
-
-  if (!options) {
-    return defaultOpts;
-  } else {
-    Object.keys(defaultOpts).forEach(function (key) {
-      if (!options[key]) {
-        options[key] = defaultOpts[key];
-      }
-    });
-
-    return options;
-  }
-}
-
-function cliWidth(options) {
-  var opts = normalizeOpts(options);
-
-  if (opts.output.getWindowSize) {
-    return opts.output.getWindowSize()[0] || opts.defaultWidth;
-  } else {
-    if (opts.tty.getWindowSize) {
-      return opts.tty.getWindowSize()[1] || opts.defaultWidth;
-    } else {
-      if (opts.output.columns) {
-        return opts.output.columns;
-      } else {
-        if (process.env.CLI_WIDTH) {
-          var width = parseInt(process.env.CLI_WIDTH, 10);
-
-          if (!isNaN(width) && width !== 0) {
-            return width;
-          }
-        }
-      }
-
-      return opts.defaultWidth;
-    }
-  }
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    Object.defineProperty(o, k2, { enumerable: true, get: function() { return m[k]; } });
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || function (mod) {
+    if (mod && mod.__esModule) return mod;
+    var result = {};
+    if (mod != null) for (var k in mod) if (Object.hasOwnProperty.call(mod, k)) __createBinding(result, mod, k);
+    __setModuleDefault(result, mod);
+    return result;
 };
-
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.getOctokit = exports.context = void 0;
+const Context = __importStar(__webpack_require__(262));
+const utils_1 = __webpack_require__(521);
+exports.context = new Context.Context();
+/**
+ * Returns a hydrated octokit ready to use for GitHub Actions
+ *
+ * @param     token    the repo PAT or GITHUB_TOKEN
+ * @param     options  other options to set
+ */
+function getOctokit(token, options) {
+    return new utils_1.GitHub(utils_1.getOctokitOptions(token, options));
+}
+exports.getOctokit = getOctokit;
+//# sourceMappingURL=github.js.map
 
 /***/ }),
 /* 470 */
@@ -60139,10 +66513,17 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
         step((generator = generator.apply(thisArg, _arguments || [])).next());
     });
 };
+var __importStar = (this && this.__importStar) || function (mod) {
+    if (mod && mod.__esModule) return mod;
+    var result = {};
+    if (mod != null) for (var k in mod) if (Object.hasOwnProperty.call(mod, k)) result[k] = mod[k];
+    result["default"] = mod;
+    return result;
+};
 Object.defineProperty(exports, "__esModule", { value: true });
 const command_1 = __webpack_require__(431);
-const os = __webpack_require__(87);
-const path = __webpack_require__(622);
+const os = __importStar(__webpack_require__(87));
+const path = __importStar(__webpack_require__(622));
 /**
  * The code to exit an action
  */
@@ -60161,28 +66542,25 @@ var ExitCode;
 // Variables
 //-----------------------------------------------------------------------
 /**
- * sets env variable for this action and future actions in the job
+ * Sets env variable for this action and future actions in the job
  * @param name the name of the variable to set
- * @param val the value of the variable
+ * @param val the value of the variable. Non-string values will be converted to a string via JSON.stringify
  */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 function exportVariable(name, val) {
-    process.env[name] = val;
-    command_1.issueCommand('set-env', { name }, val);
+    const convertedVal = command_1.toCommandValue(val);
+    process.env[name] = convertedVal;
+    command_1.issueCommand('set-env', { name }, convertedVal);
 }
 exports.exportVariable = exportVariable;
 /**
- * exports the variable and registers a secret which will get masked from logs
- * @param name the name of the variable to set
- * @param val value of the secret
+ * Registers a secret which will get masked from logs
+ * @param secret value of the secret
  */
-function exportSecret(name, val) {
-    exportVariable(name, val);
-    // the runner will error with not implemented
-    // leaving the function but raising the error earlier
-    command_1.issueCommand('set-secret', {}, val);
-    throw new Error('Not implemented.');
+function setSecret(secret) {
+    command_1.issueCommand('add-mask', {}, secret);
 }
-exports.exportSecret = exportSecret;
+exports.setSecret = setSecret;
 /**
  * Prepends inputPath to the PATH (for this action and future actions)
  * @param inputPath
@@ -60211,12 +66589,22 @@ exports.getInput = getInput;
  * Sets the value of an output.
  *
  * @param     name     name of the output to set
- * @param     value    value to store
+ * @param     value    value to store. Non-string values will be converted to a string via JSON.stringify
  */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 function setOutput(name, value) {
     command_1.issueCommand('set-output', { name }, value);
 }
 exports.setOutput = setOutput;
+/**
+ * Enables or disables the echoing of commands into stdout for the rest of the step.
+ * Echoing is disabled by default if ACTIONS_STEP_DEBUG is not set.
+ *
+ */
+function setCommandEcho(enabled) {
+    command_1.issue('echo', enabled ? 'on' : 'off');
+}
+exports.setCommandEcho = setCommandEcho;
 //-----------------------------------------------------------------------
 // Results
 //-----------------------------------------------------------------------
@@ -60234,6 +66622,13 @@ exports.setFailed = setFailed;
 // Logging Commands
 //-----------------------------------------------------------------------
 /**
+ * Gets whether Actions Step Debug is on or not
+ */
+function isDebug() {
+    return process.env['RUNNER_DEBUG'] === '1';
+}
+exports.isDebug = isDebug;
+/**
  * Writes debug message to user log
  * @param message debug message
  */
@@ -60243,18 +66638,18 @@ function debug(message) {
 exports.debug = debug;
 /**
  * Adds an error issue
- * @param message error issue message
+ * @param message error issue message. Errors will be converted to string via toString()
  */
 function error(message) {
-    command_1.issue('error', message);
+    command_1.issue('error', message instanceof Error ? message.toString() : message);
 }
 exports.error = error;
 /**
  * Adds an warning issue
- * @param message warning issue message
+ * @param message warning issue message. Errors will be converted to string via toString()
  */
 function warning(message) {
-    command_1.issue('warning', message);
+    command_1.issue('warning', message instanceof Error ? message.toString() : message);
 }
 exports.warning = warning;
 /**
@@ -60305,6 +66700,30 @@ function group(name, fn) {
     });
 }
 exports.group = group;
+//-----------------------------------------------------------------------
+// Wrapper action state
+//-----------------------------------------------------------------------
+/**
+ * Saves state for current action, the state can only be retrieved by this action's post job execution.
+ *
+ * @param     name     name of the state to store
+ * @param     value    value to store. Non-string values will be converted to a string via JSON.stringify
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function saveState(name, value) {
+    command_1.issueCommand('save-state', { name }, value);
+}
+exports.saveState = saveState;
+/**
+ * Gets the value of an state set by this action's main execution.
+ *
+ * @param     name     name of the state to get
+ * @returns   string
+ */
+function getState(name) {
+    return process.env[`STATE_${name}`] || '';
+}
+exports.getState = getState;
 //# sourceMappingURL=core.js.map
 
 /***/ }),
@@ -60445,7 +66864,59 @@ Object.defineProperty(module, 'exports', {
 
 
 /***/ }),
-/* 475 */,
+/* 475 */
+/***/ (function(module) {
+
+"use strict";
+
+/* eslint-disable yoda */
+module.exports = x => {
+	if (Number.isNaN(x)) {
+		return false;
+	}
+
+	// code points are derived from:
+	// http://www.unix.org/Public/UNIDATA/EastAsianWidth.txt
+	if (
+		x >= 0x1100 && (
+			x <= 0x115f ||  // Hangul Jamo
+			x === 0x2329 || // LEFT-POINTING ANGLE BRACKET
+			x === 0x232a || // RIGHT-POINTING ANGLE BRACKET
+			// CJK Radicals Supplement .. Enclosed CJK Letters and Months
+			(0x2e80 <= x && x <= 0x3247 && x !== 0x303f) ||
+			// Enclosed CJK Letters and Months .. CJK Unified Ideographs Extension A
+			(0x3250 <= x && x <= 0x4dbf) ||
+			// CJK Unified Ideographs .. Yi Radicals
+			(0x4e00 <= x && x <= 0xa4c6) ||
+			// Hangul Jamo Extended-A
+			(0xa960 <= x && x <= 0xa97c) ||
+			// Hangul Syllables
+			(0xac00 <= x && x <= 0xd7a3) ||
+			// CJK Compatibility Ideographs
+			(0xf900 <= x && x <= 0xfaff) ||
+			// Vertical Forms
+			(0xfe10 <= x && x <= 0xfe19) ||
+			// CJK Compatibility Forms .. Small Form Variants
+			(0xfe30 <= x && x <= 0xfe6b) ||
+			// Halfwidth and Fullwidth Forms
+			(0xff01 <= x && x <= 0xff60) ||
+			(0xffe0 <= x && x <= 0xffe6) ||
+			// Kana Supplement
+			(0x1b000 <= x && x <= 0x1b001) ||
+			// Enclosed Ideographic Supplement
+			(0x1f200 <= x && x <= 0x1f251) ||
+			// CJK Unified Ideographs Extension B .. Tertiary Ideographic Plane
+			(0x20000 <= x && x <= 0x3fffd)
+		)
+	) {
+		return true;
+	}
+
+	return false;
+};
+
+
+/***/ }),
 /* 476 */
 /***/ (function(module, __unusedexports, __webpack_require__) {
 
@@ -60897,7 +67368,60 @@ module.exports = matchItemProcessor
 module.exports = [["0","\u0000",127],["8141","갂갃갅갆갋",4,"갘갞갟갡갢갣갥",6,"갮갲갳갴"],["8161","갵갶갷갺갻갽갾갿걁",9,"걌걎",5,"걕"],["8181","걖걗걙걚걛걝",18,"걲걳걵걶걹걻",4,"겂겇겈겍겎겏겑겒겓겕",6,"겞겢",5,"겫겭겮겱",6,"겺겾겿곀곂곃곅곆곇곉곊곋곍",7,"곖곘",7,"곢곣곥곦곩곫곭곮곲곴곷",4,"곾곿괁괂괃괅괇",4,"괎괐괒괓"],["8241","괔괕괖괗괙괚괛괝괞괟괡",7,"괪괫괮",5],["8261","괶괷괹괺괻괽",6,"굆굈굊",5,"굑굒굓굕굖굗"],["8281","굙",7,"굢굤",7,"굮굯굱굲굷굸굹굺굾궀궃",4,"궊궋궍궎궏궑",10,"궞",5,"궥",17,"궸",7,"귂귃귅귆귇귉",6,"귒귔",7,"귝귞귟귡귢귣귥",18],["8341","귺귻귽귾긂",5,"긊긌긎",5,"긕",7],["8361","긝",18,"긲긳긵긶긹긻긼"],["8381","긽긾긿깂깄깇깈깉깋깏깑깒깓깕깗",4,"깞깢깣깤깦깧깪깫깭깮깯깱",6,"깺깾",5,"꺆",5,"꺍",46,"꺿껁껂껃껅",6,"껎껒",5,"껚껛껝",8],["8441","껦껧껩껪껬껮",5,"껵껶껷껹껺껻껽",8],["8461","꼆꼉꼊꼋꼌꼎꼏꼑",18],["8481","꼤",7,"꼮꼯꼱꼳꼵",6,"꼾꽀꽄꽅꽆꽇꽊",5,"꽑",10,"꽞",5,"꽦",18,"꽺",5,"꾁꾂꾃꾅꾆꾇꾉",6,"꾒꾓꾔꾖",5,"꾝",26,"꾺꾻꾽꾾"],["8541","꾿꿁",5,"꿊꿌꿏",4,"꿕",6,"꿝",4],["8561","꿢",5,"꿪",5,"꿲꿳꿵꿶꿷꿹",6,"뀂뀃"],["8581","뀅",6,"뀍뀎뀏뀑뀒뀓뀕",6,"뀞",9,"뀩",26,"끆끇끉끋끍끏끐끑끒끖끘끚끛끜끞",29,"끾끿낁낂낃낅",6,"낎낐낒",5,"낛낝낞낣낤"],["8641","낥낦낧낪낰낲낶낷낹낺낻낽",6,"냆냊",5,"냒"],["8661","냓냕냖냗냙",6,"냡냢냣냤냦",10],["8681","냱",22,"넊넍넎넏넑넔넕넖넗넚넞",4,"넦넧넩넪넫넭",6,"넶넺",5,"녂녃녅녆녇녉",6,"녒녓녖녗녙녚녛녝녞녟녡",22,"녺녻녽녾녿놁놃",4,"놊놌놎놏놐놑놕놖놗놙놚놛놝"],["8741","놞",9,"놩",15],["8761","놹",18,"뇍뇎뇏뇑뇒뇓뇕"],["8781","뇖",5,"뇞뇠",7,"뇪뇫뇭뇮뇯뇱",7,"뇺뇼뇾",5,"눆눇눉눊눍",6,"눖눘눚",5,"눡",18,"눵",6,"눽",26,"뉙뉚뉛뉝뉞뉟뉡",6,"뉪",4],["8841","뉯",4,"뉶",5,"뉽",6,"늆늇늈늊",4],["8861","늏늒늓늕늖늗늛",4,"늢늤늧늨늩늫늭늮늯늱늲늳늵늶늷"],["8881","늸",15,"닊닋닍닎닏닑닓",4,"닚닜닞닟닠닡닣닧닩닪닰닱닲닶닼닽닾댂댃댅댆댇댉",6,"댒댖",5,"댝",54,"덗덙덚덝덠덡덢덣"],["8941","덦덨덪덬덭덯덲덳덵덶덷덹",6,"뎂뎆",5,"뎍"],["8961","뎎뎏뎑뎒뎓뎕",10,"뎢",5,"뎩뎪뎫뎭"],["8981","뎮",21,"돆돇돉돊돍돏돑돒돓돖돘돚돜돞돟돡돢돣돥돦돧돩",18,"돽",18,"됑",6,"됙됚됛됝됞됟됡",6,"됪됬",7,"됵",15],["8a41","둅",10,"둒둓둕둖둗둙",6,"둢둤둦"],["8a61","둧",4,"둭",18,"뒁뒂"],["8a81","뒃",4,"뒉",19,"뒞",5,"뒥뒦뒧뒩뒪뒫뒭",7,"뒶뒸뒺",5,"듁듂듃듅듆듇듉",6,"듑듒듓듔듖",5,"듞듟듡듢듥듧",4,"듮듰듲",5,"듹",26,"딖딗딙딚딝"],["8b41","딞",5,"딦딫",4,"딲딳딵딶딷딹",6,"땂땆"],["8b61","땇땈땉땊땎땏땑땒땓땕",6,"땞땢",8],["8b81","땫",52,"떢떣떥떦떧떩떬떭떮떯떲떶",4,"떾떿뗁뗂뗃뗅",6,"뗎뗒",5,"뗙",18,"뗭",18],["8c41","똀",15,"똒똓똕똖똗똙",4],["8c61","똞",6,"똦",5,"똭",6,"똵",5],["8c81","똻",12,"뙉",26,"뙥뙦뙧뙩",50,"뚞뚟뚡뚢뚣뚥",5,"뚭뚮뚯뚰뚲",16],["8d41","뛃",16,"뛕",8],["8d61","뛞",17,"뛱뛲뛳뛵뛶뛷뛹뛺"],["8d81","뛻",4,"뜂뜃뜄뜆",33,"뜪뜫뜭뜮뜱",6,"뜺뜼",7,"띅띆띇띉띊띋띍",6,"띖",9,"띡띢띣띥띦띧띩",6,"띲띴띶",5,"띾띿랁랂랃랅",6,"랎랓랔랕랚랛랝랞"],["8e41","랟랡",6,"랪랮",5,"랶랷랹",8],["8e61","럂",4,"럈럊",19],["8e81","럞",13,"럮럯럱럲럳럵",6,"럾렂",4,"렊렋렍렎렏렑",6,"렚렜렞",5,"렦렧렩렪렫렭",6,"렶렺",5,"롁롂롃롅",11,"롒롔",7,"롞롟롡롢롣롥",6,"롮롰롲",5,"롹롺롻롽",7],["8f41","뢅",7,"뢎",17],["8f61","뢠",7,"뢩",6,"뢱뢲뢳뢵뢶뢷뢹",4],["8f81","뢾뢿룂룄룆",5,"룍룎룏룑룒룓룕",7,"룞룠룢",5,"룪룫룭룮룯룱",6,"룺룼룾",5,"뤅",18,"뤙",6,"뤡",26,"뤾뤿륁륂륃륅",6,"륍륎륐륒",5],["9041","륚륛륝륞륟륡",6,"륪륬륮",5,"륶륷륹륺륻륽"],["9061","륾",5,"릆릈릋릌릏",15],["9081","릟",12,"릮릯릱릲릳릵",6,"릾맀맂",5,"맊맋맍맓",4,"맚맜맟맠맢맦맧맩맪맫맭",6,"맶맻",4,"먂",5,"먉",11,"먖",33,"먺먻먽먾먿멁멃멄멅멆"],["9141","멇멊멌멏멐멑멒멖멗멙멚멛멝",6,"멦멪",5],["9161","멲멳멵멶멷멹",9,"몆몈몉몊몋몍",5],["9181","몓",20,"몪몭몮몯몱몳",4,"몺몼몾",5,"뫅뫆뫇뫉",14,"뫚",33,"뫽뫾뫿묁묂묃묅",7,"묎묐묒",5,"묙묚묛묝묞묟묡",6],["9241","묨묪묬",7,"묷묹묺묿",4,"뭆뭈뭊뭋뭌뭎뭑뭒"],["9261","뭓뭕뭖뭗뭙",7,"뭢뭤",7,"뭭",4],["9281","뭲",21,"뮉뮊뮋뮍뮎뮏뮑",18,"뮥뮦뮧뮩뮪뮫뮭",6,"뮵뮶뮸",7,"믁믂믃믅믆믇믉",6,"믑믒믔",35,"믺믻믽믾밁"],["9341","밃",4,"밊밎밐밒밓밙밚밠밡밢밣밦밨밪밫밬밮밯밲밳밵"],["9361","밶밷밹",6,"뱂뱆뱇뱈뱊뱋뱎뱏뱑",8],["9381","뱚뱛뱜뱞",37,"벆벇벉벊벍벏",4,"벖벘벛",4,"벢벣벥벦벩",6,"벲벶",5,"벾벿볁볂볃볅",7,"볎볒볓볔볖볗볙볚볛볝",22,"볷볹볺볻볽"],["9441","볾",5,"봆봈봊",5,"봑봒봓봕",8],["9461","봞",5,"봥",6,"봭",12],["9481","봺",5,"뵁",6,"뵊뵋뵍뵎뵏뵑",6,"뵚",9,"뵥뵦뵧뵩",22,"붂붃붅붆붋",4,"붒붔붖붗붘붛붝",6,"붥",10,"붱",6,"붹",24],["9541","뷒뷓뷖뷗뷙뷚뷛뷝",11,"뷪",5,"뷱"],["9561","뷲뷳뷵뷶뷷뷹",6,"븁븂븄븆",5,"븎븏븑븒븓"],["9581","븕",6,"븞븠",35,"빆빇빉빊빋빍빏",4,"빖빘빜빝빞빟빢빣빥빦빧빩빫",4,"빲빶",4,"빾빿뺁뺂뺃뺅",6,"뺎뺒",5,"뺚",13,"뺩",14],["9641","뺸",23,"뻒뻓"],["9661","뻕뻖뻙",6,"뻡뻢뻦",5,"뻭",8],["9681","뻶",10,"뼂",5,"뼊",13,"뼚뼞",33,"뽂뽃뽅뽆뽇뽉",6,"뽒뽓뽔뽖",44],["9741","뾃",16,"뾕",8],["9761","뾞",17,"뾱",7],["9781","뾹",11,"뿆",5,"뿎뿏뿑뿒뿓뿕",6,"뿝뿞뿠뿢",89,"쀽쀾쀿"],["9841","쁀",16,"쁒",5,"쁙쁚쁛"],["9861","쁝쁞쁟쁡",6,"쁪",15],["9881","쁺",21,"삒삓삕삖삗삙",6,"삢삤삦",5,"삮삱삲삷",4,"삾샂샃샄샆샇샊샋샍샎샏샑",6,"샚샞",5,"샦샧샩샪샫샭",6,"샶샸샺",5,"섁섂섃섅섆섇섉",6,"섑섒섓섔섖",5,"섡섢섥섨섩섪섫섮"],["9941","섲섳섴섵섷섺섻섽섾섿셁",6,"셊셎",5,"셖셗"],["9961","셙셚셛셝",6,"셦셪",5,"셱셲셳셵셶셷셹셺셻"],["9981","셼",8,"솆",5,"솏솑솒솓솕솗",4,"솞솠솢솣솤솦솧솪솫솭솮솯솱",11,"솾",5,"쇅쇆쇇쇉쇊쇋쇍",6,"쇕쇖쇙",6,"쇡쇢쇣쇥쇦쇧쇩",6,"쇲쇴",7,"쇾쇿숁숂숃숅",6,"숎숐숒",5,"숚숛숝숞숡숢숣"],["9a41","숤숥숦숧숪숬숮숰숳숵",16],["9a61","쉆쉇쉉",6,"쉒쉓쉕쉖쉗쉙",6,"쉡쉢쉣쉤쉦"],["9a81","쉧",4,"쉮쉯쉱쉲쉳쉵",6,"쉾슀슂",5,"슊",5,"슑",6,"슙슚슜슞",5,"슦슧슩슪슫슮",5,"슶슸슺",33,"싞싟싡싢싥",5,"싮싰싲싳싴싵싷싺싽싾싿쌁",6,"쌊쌋쌎쌏"],["9b41","쌐쌑쌒쌖쌗쌙쌚쌛쌝",6,"쌦쌧쌪",8],["9b61","쌳",17,"썆",7],["9b81","썎",25,"썪썫썭썮썯썱썳",4,"썺썻썾",5,"쎅쎆쎇쎉쎊쎋쎍",50,"쏁",22,"쏚"],["9c41","쏛쏝쏞쏡쏣",4,"쏪쏫쏬쏮",5,"쏶쏷쏹",5],["9c61","쏿",8,"쐉",6,"쐑",9],["9c81","쐛",8,"쐥",6,"쐭쐮쐯쐱쐲쐳쐵",6,"쐾",9,"쑉",26,"쑦쑧쑩쑪쑫쑭",6,"쑶쑷쑸쑺",5,"쒁",18,"쒕",6,"쒝",12],["9d41","쒪",13,"쒹쒺쒻쒽",8],["9d61","쓆",25],["9d81","쓠",8,"쓪",5,"쓲쓳쓵쓶쓷쓹쓻쓼쓽쓾씂",9,"씍씎씏씑씒씓씕",6,"씝",10,"씪씫씭씮씯씱",6,"씺씼씾",5,"앆앇앋앏앐앑앒앖앚앛앜앟앢앣앥앦앧앩",6,"앲앶",5,"앾앿얁얂얃얅얆얈얉얊얋얎얐얒얓얔"],["9e41","얖얙얚얛얝얞얟얡",7,"얪",9,"얶"],["9e61","얷얺얿",4,"엋엍엏엒엓엕엖엗엙",6,"엢엤엦엧"],["9e81","엨엩엪엫엯엱엲엳엵엸엹엺엻옂옃옄옉옊옋옍옎옏옑",6,"옚옝",6,"옦옧옩옪옫옯옱옲옶옸옺옼옽옾옿왂왃왅왆왇왉",6,"왒왖",5,"왞왟왡",10,"왭왮왰왲",5,"왺왻왽왾왿욁",6,"욊욌욎",5,"욖욗욙욚욛욝",6,"욦"],["9f41","욨욪",5,"욲욳욵욶욷욻",4,"웂웄웆",5,"웎"],["9f61","웏웑웒웓웕",6,"웞웟웢",5,"웪웫웭웮웯웱웲"],["9f81","웳",4,"웺웻웼웾",5,"윆윇윉윊윋윍",6,"윖윘윚",5,"윢윣윥윦윧윩",6,"윲윴윶윸윹윺윻윾윿읁읂읃읅",4,"읋읎읐읙읚읛읝읞읟읡",6,"읩읪읬",7,"읶읷읹읺읻읿잀잁잂잆잋잌잍잏잒잓잕잙잛",4,"잢잧",4,"잮잯잱잲잳잵잶잷"],["a041","잸잹잺잻잾쟂",5,"쟊쟋쟍쟏쟑",6,"쟙쟚쟛쟜"],["a061","쟞",5,"쟥쟦쟧쟩쟪쟫쟭",13],["a081","쟻",4,"젂젃젅젆젇젉젋",4,"젒젔젗",4,"젞젟젡젢젣젥",6,"젮젰젲",5,"젹젺젻젽젾젿졁",6,"졊졋졎",5,"졕",26,"졲졳졵졶졷졹졻",4,"좂좄좈좉좊좎",5,"좕",7,"좞좠좢좣좤"],["a141","좥좦좧좩",18,"좾좿죀죁"],["a161","죂죃죅죆죇죉죊죋죍",6,"죖죘죚",5,"죢죣죥"],["a181","죦",14,"죶",5,"죾죿줁줂줃줇",4,"줎　、。·‥…¨〃­―∥＼∼‘’“”〔〕〈",9,"±×÷≠≤≥∞∴°′″℃Å￠￡￥♂♀∠⊥⌒∂∇≡≒§※☆★○●◎◇◆□■△▲▽▼→←↑↓↔〓≪≫√∽∝∵∫∬∈∋⊆⊇⊂⊃∪∩∧∨￢"],["a241","줐줒",5,"줙",18],["a261","줭",6,"줵",18],["a281","쥈",7,"쥒쥓쥕쥖쥗쥙",6,"쥢쥤",7,"쥭쥮쥯⇒⇔∀∃´～ˇ˘˝˚˙¸˛¡¿ː∮∑∏¤℉‰◁◀▷▶♤♠♡♥♧♣⊙◈▣◐◑▒▤▥▨▧▦▩♨☏☎☜☞¶†‡↕↗↙↖↘♭♩♪♬㉿㈜№㏇™㏂㏘℡€®"],["a341","쥱쥲쥳쥵",6,"쥽",10,"즊즋즍즎즏"],["a361","즑",6,"즚즜즞",16],["a381","즯",16,"짂짃짅짆짉짋",4,"짒짔짗짘짛！",58,"￦］",32,"￣"],["a441","짞짟짡짣짥짦짨짩짪짫짮짲",5,"짺짻짽짾짿쨁쨂쨃쨄"],["a461","쨅쨆쨇쨊쨎",5,"쨕쨖쨗쨙",12],["a481","쨦쨧쨨쨪",28,"ㄱ",93],["a541","쩇",4,"쩎쩏쩑쩒쩓쩕",6,"쩞쩢",5,"쩩쩪"],["a561","쩫",17,"쩾",5,"쪅쪆"],["a581","쪇",16,"쪙",14,"ⅰ",9],["a5b0","Ⅰ",9],["a5c1","Α",16,"Σ",6],["a5e1","α",16,"σ",6],["a641","쪨",19,"쪾쪿쫁쫂쫃쫅"],["a661","쫆",5,"쫎쫐쫒쫔쫕쫖쫗쫚",5,"쫡",6],["a681","쫨쫩쫪쫫쫭",6,"쫵",18,"쬉쬊─│┌┐┘└├┬┤┴┼━┃┏┓┛┗┣┳┫┻╋┠┯┨┷┿┝┰┥┸╂┒┑┚┙┖┕┎┍┞┟┡┢┦┧┩┪┭┮┱┲┵┶┹┺┽┾╀╁╃",7],["a741","쬋",4,"쬑쬒쬓쬕쬖쬗쬙",6,"쬢",7],["a761","쬪",22,"쭂쭃쭄"],["a781","쭅쭆쭇쭊쭋쭍쭎쭏쭑",6,"쭚쭛쭜쭞",5,"쭥",7,"㎕㎖㎗ℓ㎘㏄㎣㎤㎥㎦㎙",9,"㏊㎍㎎㎏㏏㎈㎉㏈㎧㎨㎰",9,"㎀",4,"㎺",5,"㎐",4,"Ω㏀㏁㎊㎋㎌㏖㏅㎭㎮㎯㏛㎩㎪㎫㎬㏝㏐㏓㏃㏉㏜㏆"],["a841","쭭",10,"쭺",14],["a861","쮉",18,"쮝",6],["a881","쮤",19,"쮹",11,"ÆÐªĦ"],["a8a6","Ĳ"],["a8a8","ĿŁØŒºÞŦŊ"],["a8b1","㉠",27,"ⓐ",25,"①",14,"½⅓⅔¼¾⅛⅜⅝⅞"],["a941","쯅",14,"쯕",10],["a961","쯠쯡쯢쯣쯥쯦쯨쯪",18],["a981","쯽",14,"찎찏찑찒찓찕",6,"찞찟찠찣찤æđðħıĳĸŀłøœßþŧŋŉ㈀",27,"⒜",25,"⑴",14,"¹²³⁴ⁿ₁₂₃₄"],["aa41","찥찦찪찫찭찯찱",6,"찺찿",4,"챆챇챉챊챋챍챎"],["aa61","챏",4,"챖챚",5,"챡챢챣챥챧챩",6,"챱챲"],["aa81","챳챴챶",29,"ぁ",82],["ab41","첔첕첖첗첚첛첝첞첟첡",6,"첪첮",5,"첶첷첹"],["ab61","첺첻첽",6,"쳆쳈쳊",5,"쳑쳒쳓쳕",5],["ab81","쳛",8,"쳥",6,"쳭쳮쳯쳱",12,"ァ",85],["ac41","쳾쳿촀촂",5,"촊촋촍촎촏촑",6,"촚촜촞촟촠"],["ac61","촡촢촣촥촦촧촩촪촫촭",11,"촺",4],["ac81","촿",28,"쵝쵞쵟А",5,"ЁЖ",25],["acd1","а",5,"ёж",25],["ad41","쵡쵢쵣쵥",6,"쵮쵰쵲",5,"쵹",7],["ad61","춁",6,"춉",10,"춖춗춙춚춛춝춞춟"],["ad81","춠춡춢춣춦춨춪",5,"춱",18,"췅"],["ae41","췆",5,"췍췎췏췑",16],["ae61","췢",5,"췩췪췫췭췮췯췱",6,"췺췼췾",4],["ae81","츃츅츆츇츉츊츋츍",6,"츕츖츗츘츚",5,"츢츣츥츦츧츩츪츫"],["af41","츬츭츮츯츲츴츶",19],["af61","칊",13,"칚칛칝칞칢",5,"칪칬"],["af81","칮",5,"칶칷칹칺칻칽",6,"캆캈캊",5,"캒캓캕캖캗캙"],["b041","캚",5,"캢캦",5,"캮",12],["b061","캻",5,"컂",19],["b081","컖",13,"컦컧컩컪컭",6,"컶컺",5,"가각간갇갈갉갊감",7,"같",4,"갠갤갬갭갯갰갱갸갹갼걀걋걍걔걘걜거걱건걷걸걺검겁것겄겅겆겉겊겋게겐겔겜겝겟겠겡겨격겪견겯결겸겹겻겼경곁계곈곌곕곗고곡곤곧골곪곬곯곰곱곳공곶과곽관괄괆"],["b141","켂켃켅켆켇켉",6,"켒켔켖",5,"켝켞켟켡켢켣"],["b161","켥",6,"켮켲",5,"켹",11],["b181","콅",14,"콖콗콙콚콛콝",6,"콦콨콪콫콬괌괍괏광괘괜괠괩괬괭괴괵괸괼굄굅굇굉교굔굘굡굣구국군굳굴굵굶굻굼굽굿궁궂궈궉권궐궜궝궤궷귀귁귄귈귐귑귓규균귤그극근귿글긁금급긋긍긔기긱긴긷길긺김깁깃깅깆깊까깍깎깐깔깖깜깝깟깠깡깥깨깩깬깰깸"],["b241","콭콮콯콲콳콵콶콷콹",6,"쾁쾂쾃쾄쾆",5,"쾍"],["b261","쾎",18,"쾢",5,"쾩"],["b281","쾪",5,"쾱",18,"쿅",6,"깹깻깼깽꺄꺅꺌꺼꺽꺾껀껄껌껍껏껐껑께껙껜껨껫껭껴껸껼꼇꼈꼍꼐꼬꼭꼰꼲꼴꼼꼽꼿꽁꽂꽃꽈꽉꽐꽜꽝꽤꽥꽹꾀꾄꾈꾐꾑꾕꾜꾸꾹꾼꿀꿇꿈꿉꿋꿍꿎꿔꿜꿨꿩꿰꿱꿴꿸뀀뀁뀄뀌뀐뀔뀜뀝뀨끄끅끈끊끌끎끓끔끕끗끙"],["b341","쿌",19,"쿢쿣쿥쿦쿧쿩"],["b361","쿪",5,"쿲쿴쿶",5,"쿽쿾쿿퀁퀂퀃퀅",5],["b381","퀋",5,"퀒",5,"퀙",19,"끝끼끽낀낄낌낍낏낑나낙낚난낟날낡낢남납낫",4,"낱낳내낵낸낼냄냅냇냈냉냐냑냔냘냠냥너넉넋넌널넒넓넘넙넛넜넝넣네넥넨넬넴넵넷넸넹녀녁년녈념녑녔녕녘녜녠노녹논놀놂놈놉놋농높놓놔놘놜놨뇌뇐뇔뇜뇝"],["b441","퀮",5,"퀶퀷퀹퀺퀻퀽",6,"큆큈큊",5],["b461","큑큒큓큕큖큗큙",6,"큡",10,"큮큯"],["b481","큱큲큳큵",6,"큾큿킀킂",18,"뇟뇨뇩뇬뇰뇹뇻뇽누눅눈눋눌눔눕눗눙눠눴눼뉘뉜뉠뉨뉩뉴뉵뉼늄늅늉느늑는늘늙늚늠늡늣능늦늪늬늰늴니닉닌닐닒님닙닛닝닢다닥닦단닫",4,"닳담답닷",4,"닿대댁댄댈댐댑댓댔댕댜더덕덖던덛덜덞덟덤덥"],["b541","킕",14,"킦킧킩킪킫킭",5],["b561","킳킶킸킺",5,"탂탃탅탆탇탊",5,"탒탖",4],["b581","탛탞탟탡탢탣탥",6,"탮탲",5,"탹",11,"덧덩덫덮데덱덴델뎀뎁뎃뎄뎅뎌뎐뎔뎠뎡뎨뎬도독돈돋돌돎돐돔돕돗동돛돝돠돤돨돼됐되된될됨됩됫됴두둑둔둘둠둡둣둥둬뒀뒈뒝뒤뒨뒬뒵뒷뒹듀듄듈듐듕드득든듣들듦듬듭듯등듸디딕딘딛딜딤딥딧딨딩딪따딱딴딸"],["b641","턅",7,"턎",17],["b661","턠",15,"턲턳턵턶턷턹턻턼턽턾"],["b681","턿텂텆",5,"텎텏텑텒텓텕",6,"텞텠텢",5,"텩텪텫텭땀땁땃땄땅땋때땍땐땔땜땝땟땠땡떠떡떤떨떪떫떰떱떳떴떵떻떼떽뗀뗄뗌뗍뗏뗐뗑뗘뗬또똑똔똘똥똬똴뙈뙤뙨뚜뚝뚠뚤뚫뚬뚱뛔뛰뛴뛸뜀뜁뜅뜨뜩뜬뜯뜰뜸뜹뜻띄띈띌띔띕띠띤띨띰띱띳띵라락란랄람랍랏랐랑랒랖랗"],["b741","텮",13,"텽",6,"톅톆톇톉톊"],["b761","톋",20,"톢톣톥톦톧"],["b781","톩",6,"톲톴톶톷톸톹톻톽톾톿퇁",14,"래랙랜랠램랩랫랬랭랴략랸럇량러럭런럴럼럽럿렀렁렇레렉렌렐렘렙렛렝려력련렬렴렵렷렸령례롄롑롓로록론롤롬롭롯롱롸롼뢍뢨뢰뢴뢸룀룁룃룅료룐룔룝룟룡루룩룬룰룸룹룻룽뤄뤘뤠뤼뤽륀륄륌륏륑류륙륜률륨륩"],["b841","퇐",7,"퇙",17],["b861","퇫",8,"퇵퇶퇷퇹",13],["b881","툈툊",5,"툑",24,"륫륭르륵른를름릅릇릉릊릍릎리릭린릴림립릿링마막만많",4,"맘맙맛망맞맡맣매맥맨맬맴맵맷맸맹맺먀먁먈먕머먹먼멀멂멈멉멋멍멎멓메멕멘멜멤멥멧멨멩며멱면멸몃몄명몇몌모목몫몬몰몲몸몹못몽뫄뫈뫘뫙뫼"],["b941","툪툫툮툯툱툲툳툵",6,"툾퉀퉂",5,"퉉퉊퉋퉌"],["b961","퉍",14,"퉝",6,"퉥퉦퉧퉨"],["b981","퉩",22,"튂튃튅튆튇튉튊튋튌묀묄묍묏묑묘묜묠묩묫무묵묶문묻물묽묾뭄뭅뭇뭉뭍뭏뭐뭔뭘뭡뭣뭬뮈뮌뮐뮤뮨뮬뮴뮷므믄믈믐믓미믹민믿밀밂밈밉밋밌밍및밑바",4,"받",4,"밤밥밧방밭배백밴밸뱀뱁뱃뱄뱅뱉뱌뱍뱐뱝버벅번벋벌벎범법벗"],["ba41","튍튎튏튒튓튔튖",5,"튝튞튟튡튢튣튥",6,"튭"],["ba61","튮튯튰튲",5,"튺튻튽튾틁틃",4,"틊틌",5],["ba81","틒틓틕틖틗틙틚틛틝",6,"틦",9,"틲틳틵틶틷틹틺벙벚베벡벤벧벨벰벱벳벴벵벼벽변별볍볏볐병볕볘볜보복볶본볼봄봅봇봉봐봔봤봬뵀뵈뵉뵌뵐뵘뵙뵤뵨부북분붇불붉붊붐붑붓붕붙붚붜붤붰붸뷔뷕뷘뷜뷩뷰뷴뷸븀븃븅브븍븐블븜븝븟비빅빈빌빎빔빕빗빙빚빛빠빡빤"],["bb41","틻",4,"팂팄팆",5,"팏팑팒팓팕팗",4,"팞팢팣"],["bb61","팤팦팧팪팫팭팮팯팱",6,"팺팾",5,"퍆퍇퍈퍉"],["bb81","퍊",31,"빨빪빰빱빳빴빵빻빼빽뺀뺄뺌뺍뺏뺐뺑뺘뺙뺨뻐뻑뻔뻗뻘뻠뻣뻤뻥뻬뼁뼈뼉뼘뼙뼛뼜뼝뽀뽁뽄뽈뽐뽑뽕뾔뾰뿅뿌뿍뿐뿔뿜뿟뿡쀼쁑쁘쁜쁠쁨쁩삐삑삔삘삠삡삣삥사삭삯산삳살삵삶삼삽삿샀상샅새색샌샐샘샙샛샜생샤"],["bc41","퍪",17,"퍾퍿펁펂펃펅펆펇"],["bc61","펈펉펊펋펎펒",5,"펚펛펝펞펟펡",6,"펪펬펮"],["bc81","펯",4,"펵펶펷펹펺펻펽",6,"폆폇폊",5,"폑",5,"샥샨샬샴샵샷샹섀섄섈섐섕서",4,"섣설섦섧섬섭섯섰성섶세섹센셀셈셉셋셌셍셔셕션셜셤셥셧셨셩셰셴셸솅소속솎손솔솖솜솝솟송솥솨솩솬솰솽쇄쇈쇌쇔쇗쇘쇠쇤쇨쇰쇱쇳쇼쇽숀숄숌숍숏숑수숙순숟술숨숩숫숭"],["bd41","폗폙",7,"폢폤",7,"폮폯폱폲폳폵폶폷"],["bd61","폸폹폺폻폾퐀퐂",5,"퐉",13],["bd81","퐗",5,"퐞",25,"숯숱숲숴쉈쉐쉑쉔쉘쉠쉥쉬쉭쉰쉴쉼쉽쉿슁슈슉슐슘슛슝스슥슨슬슭슴습슷승시식신싣실싫심십싯싱싶싸싹싻싼쌀쌈쌉쌌쌍쌓쌔쌕쌘쌜쌤쌥쌨쌩썅써썩썬썰썲썸썹썼썽쎄쎈쎌쏀쏘쏙쏜쏟쏠쏢쏨쏩쏭쏴쏵쏸쐈쐐쐤쐬쐰"],["be41","퐸",7,"푁푂푃푅",14],["be61","푔",7,"푝푞푟푡푢푣푥",7,"푮푰푱푲"],["be81","푳",4,"푺푻푽푾풁풃",4,"풊풌풎",5,"풕",8,"쐴쐼쐽쑈쑤쑥쑨쑬쑴쑵쑹쒀쒔쒜쒸쒼쓩쓰쓱쓴쓸쓺쓿씀씁씌씐씔씜씨씩씬씰씸씹씻씽아악안앉않알앍앎앓암압앗았앙앝앞애액앤앨앰앱앳앴앵야약얀얄얇얌얍얏양얕얗얘얜얠얩어억언얹얻얼얽얾엄",6,"엌엎"],["bf41","풞",10,"풪",14],["bf61","풹",18,"퓍퓎퓏퓑퓒퓓퓕"],["bf81","퓖",5,"퓝퓞퓠",7,"퓩퓪퓫퓭퓮퓯퓱",6,"퓹퓺퓼에엑엔엘엠엡엣엥여역엮연열엶엷염",5,"옅옆옇예옌옐옘옙옛옜오옥온올옭옮옰옳옴옵옷옹옻와왁완왈왐왑왓왔왕왜왝왠왬왯왱외왹왼욀욈욉욋욍요욕욘욜욤욥욧용우욱운울욹욺움웁웃웅워웍원월웜웝웠웡웨"],["c041","퓾",5,"픅픆픇픉픊픋픍",6,"픖픘",5],["c061","픞",25],["c081","픸픹픺픻픾픿핁핂핃핅",6,"핎핐핒",5,"핚핛핝핞핟핡핢핣웩웬웰웸웹웽위윅윈윌윔윕윗윙유육윤율윰윱윳융윷으윽은을읊음읍읏응",7,"읜읠읨읫이익인일읽읾잃임입잇있잉잊잎자작잔잖잗잘잚잠잡잣잤장잦재잭잰잴잼잽잿쟀쟁쟈쟉쟌쟎쟐쟘쟝쟤쟨쟬저적전절젊"],["c141","핤핦핧핪핬핮",5,"핶핷핹핺핻핽",6,"햆햊햋"],["c161","햌햍햎햏햑",19,"햦햧"],["c181","햨",31,"점접젓정젖제젝젠젤젬젭젯젱져젼졀졈졉졌졍졔조족존졸졺좀좁좃종좆좇좋좌좍좔좝좟좡좨좼좽죄죈죌죔죕죗죙죠죡죤죵주죽준줄줅줆줌줍줏중줘줬줴쥐쥑쥔쥘쥠쥡쥣쥬쥰쥴쥼즈즉즌즐즘즙즛증지직진짇질짊짐집짓"],["c241","헊헋헍헎헏헑헓",4,"헚헜헞",5,"헦헧헩헪헫헭헮"],["c261","헯",4,"헶헸헺",5,"혂혃혅혆혇혉",6,"혒"],["c281","혖",5,"혝혞혟혡혢혣혥",7,"혮",9,"혺혻징짖짙짚짜짝짠짢짤짧짬짭짯짰짱째짹짼쨀쨈쨉쨋쨌쨍쨔쨘쨩쩌쩍쩐쩔쩜쩝쩟쩠쩡쩨쩽쪄쪘쪼쪽쫀쫄쫌쫍쫏쫑쫓쫘쫙쫠쫬쫴쬈쬐쬔쬘쬠쬡쭁쭈쭉쭌쭐쭘쭙쭝쭤쭸쭹쮜쮸쯔쯤쯧쯩찌찍찐찔찜찝찡찢찧차착찬찮찰참찹찻"],["c341","혽혾혿홁홂홃홄홆홇홊홌홎홏홐홒홓홖홗홙홚홛홝",4],["c361","홢",4,"홨홪",5,"홲홳홵",11],["c381","횁횂횄횆",5,"횎횏횑횒횓횕",7,"횞횠횢",5,"횩횪찼창찾채책챈챌챔챕챗챘챙챠챤챦챨챰챵처척천철첨첩첫첬청체첵첸첼쳄쳅쳇쳉쳐쳔쳤쳬쳰촁초촉촌촐촘촙촛총촤촨촬촹최쵠쵤쵬쵭쵯쵱쵸춈추축춘출춤춥춧충춰췄췌췐취췬췰췸췹췻췽츄츈츌츔츙츠측츤츨츰츱츳층"],["c441","횫횭횮횯횱",7,"횺횼",7,"훆훇훉훊훋"],["c461","훍훎훏훐훒훓훕훖훘훚",5,"훡훢훣훥훦훧훩",4],["c481","훮훯훱훲훳훴훶",5,"훾훿휁휂휃휅",11,"휒휓휔치칙친칟칠칡침칩칫칭카칵칸칼캄캅캇캉캐캑캔캘캠캡캣캤캥캬캭컁커컥컨컫컬컴컵컷컸컹케켁켄켈켐켑켓켕켜켠켤켬켭켯켰켱켸코콕콘콜콤콥콧콩콰콱콴콸쾀쾅쾌쾡쾨쾰쿄쿠쿡쿤쿨쿰쿱쿳쿵쿼퀀퀄퀑퀘퀭퀴퀵퀸퀼"],["c541","휕휖휗휚휛휝휞휟휡",6,"휪휬휮",5,"휶휷휹"],["c561","휺휻휽",6,"흅흆흈흊",5,"흒흓흕흚",4],["c581","흟흢흤흦흧흨흪흫흭흮흯흱흲흳흵",6,"흾흿힀힂",5,"힊힋큄큅큇큉큐큔큘큠크큭큰클큼큽킁키킥킨킬킴킵킷킹타탁탄탈탉탐탑탓탔탕태택탠탤탬탭탯탰탱탸턍터턱턴털턺텀텁텃텄텅테텍텐텔템텝텟텡텨텬텼톄톈토톡톤톨톰톱톳통톺톼퇀퇘퇴퇸툇툉툐투툭툰툴툼툽툿퉁퉈퉜"],["c641","힍힎힏힑",6,"힚힜힞",5],["c6a1","퉤튀튁튄튈튐튑튕튜튠튤튬튱트특튼튿틀틂틈틉틋틔틘틜틤틥티틱틴틸팀팁팃팅파팍팎판팔팖팜팝팟팠팡팥패팩팬팰팸팹팻팼팽퍄퍅퍼퍽펀펄펌펍펏펐펑페펙펜펠펨펩펫펭펴편펼폄폅폈평폐폘폡폣포폭폰폴폼폽폿퐁"],["c7a1","퐈퐝푀푄표푠푤푭푯푸푹푼푿풀풂품풉풋풍풔풩퓌퓐퓔퓜퓟퓨퓬퓰퓸퓻퓽프픈플픔픕픗피픽핀필핌핍핏핑하학한할핥함합핫항해핵핸핼햄햅햇했행햐향허헉헌헐헒험헙헛헝헤헥헨헬헴헵헷헹혀혁현혈혐협혓혔형혜혠"],["c8a1","혤혭호혹혼홀홅홈홉홋홍홑화확환활홧황홰홱홴횃횅회획횐횔횝횟횡효횬횰횹횻후훅훈훌훑훔훗훙훠훤훨훰훵훼훽휀휄휑휘휙휜휠휨휩휫휭휴휵휸휼흄흇흉흐흑흔흖흗흘흙흠흡흣흥흩희흰흴흼흽힁히힉힌힐힘힙힛힝"],["caa1","伽佳假價加可呵哥嘉嫁家暇架枷柯歌珂痂稼苛茄街袈訶賈跏軻迦駕刻却各恪慤殼珏脚覺角閣侃刊墾奸姦干幹懇揀杆柬桿澗癎看磵稈竿簡肝艮艱諫間乫喝曷渴碣竭葛褐蝎鞨勘坎堪嵌感憾戡敢柑橄減甘疳監瞰紺邯鑑鑒龕"],["cba1","匣岬甲胛鉀閘剛堈姜岡崗康强彊慷江畺疆糠絳綱羌腔舡薑襁講鋼降鱇介价個凱塏愷愾慨改槪漑疥皆盖箇芥蓋豈鎧開喀客坑更粳羹醵倨去居巨拒据據擧渠炬祛距踞車遽鉅鋸乾件健巾建愆楗腱虔蹇鍵騫乞傑杰桀儉劍劒檢"],["cca1","瞼鈐黔劫怯迲偈憩揭擊格檄激膈覡隔堅牽犬甄絹繭肩見譴遣鵑抉決潔結缺訣兼慊箝謙鉗鎌京俓倞傾儆勁勍卿坰境庚徑慶憬擎敬景暻更梗涇炅烱璟璥瓊痙硬磬竟競絅經耕耿脛莖警輕逕鏡頃頸驚鯨係啓堺契季屆悸戒桂械"],["cda1","棨溪界癸磎稽系繫繼計誡谿階鷄古叩告呱固姑孤尻庫拷攷故敲暠枯槁沽痼皐睾稿羔考股膏苦苽菰藁蠱袴誥賈辜錮雇顧高鼓哭斛曲梏穀谷鵠困坤崑昆梱棍滾琨袞鯤汨滑骨供公共功孔工恐恭拱控攻珙空蚣貢鞏串寡戈果瓜"],["cea1","科菓誇課跨過鍋顆廓槨藿郭串冠官寬慣棺款灌琯瓘管罐菅觀貫關館刮恝括适侊光匡壙廣曠洸炚狂珖筐胱鑛卦掛罫乖傀塊壞怪愧拐槐魁宏紘肱轟交僑咬喬嬌嶠巧攪敎校橋狡皎矯絞翹膠蕎蛟較轎郊餃驕鮫丘久九仇俱具勾"],["cfa1","區口句咎嘔坵垢寇嶇廐懼拘救枸柩構歐毆毬求溝灸狗玖球瞿矩究絿耉臼舅舊苟衢謳購軀逑邱鉤銶駒驅鳩鷗龜國局菊鞠鞫麴君窘群裙軍郡堀屈掘窟宮弓穹窮芎躬倦券勸卷圈拳捲權淃眷厥獗蕨蹶闕机櫃潰詭軌饋句晷歸貴"],["d0a1","鬼龜叫圭奎揆槻珪硅窺竅糾葵規赳逵閨勻均畇筠菌鈞龜橘克剋劇戟棘極隙僅劤勤懃斤根槿瑾筋芹菫覲謹近饉契今妗擒昑檎琴禁禽芩衾衿襟金錦伋及急扱汲級給亘兢矜肯企伎其冀嗜器圻基埼夔奇妓寄岐崎己幾忌技旗旣"],["d1a1","朞期杞棋棄機欺氣汽沂淇玘琦琪璂璣畸畿碁磯祁祇祈祺箕紀綺羈耆耭肌記譏豈起錡錤飢饑騎騏驥麒緊佶吉拮桔金喫儺喇奈娜懦懶拏拿癩",5,"那樂",4,"諾酪駱亂卵暖欄煖爛蘭難鸞捏捺南嵐枏楠湳濫男藍襤拉"],["d2a1","納臘蠟衲囊娘廊",4,"乃來內奈柰耐冷女年撚秊念恬拈捻寧寗努勞奴弩怒擄櫓爐瑙盧",5,"駑魯",10,"濃籠聾膿農惱牢磊腦賂雷尿壘",7,"嫩訥杻紐勒",5,"能菱陵尼泥匿溺多茶"],["d3a1","丹亶但單團壇彖斷旦檀段湍短端簞緞蛋袒鄲鍛撻澾獺疸達啖坍憺擔曇淡湛潭澹痰聃膽蕁覃談譚錟沓畓答踏遝唐堂塘幢戇撞棠當糖螳黨代垈坮大對岱帶待戴擡玳臺袋貸隊黛宅德悳倒刀到圖堵塗導屠島嶋度徒悼挑掉搗桃"],["d4a1","棹櫂淘渡滔濤燾盜睹禱稻萄覩賭跳蹈逃途道都鍍陶韜毒瀆牘犢獨督禿篤纛讀墩惇敦旽暾沌焞燉豚頓乭突仝冬凍動同憧東桐棟洞潼疼瞳童胴董銅兜斗杜枓痘竇荳讀豆逗頭屯臀芚遁遯鈍得嶝橙燈登等藤謄鄧騰喇懶拏癩羅"],["d5a1","蘿螺裸邏樂洛烙珞絡落諾酪駱丹亂卵欄欒瀾爛蘭鸞剌辣嵐擥攬欖濫籃纜藍襤覽拉臘蠟廊朗浪狼琅瑯螂郞來崍徠萊冷掠略亮倆兩凉梁樑粮粱糧良諒輛量侶儷勵呂廬慮戾旅櫚濾礪藜蠣閭驢驪麗黎力曆歷瀝礫轢靂憐戀攣漣"],["d6a1","煉璉練聯蓮輦連鍊冽列劣洌烈裂廉斂殮濂簾獵令伶囹寧岺嶺怜玲笭羚翎聆逞鈴零靈領齡例澧禮醴隷勞怒撈擄櫓潞瀘爐盧老蘆虜路輅露魯鷺鹵碌祿綠菉錄鹿麓論壟弄朧瀧瓏籠聾儡瀨牢磊賂賚賴雷了僚寮廖料燎療瞭聊蓼"],["d7a1","遼鬧龍壘婁屢樓淚漏瘻累縷蔞褸鏤陋劉旒柳榴流溜瀏琉瑠留瘤硫謬類六戮陸侖倫崙淪綸輪律慄栗率隆勒肋凜凌楞稜綾菱陵俚利厘吏唎履悧李梨浬犁狸理璃異痢籬罹羸莉裏裡里釐離鯉吝潾燐璘藺躪隣鱗麟林淋琳臨霖砬"],["d8a1","立笠粒摩瑪痲碼磨馬魔麻寞幕漠膜莫邈万卍娩巒彎慢挽晩曼滿漫灣瞞萬蔓蠻輓饅鰻唜抹末沫茉襪靺亡妄忘忙望網罔芒茫莽輞邙埋妹媒寐昧枚梅每煤罵買賣邁魅脈貊陌驀麥孟氓猛盲盟萌冪覓免冕勉棉沔眄眠綿緬面麵滅"],["d9a1","蔑冥名命明暝椧溟皿瞑茗蓂螟酩銘鳴袂侮冒募姆帽慕摸摹暮某模母毛牟牡瑁眸矛耗芼茅謀謨貌木沐牧目睦穆鶩歿沒夢朦蒙卯墓妙廟描昴杳渺猫竗苗錨務巫憮懋戊拇撫无楙武毋無珷畝繆舞茂蕪誣貿霧鵡墨默們刎吻問文"],["daa1","汶紊紋聞蚊門雯勿沕物味媚尾嵋彌微未梶楣渼湄眉米美薇謎迷靡黴岷悶愍憫敏旻旼民泯玟珉緡閔密蜜謐剝博拍搏撲朴樸泊珀璞箔粕縛膊舶薄迫雹駁伴半反叛拌搬攀斑槃泮潘班畔瘢盤盼磐磻礬絆般蟠返頒飯勃拔撥渤潑"],["dba1","發跋醱鉢髮魃倣傍坊妨尨幇彷房放方旁昉枋榜滂磅紡肪膀舫芳蒡蚌訪謗邦防龐倍俳北培徘拜排杯湃焙盃背胚裴裵褙賠輩配陪伯佰帛柏栢白百魄幡樊煩燔番磻繁蕃藩飜伐筏罰閥凡帆梵氾汎泛犯範范法琺僻劈壁擘檗璧癖"],["dca1","碧蘗闢霹便卞弁變辨辯邊別瞥鱉鼈丙倂兵屛幷昞昺柄棅炳甁病秉竝輧餠騈保堡報寶普步洑湺潽珤甫菩補褓譜輔伏僕匐卜宓復服福腹茯蔔複覆輹輻馥鰒本乶俸奉封峯峰捧棒烽熢琫縫蓬蜂逢鋒鳳不付俯傅剖副否咐埠夫婦"],["dda1","孚孵富府復扶敷斧浮溥父符簿缶腐腑膚艀芙莩訃負賦賻赴趺部釜阜附駙鳧北分吩噴墳奔奮忿憤扮昐汾焚盆粉糞紛芬賁雰不佛弗彿拂崩朋棚硼繃鵬丕備匕匪卑妃婢庇悲憊扉批斐枇榧比毖毗毘沸泌琵痺砒碑秕秘粃緋翡肥"],["dea1","脾臂菲蜚裨誹譬費鄙非飛鼻嚬嬪彬斌檳殯浜濱瀕牝玭貧賓頻憑氷聘騁乍事些仕伺似使俟僿史司唆嗣四士奢娑寫寺射巳師徙思捨斜斯柶査梭死沙泗渣瀉獅砂社祀祠私篩紗絲肆舍莎蓑蛇裟詐詞謝賜赦辭邪飼駟麝削數朔索"],["dfa1","傘刪山散汕珊産疝算蒜酸霰乷撒殺煞薩三參杉森渗芟蔘衫揷澁鈒颯上傷像償商喪嘗孀尙峠常床庠廂想桑橡湘爽牀狀相祥箱翔裳觴詳象賞霜塞璽賽嗇塞穡索色牲生甥省笙墅壻嶼序庶徐恕抒捿敍暑曙書栖棲犀瑞筮絮緖署"],["e0a1","胥舒薯西誓逝鋤黍鼠夕奭席惜昔晳析汐淅潟石碩蓆釋錫仙僊先善嬋宣扇敾旋渲煽琁瑄璇璿癬禪線繕羨腺膳船蘚蟬詵跣選銑鐥饍鮮卨屑楔泄洩渫舌薛褻設說雪齧剡暹殲纖蟾贍閃陝攝涉燮葉城姓宬性惺成星晟猩珹盛省筬"],["e1a1","聖聲腥誠醒世勢歲洗稅笹細說貰召嘯塑宵小少巢所掃搔昭梳沼消溯瀟炤燒甦疏疎瘙笑篠簫素紹蔬蕭蘇訴逍遡邵銷韶騷俗屬束涑粟續謖贖速孫巽損蓀遜飡率宋悚松淞訟誦送頌刷殺灑碎鎖衰釗修受嗽囚垂壽嫂守岫峀帥愁"],["e2a1","戍手授搜收數樹殊水洙漱燧狩獸琇璲瘦睡秀穗竪粹綏綬繡羞脩茱蒐蓚藪袖誰讐輸遂邃酬銖銹隋隧隨雖需須首髓鬚叔塾夙孰宿淑潚熟琡璹肅菽巡徇循恂旬栒楯橓殉洵淳珣盾瞬筍純脣舜荀蓴蕣詢諄醇錞順馴戌術述鉥崇崧"],["e3a1","嵩瑟膝蝨濕拾習褶襲丞乘僧勝升承昇繩蠅陞侍匙嘶始媤尸屎屍市弑恃施是時枾柴猜矢示翅蒔蓍視試詩諡豕豺埴寔式息拭植殖湜熄篒蝕識軾食飾伸侁信呻娠宸愼新晨燼申神紳腎臣莘薪藎蜃訊身辛辰迅失室實悉審尋心沁"],["e4a1","沈深瀋甚芯諶什十拾雙氏亞俄兒啞娥峨我牙芽莪蛾衙訝阿雅餓鴉鵝堊岳嶽幄惡愕握樂渥鄂鍔顎鰐齷安岸按晏案眼雁鞍顔鮟斡謁軋閼唵岩巖庵暗癌菴闇壓押狎鴨仰央怏昻殃秧鴦厓哀埃崖愛曖涯碍艾隘靄厄扼掖液縊腋額"],["e5a1","櫻罌鶯鸚也倻冶夜惹揶椰爺耶若野弱掠略約若葯蒻藥躍亮佯兩凉壤孃恙揚攘敭暘梁楊樣洋瀁煬痒瘍禳穰糧羊良襄諒讓釀陽量養圄御於漁瘀禦語馭魚齬億憶抑檍臆偃堰彦焉言諺孼蘖俺儼嚴奄掩淹嶪業円予余勵呂女如廬"],["e6a1","旅歟汝濾璵礖礪與艅茹輿轝閭餘驪麗黎亦力域役易曆歷疫繹譯轢逆驛嚥堧姸娟宴年延憐戀捐挻撚椽沇沿涎涓淵演漣烟然煙煉燃燕璉硏硯秊筵緣練縯聯衍軟輦蓮連鉛鍊鳶列劣咽悅涅烈熱裂說閱厭廉念捻染殮炎焰琰艶苒"],["e7a1","簾閻髥鹽曄獵燁葉令囹塋寧嶺嶸影怜映暎楹榮永泳渶潁濚瀛瀯煐營獰玲瑛瑩瓔盈穎纓羚聆英詠迎鈴鍈零霙靈領乂倪例刈叡曳汭濊猊睿穢芮藝蘂禮裔詣譽豫醴銳隸霓預五伍俉傲午吾吳嗚塢墺奧娛寤悟惡懊敖旿晤梧汚澳"],["e8a1","烏熬獒筽蜈誤鰲鼇屋沃獄玉鈺溫瑥瘟穩縕蘊兀壅擁瓮甕癰翁邕雍饔渦瓦窩窪臥蛙蝸訛婉完宛梡椀浣玩琓琬碗緩翫脘腕莞豌阮頑曰往旺枉汪王倭娃歪矮外嵬巍猥畏了僚僥凹堯夭妖姚寥寮尿嶢拗搖撓擾料曜樂橈燎燿瑤療"],["e9a1","窈窯繇繞耀腰蓼蟯要謠遙遼邀饒慾欲浴縟褥辱俑傭冗勇埇墉容庸慂榕涌湧溶熔瑢用甬聳茸蓉踊鎔鏞龍于佑偶優又友右宇寓尤愚憂旴牛玗瑀盂祐禑禹紆羽芋藕虞迂遇郵釪隅雨雩勖彧旭昱栯煜稶郁頊云暈橒殞澐熉耘芸蕓"],["eaa1","運隕雲韻蔚鬱亐熊雄元原員圓園垣媛嫄寃怨愿援沅洹湲源爰猿瑗苑袁轅遠阮院願鴛月越鉞位偉僞危圍委威尉慰暐渭爲瑋緯胃萎葦蔿蝟衛褘謂違韋魏乳侑儒兪劉唯喩孺宥幼幽庾悠惟愈愉揄攸有杻柔柚柳楡楢油洧流游溜"],["eba1","濡猶猷琉瑜由留癒硫紐維臾萸裕誘諛諭踰蹂遊逾遺酉釉鍮類六堉戮毓肉育陸倫允奫尹崙淪潤玧胤贇輪鈗閏律慄栗率聿戎瀜絨融隆垠恩慇殷誾銀隱乙吟淫蔭陰音飮揖泣邑凝應膺鷹依倚儀宜意懿擬椅毅疑矣義艤薏蟻衣誼"],["eca1","議醫二以伊利吏夷姨履已弛彛怡易李梨泥爾珥理異痍痢移罹而耳肄苡荑裏裡貽貳邇里離飴餌匿溺瀷益翊翌翼謚人仁刃印吝咽因姻寅引忍湮燐璘絪茵藺蚓認隣靭靷鱗麟一佚佾壹日溢逸鎰馹任壬妊姙恁林淋稔臨荏賃入卄"],["eda1","立笠粒仍剩孕芿仔刺咨姉姿子字孜恣慈滋炙煮玆瓷疵磁紫者自茨蔗藉諮資雌作勺嚼斫昨灼炸爵綽芍酌雀鵲孱棧殘潺盞岑暫潛箴簪蠶雜丈仗匠場墻壯奬將帳庄張掌暲杖樟檣欌漿牆狀獐璋章粧腸臟臧莊葬蔣薔藏裝贓醬長"],["eea1","障再哉在宰才材栽梓渽滓災縡裁財載齋齎爭箏諍錚佇低儲咀姐底抵杵楮樗沮渚狙猪疽箸紵苧菹著藷詛貯躇這邸雎齟勣吊嫡寂摘敵滴狄炙的積笛籍績翟荻謫賊赤跡蹟迪迹適鏑佃佺傳全典前剪塡塼奠專展廛悛戰栓殿氈澱"],["efa1","煎琠田甸畑癲筌箋箭篆纏詮輾轉鈿銓錢鐫電顚顫餞切截折浙癤竊節絶占岾店漸点粘霑鮎點接摺蝶丁井亭停偵呈姃定幀庭廷征情挺政整旌晶晸柾楨檉正汀淀淨渟湞瀞炡玎珽町睛碇禎程穽精綎艇訂諪貞鄭酊釘鉦鋌錠霆靖"],["f0a1","靜頂鼎制劑啼堤帝弟悌提梯濟祭第臍薺製諸蹄醍除際霽題齊俎兆凋助嘲弔彫措操早晁曺曹朝條棗槽漕潮照燥爪璪眺祖祚租稠窕粗糟組繰肇藻蚤詔調趙躁造遭釣阻雕鳥族簇足鏃存尊卒拙猝倧宗從悰慫棕淙琮種終綜縱腫"],["f1a1","踪踵鍾鐘佐坐左座挫罪主住侏做姝胄呪周嗾奏宙州廚晝朱柱株注洲湊澍炷珠疇籌紂紬綢舟蛛註誅走躊輳週酎酒鑄駐竹粥俊儁准埈寯峻晙樽浚準濬焌畯竣蠢逡遵雋駿茁中仲衆重卽櫛楫汁葺增憎曾拯烝甑症繒蒸證贈之只"],["f2a1","咫地址志持指摯支旨智枝枳止池沚漬知砥祉祗紙肢脂至芝芷蜘誌識贄趾遲直稙稷織職唇嗔塵振搢晉晋桭榛殄津溱珍瑨璡畛疹盡眞瞋秦縉縝臻蔯袗診賑軫辰進鎭陣陳震侄叱姪嫉帙桎瓆疾秩窒膣蛭質跌迭斟朕什執潗緝輯"],["f3a1","鏶集徵懲澄且侘借叉嗟嵯差次此磋箚茶蹉車遮捉搾着窄錯鑿齪撰澯燦璨瓚竄簒纂粲纘讚贊鑽餐饌刹察擦札紮僭參塹慘慙懺斬站讒讖倉倡創唱娼廠彰愴敞昌昶暢槍滄漲猖瘡窓脹艙菖蒼債埰寀寨彩採砦綵菜蔡采釵冊柵策"],["f4a1","責凄妻悽處倜刺剔尺慽戚拓擲斥滌瘠脊蹠陟隻仟千喘天川擅泉淺玔穿舛薦賤踐遷釧闡阡韆凸哲喆徹撤澈綴輟轍鐵僉尖沾添甛瞻簽籤詹諂堞妾帖捷牒疊睫諜貼輒廳晴淸聽菁請靑鯖切剃替涕滯締諦逮遞體初剿哨憔抄招梢"],["f5a1","椒楚樵炒焦硝礁礎秒稍肖艸苕草蕉貂超酢醋醮促囑燭矗蜀觸寸忖村邨叢塚寵悤憁摠總聰蔥銃撮催崔最墜抽推椎楸樞湫皺秋芻萩諏趨追鄒酋醜錐錘鎚雛騶鰍丑畜祝竺筑築縮蓄蹙蹴軸逐春椿瑃出朮黜充忠沖蟲衝衷悴膵萃"],["f6a1","贅取吹嘴娶就炊翠聚脆臭趣醉驟鷲側仄厠惻測層侈値嗤峙幟恥梔治淄熾痔痴癡稚穉緇緻置致蚩輜雉馳齒則勅飭親七柒漆侵寢枕沈浸琛砧針鍼蟄秤稱快他咤唾墮妥惰打拖朶楕舵陀馱駝倬卓啄坼度托拓擢晫柝濁濯琢琸託"],["f7a1","鐸呑嘆坦彈憚歎灘炭綻誕奪脫探眈耽貪塔搭榻宕帑湯糖蕩兌台太怠態殆汰泰笞胎苔跆邰颱宅擇澤撑攄兎吐土討慟桶洞痛筒統通堆槌腿褪退頹偸套妬投透鬪慝特闖坡婆巴把播擺杷波派爬琶破罷芭跛頗判坂板版瓣販辦鈑"],["f8a1","阪八叭捌佩唄悖敗沛浿牌狽稗覇貝彭澎烹膨愎便偏扁片篇編翩遍鞭騙貶坪平枰萍評吠嬖幣廢弊斃肺蔽閉陛佈包匍匏咆哺圃布怖抛抱捕暴泡浦疱砲胞脯苞葡蒲袍褒逋鋪飽鮑幅暴曝瀑爆輻俵剽彪慓杓標漂瓢票表豹飇飄驃"],["f9a1","品稟楓諷豊風馮彼披疲皮被避陂匹弼必泌珌畢疋筆苾馝乏逼下何厦夏廈昰河瑕荷蝦賀遐霞鰕壑學虐謔鶴寒恨悍旱汗漢澣瀚罕翰閑閒限韓割轄函含咸啣喊檻涵緘艦銜陷鹹合哈盒蛤閤闔陜亢伉姮嫦巷恒抗杭桁沆港缸肛航"],["faa1","行降項亥偕咳垓奚孩害懈楷海瀣蟹解該諧邂駭骸劾核倖幸杏荇行享向嚮珦鄕響餉饗香噓墟虛許憲櫶獻軒歇險驗奕爀赫革俔峴弦懸晛泫炫玄玹現眩睍絃絢縣舷衒見賢鉉顯孑穴血頁嫌俠協夾峽挾浹狹脅脇莢鋏頰亨兄刑型"],["fba1","形泂滎瀅灐炯熒珩瑩荊螢衡逈邢鎣馨兮彗惠慧暳蕙蹊醯鞋乎互呼壕壺好岵弧戶扈昊晧毫浩淏湖滸澔濠濩灝狐琥瑚瓠皓祜糊縞胡芦葫蒿虎號蝴護豪鎬頀顥惑或酷婚昏混渾琿魂忽惚笏哄弘汞泓洪烘紅虹訌鴻化和嬅樺火畵"],["fca1","禍禾花華話譁貨靴廓擴攫確碻穫丸喚奐宦幻患換歡晥桓渙煥環紈還驩鰥活滑猾豁闊凰幌徨恍惶愰慌晃晄榥況湟滉潢煌璜皇篁簧荒蝗遑隍黃匯回廻徊恢悔懷晦會檜淮澮灰獪繪膾茴蛔誨賄劃獲宖橫鐄哮嚆孝效斅曉梟涍淆"],["fda1","爻肴酵驍侯候厚后吼喉嗅帿後朽煦珝逅勛勳塤壎焄熏燻薰訓暈薨喧暄煊萱卉喙毁彙徽揮暉煇諱輝麾休携烋畦虧恤譎鷸兇凶匈洶胸黑昕欣炘痕吃屹紇訖欠欽歆吸恰洽翕興僖凞喜噫囍姬嬉希憙憘戱晞曦熙熹熺犧禧稀羲詰"]];
 
 /***/ }),
-/* 489 */,
+/* 489 */
+/***/ (function(module, __unusedexports, __webpack_require__) {
+
+"use strict";
+
+
+const path = __webpack_require__(622);
+const which = __webpack_require__(814);
+const pathKey = __webpack_require__(39)();
+
+function resolveCommandAttempt(parsed, withoutPathExt) {
+    const cwd = process.cwd();
+    const hasCustomCwd = parsed.options.cwd != null;
+
+    // If a custom `cwd` was specified, we need to change the process cwd
+    // because `which` will do stat calls but does not support a custom cwd
+    if (hasCustomCwd) {
+        try {
+            process.chdir(parsed.options.cwd);
+        } catch (err) {
+            /* Empty */
+        }
+    }
+
+    let resolved;
+
+    try {
+        resolved = which.sync(parsed.command, {
+            path: (parsed.options.env || process.env)[pathKey],
+            pathExt: withoutPathExt ? path.delimiter : undefined,
+        });
+    } catch (e) {
+        /* Empty */
+    } finally {
+        process.chdir(cwd);
+    }
+
+    // If we successfully resolved, ensure that an absolute path is returned
+    // Note that when a custom `cwd` was used, we need to resolve to an absolute path based on it
+    if (resolved) {
+        resolved = path.resolve(hasCustomCwd ? parsed.options.cwd : '', resolved);
+    }
+
+    return resolved;
+}
+
+function resolveCommand(parsed) {
+    return resolveCommandAttempt(parsed) || resolveCommandAttempt(parsed, true);
+}
+
+module.exports = resolveCommand;
+
+
+/***/ }),
 /* 490 */,
 /* 491 */,
 /* 492 */
@@ -61093,170 +67617,39 @@ exports.pipeFromArray = pipeFromArray;
 /* 497 */
 /***/ (function(module, __unusedexports, __webpack_require__) {
 
-// Note: since nyc uses this module to output coverage, any lines
-// that are in the direct sync flow of nyc's outputCoverage are
-// ignored, since we can never get coverage for them.
-var assert = __webpack_require__(357)
-var signals = __webpack_require__(654)
+var assocIndexOf = __webpack_require__(820);
 
-var EE = __webpack_require__(614)
-/* istanbul ignore if */
-if (typeof EE !== 'function') {
-  EE = EE.EventEmitter
-}
+/**
+ * Sets the list cache `key` to `value`.
+ *
+ * @private
+ * @name set
+ * @memberOf ListCache
+ * @param {string} key The key of the value to set.
+ * @param {*} value The value to set.
+ * @returns {Object} Returns the list cache instance.
+ */
+function listCacheSet(key, value) {
+  var data = this.__data__,
+      index = assocIndexOf(data, key);
 
-var emitter
-if (process.__signal_exit_emitter__) {
-  emitter = process.__signal_exit_emitter__
-} else {
-  emitter = process.__signal_exit_emitter__ = new EE()
-  emitter.count = 0
-  emitter.emitted = {}
-}
-
-// Because this emitter is a global, we have to check to see if a
-// previous version of this library failed to enable infinite listeners.
-// I know what you're about to say.  But literally everything about
-// signal-exit is a compromise with evil.  Get used to it.
-if (!emitter.infinite) {
-  emitter.setMaxListeners(Infinity)
-  emitter.infinite = true
-}
-
-module.exports = function (cb, opts) {
-  assert.equal(typeof cb, 'function', 'a callback must be provided for exit handler')
-
-  if (loaded === false) {
-    load()
-  }
-
-  var ev = 'exit'
-  if (opts && opts.alwaysLast) {
-    ev = 'afterexit'
-  }
-
-  var remove = function () {
-    emitter.removeListener(ev, cb)
-    if (emitter.listeners('exit').length === 0 &&
-        emitter.listeners('afterexit').length === 0) {
-      unload()
-    }
-  }
-  emitter.on(ev, cb)
-
-  return remove
-}
-
-module.exports.unload = unload
-function unload () {
-  if (!loaded) {
-    return
-  }
-  loaded = false
-
-  signals.forEach(function (sig) {
-    try {
-      process.removeListener(sig, sigListeners[sig])
-    } catch (er) {}
-  })
-  process.emit = originalProcessEmit
-  process.reallyExit = originalProcessReallyExit
-  emitter.count -= 1
-}
-
-function emit (event, code, signal) {
-  if (emitter.emitted[event]) {
-    return
-  }
-  emitter.emitted[event] = true
-  emitter.emit(event, code, signal)
-}
-
-// { <signal>: <listener fn>, ... }
-var sigListeners = {}
-signals.forEach(function (sig) {
-  sigListeners[sig] = function listener () {
-    // If there are no other listeners, an exit is coming!
-    // Simplest way: remove us and then re-send the signal.
-    // We know that this will kill the process, so we can
-    // safely emit now.
-    var listeners = process.listeners(sig)
-    if (listeners.length === emitter.count) {
-      unload()
-      emit('exit', null, sig)
-      /* istanbul ignore next */
-      emit('afterexit', null, sig)
-      /* istanbul ignore next */
-      process.kill(process.pid, sig)
-    }
-  }
-})
-
-module.exports.signals = function () {
-  return signals
-}
-
-module.exports.load = load
-
-var loaded = false
-
-function load () {
-  if (loaded) {
-    return
-  }
-  loaded = true
-
-  // This is the number of onSignalExit's that are in play.
-  // It's important so that we can count the correct number of
-  // listeners on signals, and don't wait for the other one to
-  // handle it instead of us.
-  emitter.count += 1
-
-  signals = signals.filter(function (sig) {
-    try {
-      process.on(sig, sigListeners[sig])
-      return true
-    } catch (er) {
-      return false
-    }
-  })
-
-  process.emit = processEmit
-  process.reallyExit = processReallyExit
-}
-
-var originalProcessReallyExit = process.reallyExit
-function processReallyExit (code) {
-  process.exitCode = code || 0
-  emit('exit', process.exitCode, null)
-  /* istanbul ignore next */
-  emit('afterexit', process.exitCode, null)
-  /* istanbul ignore next */
-  originalProcessReallyExit.call(process, process.exitCode)
-}
-
-var originalProcessEmit = process.emit
-function processEmit (ev, arg) {
-  if (ev === 'exit') {
-    if (arg !== undefined) {
-      process.exitCode = arg
-    }
-    var ret = originalProcessEmit.apply(this, arguments)
-    emit('exit', process.exitCode, null)
-    /* istanbul ignore next */
-    emit('afterexit', process.exitCode, null)
-    return ret
+  if (index < 0) {
+    ++this.size;
+    data.push([key, value]);
   } else {
-    return originalProcessEmit.apply(this, arguments)
+    data[index][1] = value;
   }
+  return this;
 }
+
+module.exports = listCacheSet;
 
 
 /***/ }),
 /* 498 */
 /***/ (function(module, __unusedexports, __webpack_require__) {
 
-var root = __webpack_require__(824);
+var root = __webpack_require__(66);
 
 /** Built-in value references. */
 var Symbol = root.Symbol;
@@ -61857,49 +68250,55 @@ module.exports = memoize;
 /* 508 */,
 /* 509 */,
 /* 510 */
-/***/ (function(__unusedmodule, exports, __webpack_require__) {
+/***/ (function(module) {
 
-"use strict";
+module.exports = addHook
 
-var __extends = (this && this.__extends) || function (d, b) {
-    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
-    function __() { this.constructor = d; }
-    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
-};
-var Subscription_1 = __webpack_require__(560);
-/**
- * We need this JSDoc comment for affecting ESDoc.
- * @ignore
- * @extends {Ignored}
- */
-var SubjectSubscription = (function (_super) {
-    __extends(SubjectSubscription, _super);
-    function SubjectSubscription(subject, subscriber) {
-        _super.call(this);
-        this.subject = subject;
-        this.subscriber = subscriber;
-        this.closed = false;
+function addHook (state, kind, name, hook) {
+  var orig = hook
+  if (!state.registry[name]) {
+    state.registry[name] = []
+  }
+
+  if (kind === 'before') {
+    hook = function (method, options) {
+      return Promise.resolve()
+        .then(orig.bind(null, options))
+        .then(method.bind(null, options))
     }
-    SubjectSubscription.prototype.unsubscribe = function () {
-        if (this.closed) {
-            return;
-        }
-        this.closed = true;
-        var subject = this.subject;
-        var observers = subject.observers;
-        this.subject = null;
-        if (!observers || observers.length === 0 || subject.isStopped || subject.closed) {
-            return;
-        }
-        var subscriberIndex = observers.indexOf(this.subscriber);
-        if (subscriberIndex !== -1) {
-            observers.splice(subscriberIndex, 1);
-        }
-    };
-    return SubjectSubscription;
-}(Subscription_1.Subscription));
-exports.SubjectSubscription = SubjectSubscription;
-//# sourceMappingURL=SubjectSubscription.js.map
+  }
+
+  if (kind === 'after') {
+    hook = function (method, options) {
+      var result
+      return Promise.resolve()
+        .then(method.bind(null, options))
+        .then(function (result_) {
+          result = result_
+          return orig(result, options)
+        })
+        .then(function () {
+          return result
+        })
+    }
+  }
+
+  if (kind === 'error') {
+    hook = function (method, options) {
+      return Promise.resolve()
+        .then(method.bind(null, options))
+        .catch(function (error) {
+          return orig(error, options)
+        })
+    }
+  }
+
+  state.registry[name].push({
+    hook: hook,
+    orig: orig
+  })
+}
+
 
 /***/ }),
 /* 511 */,
@@ -62230,7 +68629,37 @@ Promise.prototype._resultCancelled = function() {
 
 
 /***/ }),
-/* 515 */,
+/* 515 */
+/***/ (function(__unusedmodule, exports) {
+
+"use strict";
+
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+/**
+ * An error thrown when one or more errors have occurred during the
+ * `unsubscribe` of a {@link Subscription}.
+ */
+var UnsubscriptionError = (function (_super) {
+    __extends(UnsubscriptionError, _super);
+    function UnsubscriptionError(errors) {
+        _super.call(this);
+        this.errors = errors;
+        var err = Error.call(this, errors ?
+            errors.length + " errors occurred during unsubscription:\n  " + errors.map(function (err, i) { return ((i + 1) + ") " + err.toString()); }).join('\n  ') : '');
+        this.name = err.name = 'UnsubscriptionError';
+        this.stack = err.stack;
+        this.message = err.message;
+    }
+    return UnsubscriptionError;
+}(Error));
+exports.UnsubscriptionError = UnsubscriptionError;
+//# sourceMappingURL=UnsubscriptionError.js.map
+
+/***/ }),
 /* 516 */
 /***/ (function(__unusedmodule, exports, __webpack_require__) {
 
@@ -62319,81 +68748,129 @@ module.exports = getFirstExternalCaller;
 
 /***/ }),
 /* 521 */
-/***/ (function(module) {
+/***/ (function(__unusedmodule, exports, __webpack_require__) {
 
 "use strict";
 
-module.exports = (iterable, mapper, opts) => new Promise((resolve, reject) => {
-	opts = Object.assign({
-		concurrency: Infinity
-	}, opts);
-
-	if (typeof mapper !== 'function') {
-		throw new TypeError('Mapper function is required');
-	}
-
-	const concurrency = opts.concurrency;
-
-	if (!(typeof concurrency === 'number' && concurrency >= 1)) {
-		throw new TypeError(`Expected \`concurrency\` to be a number from 1 and up, got \`${concurrency}\` (${typeof concurrency})`);
-	}
-
-	const ret = [];
-	const iterator = iterable[Symbol.iterator]();
-	let isRejected = false;
-	let iterableDone = false;
-	let resolvingCount = 0;
-	let currentIdx = 0;
-
-	const next = () => {
-		if (isRejected) {
-			return;
-		}
-
-		const nextItem = iterator.next();
-		const i = currentIdx;
-		currentIdx++;
-
-		if (nextItem.done) {
-			iterableDone = true;
-
-			if (resolvingCount === 0) {
-				resolve(ret);
-			}
-
-			return;
-		}
-
-		resolvingCount++;
-
-		Promise.resolve(nextItem.value)
-			.then(el => mapper(el, i))
-			.then(
-				val => {
-					ret[i] = val;
-					resolvingCount--;
-					next();
-				},
-				err => {
-					isRejected = true;
-					reject(err);
-				}
-			);
-	};
-
-	for (let i = 0; i < concurrency; i++) {
-		next();
-
-		if (iterableDone) {
-			break;
-		}
-	}
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    Object.defineProperty(o, k2, { enumerable: true, get: function() { return m[k]; } });
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
 });
-
+var __importStar = (this && this.__importStar) || function (mod) {
+    if (mod && mod.__esModule) return mod;
+    var result = {};
+    if (mod != null) for (var k in mod) if (Object.hasOwnProperty.call(mod, k)) __createBinding(result, mod, k);
+    __setModuleDefault(result, mod);
+    return result;
+};
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.getOctokitOptions = exports.GitHub = exports.context = void 0;
+const Context = __importStar(__webpack_require__(262));
+const Utils = __importStar(__webpack_require__(127));
+// octokit + plugins
+const core_1 = __webpack_require__(448);
+const plugin_rest_endpoint_methods_1 = __webpack_require__(842);
+const plugin_paginate_rest_1 = __webpack_require__(299);
+exports.context = new Context.Context();
+const baseUrl = Utils.getApiBaseUrl();
+const defaults = {
+    baseUrl,
+    request: {
+        agent: Utils.getProxyAgent(baseUrl)
+    }
+};
+exports.GitHub = core_1.Octokit.plugin(plugin_rest_endpoint_methods_1.restEndpointMethods, plugin_paginate_rest_1.paginateRest).defaults(defaults);
+/**
+ * Convience function to correctly format Octokit Options to pass into the constructor.
+ *
+ * @param     token    the repo PAT or GITHUB_TOKEN
+ * @param     options  other options to set
+ */
+function getOctokitOptions(token, options) {
+    const opts = Object.assign({}, options || {}); // Shallow clone - don't mutate the object provided by the caller
+    // Auth
+    const auth = Utils.getAuthString(token, opts);
+    if (auth) {
+        opts.auth = auth;
+    }
+    return opts;
+}
+exports.getOctokitOptions = getOctokitOptions;
+//# sourceMappingURL=utils.js.map
 
 /***/ }),
 /* 522 */,
-/* 523 */,
+/* 523 */
+/***/ (function(module, __unusedexports, __webpack_require__) {
+
+var register = __webpack_require__(363)
+var addHook = __webpack_require__(510)
+var removeHook = __webpack_require__(763)
+
+// bind with array of arguments: https://stackoverflow.com/a/21792913
+var bind = Function.bind
+var bindable = bind.bind(bind)
+
+function bindApi (hook, state, name) {
+  var removeHookRef = bindable(removeHook, null).apply(null, name ? [state, name] : [state])
+  hook.api = { remove: removeHookRef }
+  hook.remove = removeHookRef
+
+  ;['before', 'error', 'after', 'wrap'].forEach(function (kind) {
+    var args = name ? [state, kind, name] : [state, kind]
+    hook[kind] = hook.api[kind] = bindable(addHook, null).apply(null, args)
+  })
+}
+
+function HookSingular () {
+  var singularHookName = 'h'
+  var singularHookState = {
+    registry: {}
+  }
+  var singularHook = register.bind(null, singularHookState, singularHookName)
+  bindApi(singularHook, singularHookState, singularHookName)
+  return singularHook
+}
+
+function HookCollection () {
+  var state = {
+    registry: {}
+  }
+
+  var hook = register.bind(null, state)
+  bindApi(hook, state)
+
+  return hook
+}
+
+var collectionHookDeprecationMessageDisplayed = false
+function Hook () {
+  if (!collectionHookDeprecationMessageDisplayed) {
+    console.warn('[before-after-hook]: "Hook()" repurposing warning, use "Hook.Collection()". Read more: https://git.io/upgrade-before-after-hook-to-1.4')
+    collectionHookDeprecationMessageDisplayed = true
+  }
+  return HookCollection()
+}
+
+Hook.Singular = HookSingular.bind()
+Hook.Collection = HookCollection.bind()
+
+module.exports = Hook
+// expose constructors as a named property for TypeScript
+module.exports.Hook = Hook
+module.exports.Singular = Hook.Singular
+module.exports.Collection = Hook.Collection
+
+
+/***/ }),
 /* 524 */
 /***/ (function(__unusedmodule, exports, __webpack_require__) {
 
@@ -62875,103 +69352,604 @@ module.exports = colors;
 
 /***/ }),
 /* 536 */
+/***/ (function(__unusedmodule, exports) {
+
+"use strict";
+
+
+var BOMChar = '\uFEFF';
+
+exports.PrependBOM = PrependBOMWrapper
+function PrependBOMWrapper(encoder, options) {
+    this.encoder = encoder;
+    this.addBOM = true;
+}
+
+PrependBOMWrapper.prototype.write = function(str) {
+    if (this.addBOM) {
+        str = BOMChar + str;
+        this.addBOM = false;
+    }
+
+    return this.encoder.write(str);
+}
+
+PrependBOMWrapper.prototype.end = function() {
+    return this.encoder.end();
+}
+
+
+//------------------------------------------------------------------------------
+
+exports.StripBOM = StripBOMWrapper;
+function StripBOMWrapper(decoder, options) {
+    this.decoder = decoder;
+    this.pass = false;
+    this.options = options || {};
+}
+
+StripBOMWrapper.prototype.write = function(buf) {
+    var res = this.decoder.write(buf);
+    if (this.pass || !res)
+        return res;
+
+    if (res[0] === BOMChar) {
+        res = res.slice(1);
+        if (typeof this.options.stripBOM === 'function')
+            this.options.stripBOM();
+    }
+
+    this.pass = true;
+    return res;
+}
+
+StripBOMWrapper.prototype.end = function() {
+    return this.decoder.end();
+}
+
+
+
+/***/ }),
+/* 537 */,
+/* 538 */,
+/* 539 */
 /***/ (function(__unusedmodule, exports, __webpack_require__) {
 
 "use strict";
 
 Object.defineProperty(exports, "__esModule", { value: true });
-const Joi = __webpack_require__(274);
-const didYouMean = __webpack_require__(82);
-const kindOf = __webpack_require__(224);
-const validationErrors = {
-    INVALID_PROPERTY_NAME: (propName, article, typeName) => {
-        return `"${propName}" is not a valid property name for ${article} ${typeName}.`;
-    },
-    INVALID_PROPERTY_NAME_WITH_SUGGESTION: (propName, article, typeName, suggestion) => {
-        return `${validationErrors.INVALID_PROPERTY_NAME(propName, article, typeName)} Did you mean "${suggestion}"?`;
-    },
-    INVALID_PROPERTY_TYPE: (propName, typeName, actualType, expectedType) => {
-        return `"${actualType}" is not a valid type for the ${typeName} property "${propName}". Expected "${expectedType}".`;
-    },
-    INVALID_VALUE_IN_ALTERNATIVES: (propName, typeName, value, schemaInnerMatches) => {
-        const expectedTypes = schemaInnerMatches.map((match) => {
-            const validsSet = match.schema._valids._set;
-            return validsSet.length > 0 ? `${match.schema._type} value ${validsSet.map(validValue => `"${validValue}"`).join(' or ')}` : `type ${match.schema._type}`;
+const url = __webpack_require__(835);
+const http = __webpack_require__(605);
+const https = __webpack_require__(211);
+const pm = __webpack_require__(950);
+let tunnel;
+var HttpCodes;
+(function (HttpCodes) {
+    HttpCodes[HttpCodes["OK"] = 200] = "OK";
+    HttpCodes[HttpCodes["MultipleChoices"] = 300] = "MultipleChoices";
+    HttpCodes[HttpCodes["MovedPermanently"] = 301] = "MovedPermanently";
+    HttpCodes[HttpCodes["ResourceMoved"] = 302] = "ResourceMoved";
+    HttpCodes[HttpCodes["SeeOther"] = 303] = "SeeOther";
+    HttpCodes[HttpCodes["NotModified"] = 304] = "NotModified";
+    HttpCodes[HttpCodes["UseProxy"] = 305] = "UseProxy";
+    HttpCodes[HttpCodes["SwitchProxy"] = 306] = "SwitchProxy";
+    HttpCodes[HttpCodes["TemporaryRedirect"] = 307] = "TemporaryRedirect";
+    HttpCodes[HttpCodes["PermanentRedirect"] = 308] = "PermanentRedirect";
+    HttpCodes[HttpCodes["BadRequest"] = 400] = "BadRequest";
+    HttpCodes[HttpCodes["Unauthorized"] = 401] = "Unauthorized";
+    HttpCodes[HttpCodes["PaymentRequired"] = 402] = "PaymentRequired";
+    HttpCodes[HttpCodes["Forbidden"] = 403] = "Forbidden";
+    HttpCodes[HttpCodes["NotFound"] = 404] = "NotFound";
+    HttpCodes[HttpCodes["MethodNotAllowed"] = 405] = "MethodNotAllowed";
+    HttpCodes[HttpCodes["NotAcceptable"] = 406] = "NotAcceptable";
+    HttpCodes[HttpCodes["ProxyAuthenticationRequired"] = 407] = "ProxyAuthenticationRequired";
+    HttpCodes[HttpCodes["RequestTimeout"] = 408] = "RequestTimeout";
+    HttpCodes[HttpCodes["Conflict"] = 409] = "Conflict";
+    HttpCodes[HttpCodes["Gone"] = 410] = "Gone";
+    HttpCodes[HttpCodes["TooManyRequests"] = 429] = "TooManyRequests";
+    HttpCodes[HttpCodes["InternalServerError"] = 500] = "InternalServerError";
+    HttpCodes[HttpCodes["NotImplemented"] = 501] = "NotImplemented";
+    HttpCodes[HttpCodes["BadGateway"] = 502] = "BadGateway";
+    HttpCodes[HttpCodes["ServiceUnavailable"] = 503] = "ServiceUnavailable";
+    HttpCodes[HttpCodes["GatewayTimeout"] = 504] = "GatewayTimeout";
+})(HttpCodes = exports.HttpCodes || (exports.HttpCodes = {}));
+var Headers;
+(function (Headers) {
+    Headers["Accept"] = "accept";
+    Headers["ContentType"] = "content-type";
+})(Headers = exports.Headers || (exports.Headers = {}));
+var MediaTypes;
+(function (MediaTypes) {
+    MediaTypes["ApplicationJson"] = "application/json";
+})(MediaTypes = exports.MediaTypes || (exports.MediaTypes = {}));
+/**
+ * Returns the proxy URL, depending upon the supplied url and proxy environment variables.
+ * @param serverUrl  The server URL where the request will be sent. For example, https://api.github.com
+ */
+function getProxyUrl(serverUrl) {
+    let proxyUrl = pm.getProxyUrl(url.parse(serverUrl));
+    return proxyUrl ? proxyUrl.href : '';
+}
+exports.getProxyUrl = getProxyUrl;
+const HttpRedirectCodes = [
+    HttpCodes.MovedPermanently,
+    HttpCodes.ResourceMoved,
+    HttpCodes.SeeOther,
+    HttpCodes.TemporaryRedirect,
+    HttpCodes.PermanentRedirect
+];
+const HttpResponseRetryCodes = [
+    HttpCodes.BadGateway,
+    HttpCodes.ServiceUnavailable,
+    HttpCodes.GatewayTimeout
+];
+const RetryableHttpVerbs = ['OPTIONS', 'GET', 'DELETE', 'HEAD'];
+const ExponentialBackoffCeiling = 10;
+const ExponentialBackoffTimeSlice = 5;
+class HttpClientResponse {
+    constructor(message) {
+        this.message = message;
+    }
+    readBody() {
+        return new Promise(async (resolve, reject) => {
+            let output = Buffer.alloc(0);
+            this.message.on('data', (chunk) => {
+                output = Buffer.concat([output, chunk]);
+            });
+            this.message.on('end', () => {
+                resolve(output.toString());
+            });
         });
-        return `"${value}" is not a valid value for the ${typeName} property "${propName}". Expected ${expectedTypes.join(' or ')}.`;
-    }
-};
-/*
-  Abstract Base Class for schema validation of steps
-  Needs getters for `schema` and `displayName` implemented in subclasses
-*/
-class SchemaValidator {
-    get validationErrors() {
-        return validationErrors;
-    }
-    get propertyNameToValidate() {
-        return 'props';
-    }
-    get schema() {
-        return {};
-    }
-    validate(intent) {
-        const step = intent.toRaw();
-        const validations = this.schema;
-        const validationErrors = this.validationErrors;
-        const displayName = this.displayName;
-        const article = this.article;
-        const errors = [];
-        const propertyToValidate = step.payload[this.propertyNameToValidate];
-        const propNames = Object.keys(propertyToValidate);
-        const validProps = Object.keys(validations);
-        for (const propName of propNames) {
-            if (!validProps.includes(propName)) {
-                let message;
-                const suggestion = didYouMean(propName, validProps);
-                if (suggestion) {
-                    message = validationErrors.INVALID_PROPERTY_NAME_WITH_SUGGESTION(propName, article, displayName, suggestion);
-                }
-                else {
-                    message = validationErrors.INVALID_PROPERTY_NAME(propName, article, displayName);
-                }
-                errors.push({
-                    type: 'InvalidProperty',
-                    message,
-                    details: { intent }
-                });
-            }
-            else {
-                const schema = validations[propName];
-                const { value, error } = Joi.validate(propertyToValidate[propName], schema);
-                if (error) {
-                    let expectedType = schema._type;
-                    // Joi's schema type for a function is `object` with a `func` flag
-                    if (schema._flags.func) {
-                        expectedType = 'function';
-                    }
-                    const actualType = kindOf(value);
-                    const message = expectedType === 'alternatives' ?
-                        validationErrors.INVALID_VALUE_IN_ALTERNATIVES(propName, displayName, error._object, schema._inner.matches)
-                        : validationErrors.INVALID_PROPERTY_TYPE(propName, displayName, actualType, expectedType);
-                    errors.push({
-                        type: 'InvalidType',
-                        message,
-                        details: { intent }
-                    });
-                }
-            }
-        }
-        return errors;
     }
 }
-exports.default = SchemaValidator;
-//# sourceMappingURL=schema-validator.js.map
+exports.HttpClientResponse = HttpClientResponse;
+function isHttps(requestUrl) {
+    let parsedUrl = url.parse(requestUrl);
+    return parsedUrl.protocol === 'https:';
+}
+exports.isHttps = isHttps;
+class HttpClient {
+    constructor(userAgent, handlers, requestOptions) {
+        this._ignoreSslError = false;
+        this._allowRedirects = true;
+        this._allowRedirectDowngrade = false;
+        this._maxRedirects = 50;
+        this._allowRetries = false;
+        this._maxRetries = 1;
+        this._keepAlive = false;
+        this._disposed = false;
+        this.userAgent = userAgent;
+        this.handlers = handlers || [];
+        this.requestOptions = requestOptions;
+        if (requestOptions) {
+            if (requestOptions.ignoreSslError != null) {
+                this._ignoreSslError = requestOptions.ignoreSslError;
+            }
+            this._socketTimeout = requestOptions.socketTimeout;
+            if (requestOptions.allowRedirects != null) {
+                this._allowRedirects = requestOptions.allowRedirects;
+            }
+            if (requestOptions.allowRedirectDowngrade != null) {
+                this._allowRedirectDowngrade = requestOptions.allowRedirectDowngrade;
+            }
+            if (requestOptions.maxRedirects != null) {
+                this._maxRedirects = Math.max(requestOptions.maxRedirects, 0);
+            }
+            if (requestOptions.keepAlive != null) {
+                this._keepAlive = requestOptions.keepAlive;
+            }
+            if (requestOptions.allowRetries != null) {
+                this._allowRetries = requestOptions.allowRetries;
+            }
+            if (requestOptions.maxRetries != null) {
+                this._maxRetries = requestOptions.maxRetries;
+            }
+        }
+    }
+    options(requestUrl, additionalHeaders) {
+        return this.request('OPTIONS', requestUrl, null, additionalHeaders || {});
+    }
+    get(requestUrl, additionalHeaders) {
+        return this.request('GET', requestUrl, null, additionalHeaders || {});
+    }
+    del(requestUrl, additionalHeaders) {
+        return this.request('DELETE', requestUrl, null, additionalHeaders || {});
+    }
+    post(requestUrl, data, additionalHeaders) {
+        return this.request('POST', requestUrl, data, additionalHeaders || {});
+    }
+    patch(requestUrl, data, additionalHeaders) {
+        return this.request('PATCH', requestUrl, data, additionalHeaders || {});
+    }
+    put(requestUrl, data, additionalHeaders) {
+        return this.request('PUT', requestUrl, data, additionalHeaders || {});
+    }
+    head(requestUrl, additionalHeaders) {
+        return this.request('HEAD', requestUrl, null, additionalHeaders || {});
+    }
+    sendStream(verb, requestUrl, stream, additionalHeaders) {
+        return this.request(verb, requestUrl, stream, additionalHeaders);
+    }
+    /**
+     * Gets a typed object from an endpoint
+     * Be aware that not found returns a null.  Other errors (4xx, 5xx) reject the promise
+     */
+    async getJson(requestUrl, additionalHeaders = {}) {
+        additionalHeaders[Headers.Accept] = this._getExistingOrDefaultHeader(additionalHeaders, Headers.Accept, MediaTypes.ApplicationJson);
+        let res = await this.get(requestUrl, additionalHeaders);
+        return this._processResponse(res, this.requestOptions);
+    }
+    async postJson(requestUrl, obj, additionalHeaders = {}) {
+        let data = JSON.stringify(obj, null, 2);
+        additionalHeaders[Headers.Accept] = this._getExistingOrDefaultHeader(additionalHeaders, Headers.Accept, MediaTypes.ApplicationJson);
+        additionalHeaders[Headers.ContentType] = this._getExistingOrDefaultHeader(additionalHeaders, Headers.ContentType, MediaTypes.ApplicationJson);
+        let res = await this.post(requestUrl, data, additionalHeaders);
+        return this._processResponse(res, this.requestOptions);
+    }
+    async putJson(requestUrl, obj, additionalHeaders = {}) {
+        let data = JSON.stringify(obj, null, 2);
+        additionalHeaders[Headers.Accept] = this._getExistingOrDefaultHeader(additionalHeaders, Headers.Accept, MediaTypes.ApplicationJson);
+        additionalHeaders[Headers.ContentType] = this._getExistingOrDefaultHeader(additionalHeaders, Headers.ContentType, MediaTypes.ApplicationJson);
+        let res = await this.put(requestUrl, data, additionalHeaders);
+        return this._processResponse(res, this.requestOptions);
+    }
+    async patchJson(requestUrl, obj, additionalHeaders = {}) {
+        let data = JSON.stringify(obj, null, 2);
+        additionalHeaders[Headers.Accept] = this._getExistingOrDefaultHeader(additionalHeaders, Headers.Accept, MediaTypes.ApplicationJson);
+        additionalHeaders[Headers.ContentType] = this._getExistingOrDefaultHeader(additionalHeaders, Headers.ContentType, MediaTypes.ApplicationJson);
+        let res = await this.patch(requestUrl, data, additionalHeaders);
+        return this._processResponse(res, this.requestOptions);
+    }
+    /**
+     * Makes a raw http request.
+     * All other methods such as get, post, patch, and request ultimately call this.
+     * Prefer get, del, post and patch
+     */
+    async request(verb, requestUrl, data, headers) {
+        if (this._disposed) {
+            throw new Error('Client has already been disposed.');
+        }
+        let parsedUrl = url.parse(requestUrl);
+        let info = this._prepareRequest(verb, parsedUrl, headers);
+        // Only perform retries on reads since writes may not be idempotent.
+        let maxTries = this._allowRetries && RetryableHttpVerbs.indexOf(verb) != -1
+            ? this._maxRetries + 1
+            : 1;
+        let numTries = 0;
+        let response;
+        while (numTries < maxTries) {
+            response = await this.requestRaw(info, data);
+            // Check if it's an authentication challenge
+            if (response &&
+                response.message &&
+                response.message.statusCode === HttpCodes.Unauthorized) {
+                let authenticationHandler;
+                for (let i = 0; i < this.handlers.length; i++) {
+                    if (this.handlers[i].canHandleAuthentication(response)) {
+                        authenticationHandler = this.handlers[i];
+                        break;
+                    }
+                }
+                if (authenticationHandler) {
+                    return authenticationHandler.handleAuthentication(this, info, data);
+                }
+                else {
+                    // We have received an unauthorized response but have no handlers to handle it.
+                    // Let the response return to the caller.
+                    return response;
+                }
+            }
+            let redirectsRemaining = this._maxRedirects;
+            while (HttpRedirectCodes.indexOf(response.message.statusCode) != -1 &&
+                this._allowRedirects &&
+                redirectsRemaining > 0) {
+                const redirectUrl = response.message.headers['location'];
+                if (!redirectUrl) {
+                    // if there's no location to redirect to, we won't
+                    break;
+                }
+                let parsedRedirectUrl = url.parse(redirectUrl);
+                if (parsedUrl.protocol == 'https:' &&
+                    parsedUrl.protocol != parsedRedirectUrl.protocol &&
+                    !this._allowRedirectDowngrade) {
+                    throw new Error('Redirect from HTTPS to HTTP protocol. This downgrade is not allowed for security reasons. If you want to allow this behavior, set the allowRedirectDowngrade option to true.');
+                }
+                // we need to finish reading the response before reassigning response
+                // which will leak the open socket.
+                await response.readBody();
+                // strip authorization header if redirected to a different hostname
+                if (parsedRedirectUrl.hostname !== parsedUrl.hostname) {
+                    for (let header in headers) {
+                        // header names are case insensitive
+                        if (header.toLowerCase() === 'authorization') {
+                            delete headers[header];
+                        }
+                    }
+                }
+                // let's make the request with the new redirectUrl
+                info = this._prepareRequest(verb, parsedRedirectUrl, headers);
+                response = await this.requestRaw(info, data);
+                redirectsRemaining--;
+            }
+            if (HttpResponseRetryCodes.indexOf(response.message.statusCode) == -1) {
+                // If not a retry code, return immediately instead of retrying
+                return response;
+            }
+            numTries += 1;
+            if (numTries < maxTries) {
+                await response.readBody();
+                await this._performExponentialBackoff(numTries);
+            }
+        }
+        return response;
+    }
+    /**
+     * Needs to be called if keepAlive is set to true in request options.
+     */
+    dispose() {
+        if (this._agent) {
+            this._agent.destroy();
+        }
+        this._disposed = true;
+    }
+    /**
+     * Raw request.
+     * @param info
+     * @param data
+     */
+    requestRaw(info, data) {
+        return new Promise((resolve, reject) => {
+            let callbackForResult = function (err, res) {
+                if (err) {
+                    reject(err);
+                }
+                resolve(res);
+            };
+            this.requestRawWithCallback(info, data, callbackForResult);
+        });
+    }
+    /**
+     * Raw request with callback.
+     * @param info
+     * @param data
+     * @param onResult
+     */
+    requestRawWithCallback(info, data, onResult) {
+        let socket;
+        if (typeof data === 'string') {
+            info.options.headers['Content-Length'] = Buffer.byteLength(data, 'utf8');
+        }
+        let callbackCalled = false;
+        let handleResult = (err, res) => {
+            if (!callbackCalled) {
+                callbackCalled = true;
+                onResult(err, res);
+            }
+        };
+        let req = info.httpModule.request(info.options, (msg) => {
+            let res = new HttpClientResponse(msg);
+            handleResult(null, res);
+        });
+        req.on('socket', sock => {
+            socket = sock;
+        });
+        // If we ever get disconnected, we want the socket to timeout eventually
+        req.setTimeout(this._socketTimeout || 3 * 60000, () => {
+            if (socket) {
+                socket.end();
+            }
+            handleResult(new Error('Request timeout: ' + info.options.path), null);
+        });
+        req.on('error', function (err) {
+            // err has statusCode property
+            // res should have headers
+            handleResult(err, null);
+        });
+        if (data && typeof data === 'string') {
+            req.write(data, 'utf8');
+        }
+        if (data && typeof data !== 'string') {
+            data.on('close', function () {
+                req.end();
+            });
+            data.pipe(req);
+        }
+        else {
+            req.end();
+        }
+    }
+    /**
+     * Gets an http agent. This function is useful when you need an http agent that handles
+     * routing through a proxy server - depending upon the url and proxy environment variables.
+     * @param serverUrl  The server URL where the request will be sent. For example, https://api.github.com
+     */
+    getAgent(serverUrl) {
+        let parsedUrl = url.parse(serverUrl);
+        return this._getAgent(parsedUrl);
+    }
+    _prepareRequest(method, requestUrl, headers) {
+        const info = {};
+        info.parsedUrl = requestUrl;
+        const usingSsl = info.parsedUrl.protocol === 'https:';
+        info.httpModule = usingSsl ? https : http;
+        const defaultPort = usingSsl ? 443 : 80;
+        info.options = {};
+        info.options.host = info.parsedUrl.hostname;
+        info.options.port = info.parsedUrl.port
+            ? parseInt(info.parsedUrl.port)
+            : defaultPort;
+        info.options.path =
+            (info.parsedUrl.pathname || '') + (info.parsedUrl.search || '');
+        info.options.method = method;
+        info.options.headers = this._mergeHeaders(headers);
+        if (this.userAgent != null) {
+            info.options.headers['user-agent'] = this.userAgent;
+        }
+        info.options.agent = this._getAgent(info.parsedUrl);
+        // gives handlers an opportunity to participate
+        if (this.handlers) {
+            this.handlers.forEach(handler => {
+                handler.prepareRequest(info.options);
+            });
+        }
+        return info;
+    }
+    _mergeHeaders(headers) {
+        const lowercaseKeys = obj => Object.keys(obj).reduce((c, k) => ((c[k.toLowerCase()] = obj[k]), c), {});
+        if (this.requestOptions && this.requestOptions.headers) {
+            return Object.assign({}, lowercaseKeys(this.requestOptions.headers), lowercaseKeys(headers));
+        }
+        return lowercaseKeys(headers || {});
+    }
+    _getExistingOrDefaultHeader(additionalHeaders, header, _default) {
+        const lowercaseKeys = obj => Object.keys(obj).reduce((c, k) => ((c[k.toLowerCase()] = obj[k]), c), {});
+        let clientHeader;
+        if (this.requestOptions && this.requestOptions.headers) {
+            clientHeader = lowercaseKeys(this.requestOptions.headers)[header];
+        }
+        return additionalHeaders[header] || clientHeader || _default;
+    }
+    _getAgent(parsedUrl) {
+        let agent;
+        let proxyUrl = pm.getProxyUrl(parsedUrl);
+        let useProxy = proxyUrl && proxyUrl.hostname;
+        if (this._keepAlive && useProxy) {
+            agent = this._proxyAgent;
+        }
+        if (this._keepAlive && !useProxy) {
+            agent = this._agent;
+        }
+        // if agent is already assigned use that agent.
+        if (!!agent) {
+            return agent;
+        }
+        const usingSsl = parsedUrl.protocol === 'https:';
+        let maxSockets = 100;
+        if (!!this.requestOptions) {
+            maxSockets = this.requestOptions.maxSockets || http.globalAgent.maxSockets;
+        }
+        if (useProxy) {
+            // If using proxy, need tunnel
+            if (!tunnel) {
+                tunnel = __webpack_require__(413);
+            }
+            const agentOptions = {
+                maxSockets: maxSockets,
+                keepAlive: this._keepAlive,
+                proxy: {
+                    proxyAuth: proxyUrl.auth,
+                    host: proxyUrl.hostname,
+                    port: proxyUrl.port
+                }
+            };
+            let tunnelAgent;
+            const overHttps = proxyUrl.protocol === 'https:';
+            if (usingSsl) {
+                tunnelAgent = overHttps ? tunnel.httpsOverHttps : tunnel.httpsOverHttp;
+            }
+            else {
+                tunnelAgent = overHttps ? tunnel.httpOverHttps : tunnel.httpOverHttp;
+            }
+            agent = tunnelAgent(agentOptions);
+            this._proxyAgent = agent;
+        }
+        // if reusing agent across request and tunneling agent isn't assigned create a new agent
+        if (this._keepAlive && !agent) {
+            const options = { keepAlive: this._keepAlive, maxSockets: maxSockets };
+            agent = usingSsl ? new https.Agent(options) : new http.Agent(options);
+            this._agent = agent;
+        }
+        // if not using private agent and tunnel agent isn't setup then use global agent
+        if (!agent) {
+            agent = usingSsl ? https.globalAgent : http.globalAgent;
+        }
+        if (usingSsl && this._ignoreSslError) {
+            // we don't want to set NODE_TLS_REJECT_UNAUTHORIZED=0 since that will affect request for entire process
+            // http.RequestOptions doesn't expose a way to modify RequestOptions.agent.options
+            // we have to cast it to any and change it directly
+            agent.options = Object.assign(agent.options || {}, {
+                rejectUnauthorized: false
+            });
+        }
+        return agent;
+    }
+    _performExponentialBackoff(retryNumber) {
+        retryNumber = Math.min(ExponentialBackoffCeiling, retryNumber);
+        const ms = ExponentialBackoffTimeSlice * Math.pow(2, retryNumber);
+        return new Promise(resolve => setTimeout(() => resolve(), ms));
+    }
+    static dateTimeDeserializer(key, value) {
+        if (typeof value === 'string') {
+            let a = new Date(value);
+            if (!isNaN(a.valueOf())) {
+                return a;
+            }
+        }
+        return value;
+    }
+    async _processResponse(res, options) {
+        return new Promise(async (resolve, reject) => {
+            const statusCode = res.message.statusCode;
+            const response = {
+                statusCode: statusCode,
+                result: null,
+                headers: {}
+            };
+            // not found leads to null obj returned
+            if (statusCode == HttpCodes.NotFound) {
+                resolve(response);
+            }
+            let obj;
+            let contents;
+            // get the result from the body
+            try {
+                contents = await res.readBody();
+                if (contents && contents.length > 0) {
+                    if (options && options.deserializeDates) {
+                        obj = JSON.parse(contents, HttpClient.dateTimeDeserializer);
+                    }
+                    else {
+                        obj = JSON.parse(contents);
+                    }
+                    response.result = obj;
+                }
+                response.headers = res.message.headers;
+            }
+            catch (err) {
+                // Invalid resource (contents not json);  leaving result obj null
+            }
+            // note that 3xx redirects are handled by the http layer.
+            if (statusCode > 299) {
+                let msg;
+                // if exception/error in body, attempt to get better error
+                if (obj && obj.message) {
+                    msg = obj.message;
+                }
+                else if (contents && contents.length > 0) {
+                    // it may be the case that the exception is in the body message as string
+                    msg = contents;
+                }
+                else {
+                    msg = 'Failed request: (' + statusCode + ')';
+                }
+                let err = new Error(msg);
+                // attach statusCode and body obj (if available) to the error object
+                err['statusCode'] = statusCode;
+                if (response.result) {
+                    err['result'] = response.result;
+                }
+                reject(err);
+            }
+            else {
+                resolve(response);
+            }
+        });
+    }
+}
+exports.HttpClient = HttpClient;
+
 
 /***/ }),
-/* 537 */,
-/* 538 */,
-/* 539 */,
 /* 540 */,
 /* 541 */
 /***/ (function(module) {
@@ -63000,8 +69978,116 @@ module.exports = [["0","\u0000",128],["a1","｡",62],["8140","　、。，．・
 
 /***/ }),
 /* 547 */,
-/* 548 */,
-/* 549 */,
+/* 548 */
+/***/ (function(module) {
+
+"use strict";
+
+
+/*!
+ * isobject <https://github.com/jonschlinkert/isobject>
+ *
+ * Copyright (c) 2014-2017, Jon Schlinkert.
+ * Released under the MIT License.
+ */
+
+function isObject(val) {
+  return val != null && typeof val === 'object' && Array.isArray(val) === false;
+}
+
+/*!
+ * is-plain-object <https://github.com/jonschlinkert/is-plain-object>
+ *
+ * Copyright (c) 2014-2017, Jon Schlinkert.
+ * Released under the MIT License.
+ */
+
+function isObjectObject(o) {
+  return isObject(o) === true
+    && Object.prototype.toString.call(o) === '[object Object]';
+}
+
+function isPlainObject(o) {
+  var ctor,prot;
+
+  if (isObjectObject(o) === false) return false;
+
+  // If has modified constructor
+  ctor = o.constructor;
+  if (typeof ctor !== 'function') return false;
+
+  // If has modified prototype
+  prot = ctor.prototype;
+  if (isObjectObject(prot) === false) return false;
+
+  // If constructor does not have an Object-specific method
+  if (prot.hasOwnProperty('isPrototypeOf') === false) {
+    return false;
+  }
+
+  // Most likely a plain Object
+  return true;
+}
+
+module.exports = isPlainObject;
+
+
+/***/ }),
+/* 549 */
+/***/ (function(module, __unusedexports, __webpack_require__) {
+
+var baseTimes = __webpack_require__(6),
+    isArguments = __webpack_require__(460),
+    isArray = __webpack_require__(143),
+    isBuffer = __webpack_require__(408),
+    isIndex = __webpack_require__(160),
+    isTypedArray = __webpack_require__(850);
+
+/** Used for built-in method references. */
+var objectProto = Object.prototype;
+
+/** Used to check objects for own properties. */
+var hasOwnProperty = objectProto.hasOwnProperty;
+
+/**
+ * Creates an array of the enumerable property names of the array-like `value`.
+ *
+ * @private
+ * @param {*} value The value to query.
+ * @param {boolean} inherited Specify returning inherited property names.
+ * @returns {Array} Returns the array of property names.
+ */
+function arrayLikeKeys(value, inherited) {
+  var isArr = isArray(value),
+      isArg = !isArr && isArguments(value),
+      isBuff = !isArr && !isArg && isBuffer(value),
+      isType = !isArr && !isArg && !isBuff && isTypedArray(value),
+      skipIndexes = isArr || isArg || isBuff || isType,
+      result = skipIndexes ? baseTimes(value.length, String) : [],
+      length = result.length;
+
+  for (var key in value) {
+    if ((inherited || hasOwnProperty.call(value, key)) &&
+        !(skipIndexes && (
+           // Safari 9 has enumerable `arguments.length` in strict mode.
+           key == 'length' ||
+           // Node.js 0.10 has enumerable non-index properties on buffers.
+           (isBuff && (key == 'offset' || key == 'parent')) ||
+           // PhantomJS 2 has enumerable non-index properties on typed arrays.
+           (isType && (key == 'buffer' || key == 'byteLength' || key == 'byteOffset')) ||
+           // Skip index properties.
+           isIndex(key, length)
+        ))) {
+      result.push(key);
+    }
+  }
+  return result;
+}
+
+module.exports = arrayLikeKeys;
+
+
+/***/ }),
 /* 550 */
 /***/ (function(__unusedmodule, exports, __webpack_require__) {
 
@@ -69596,7 +76682,7 @@ return /******/ (function(modules) { // webpackBootstrap
   var undefined;
 
   /** Used as the semantic version number. */
-  var VERSION = '4.17.15';
+  var VERSION = '4.17.19';
 
   /** Used as the size to enable large array optimizations. */
   var LARGE_ARRAY_SIZE = 200;
@@ -73303,8 +80389,21 @@ return /******/ (function(modules) { // webpackBootstrap
      * @returns {Array} Returns the new sorted array.
      */
     function baseOrderBy(collection, iteratees, orders) {
+      if (iteratees.length) {
+        iteratees = arrayMap(iteratees, function(iteratee) {
+          if (isArray(iteratee)) {
+            return function(value) {
+              return baseGet(value, iteratee.length === 1 ? iteratee[0] : iteratee);
+            }
+          }
+          return iteratee;
+        });
+      } else {
+        iteratees = [identity];
+      }
+
       var index = -1;
-      iteratees = arrayMap(iteratees.length ? iteratees : [identity], baseUnary(getIteratee()));
+      iteratees = arrayMap(iteratees, baseUnary(getIteratee()));
 
       var result = baseMap(collection, function(value, key, collection) {
         var criteria = arrayMap(iteratees, function(iteratee) {
@@ -73561,6 +80660,10 @@ return /******/ (function(modules) { // webpackBootstrap
         var key = toKey(path[index]),
             newValue = value;
 
+        if (key === '__proto__' || key === 'constructor' || key === 'prototype') {
+          return object;
+        }
+
         if (index != lastIndex) {
           var objValue = nested[key];
           newValue = customizer ? customizer(objValue, key, nested) : undefined;
@@ -73713,11 +80816,14 @@ return /******/ (function(modules) { // webpackBootstrap
      *  into `array`.
      */
     function baseSortedIndexBy(array, value, iteratee, retHighest) {
-      value = iteratee(value);
-
       var low = 0,
-          high = array == null ? 0 : array.length,
-          valIsNaN = value !== value,
+          high = array == null ? 0 : array.length;
+      if (high === 0) {
+        return 0;
+      }
+
+      value = iteratee(value);
+      var valIsNaN = value !== value,
           valIsNull = value === null,
           valIsSymbol = isSymbol(value),
           valIsUndefined = value === undefined;
@@ -75202,10 +82308,11 @@ return /******/ (function(modules) { // webpackBootstrap
       if (arrLength != othLength && !(isPartial && othLength > arrLength)) {
         return false;
       }
-      // Assume cyclic values are equal.
-      var stacked = stack.get(array);
-      if (stacked && stack.get(other)) {
-        return stacked == other;
+      // Check that cyclic values are equal.
+      var arrStacked = stack.get(array);
+      var othStacked = stack.get(other);
+      if (arrStacked && othStacked) {
+        return arrStacked == other && othStacked == array;
       }
       var index = -1,
           result = true,
@@ -75367,10 +82474,11 @@ return /******/ (function(modules) { // webpackBootstrap
           return false;
         }
       }
-      // Assume cyclic values are equal.
-      var stacked = stack.get(object);
-      if (stacked && stack.get(other)) {
-        return stacked == other;
+      // Check that cyclic values are equal.
+      var objStacked = stack.get(object);
+      var othStacked = stack.get(other);
+      if (objStacked && othStacked) {
+        return objStacked == other && othStacked == object;
       }
       var result = true;
       stack.set(object, other);
@@ -78751,6 +85859,10 @@ return /******/ (function(modules) { // webpackBootstrap
      * // The `_.property` iteratee shorthand.
      * _.filter(users, 'active');
      * // => objects for ['barney']
+     *
+     * // Combining several predicates using `_.overEvery` or `_.overSome`.
+     * _.filter(users, _.overSome([{ 'age': 36 }, ['age', 40]]));
+     * // => objects for ['fred', 'barney']
      */
     function filter(collection, predicate) {
       var func = isArray(collection) ? arrayFilter : baseFilter;
@@ -79500,15 +86612,15 @@ return /******/ (function(modules) { // webpackBootstrap
      * var users = [
      *   { 'user': 'fred',   'age': 48 },
      *   { 'user': 'barney', 'age': 36 },
-     *   { 'user': 'fred',   'age': 40 },
+     *   { 'user': 'fred',   'age': 30 },
      *   { 'user': 'barney', 'age': 34 }
      * ];
      *
      * _.sortBy(users, [function(o) { return o.user; }]);
-     * // => objects for [['barney', 36], ['barney', 34], ['fred', 48], ['fred', 40]]
+     * // => objects for [['barney', 36], ['barney', 34], ['fred', 48], ['fred', 30]]
      *
      * _.sortBy(users, ['user', 'age']);
-     * // => objects for [['barney', 34], ['barney', 36], ['fred', 40], ['fred', 48]]
+     * // => objects for [['barney', 34], ['barney', 36], ['fred', 30], ['fred', 48]]
      */
     var sortBy = baseRest(function(collection, iteratees) {
       if (collection == null) {
@@ -84383,11 +91495,11 @@ return /******/ (function(modules) { // webpackBootstrap
 
       // Use a sourceURL for easier debugging.
       // The sourceURL gets injected into the source that's eval-ed, so be careful
-      // with lookup (in case of e.g. prototype pollution), and strip newlines if any.
-      // A newline wouldn't be a valid sourceURL anyway, and it'd enable code injection.
+      // to normalize all kinds of whitespace, so e.g. newlines (and unicode versions of it) can't sneak in
+      // and escape the comment, thus injecting code that gets evaled.
       var sourceURL = '//# sourceURL=' +
         (hasOwnProperty.call(options, 'sourceURL')
-          ? (options.sourceURL + '').replace(/[\r\n]/g, ' ')
+          ? (options.sourceURL + '').replace(/\s/g, ' ')
           : ('lodash.templateSources[' + (++templateCounter) + ']')
         ) + '\n';
 
@@ -84420,8 +91532,6 @@ return /******/ (function(modules) { // webpackBootstrap
 
       // If `variable` is not specified wrap a with-statement around the generated
       // code to add the data object to the top of the scope chain.
-      // Like with sourceURL, we take care to not check the option's prototype,
-      // as this configuration is a code injection vector.
       var variable = hasOwnProperty.call(options, 'variable') && options.variable;
       if (!variable) {
         source = 'with (obj) {\n' + source + '\n}\n';
@@ -85128,6 +92238,9 @@ return /******/ (function(modules) { // webpackBootstrap
      * values against any array or object value, respectively. See `_.isEqual`
      * for a list of supported value comparisons.
      *
+     * **Note:** Multiple values can be checked by combining several matchers
+     * using `_.overSome`
+     *
      * @static
      * @memberOf _
      * @since 3.0.0
@@ -85143,6 +92256,10 @@ return /******/ (function(modules) { // webpackBootstrap
      *
      * _.filter(objects, _.matches({ 'a': 4, 'c': 6 }));
      * // => [{ 'a': 4, 'b': 5, 'c': 6 }]
+     *
+     * // Checking for several possible values
+     * _.filter(users, _.overSome([_.matches({ 'a': 1 }), _.matches({ 'a': 4 })]));
+     * // => [{ 'a': 1, 'b': 2, 'c': 3 }, { 'a': 4, 'b': 5, 'c': 6 }]
      */
     function matches(source) {
       return baseMatches(baseClone(source, CLONE_DEEP_FLAG));
@@ -85156,6 +92273,9 @@ return /******/ (function(modules) { // webpackBootstrap
      * **Note:** Partial comparisons will match empty array and empty object
      * `srcValue` values against any array or object value, respectively. See
      * `_.isEqual` for a list of supported value comparisons.
+     *
+     * **Note:** Multiple values can be checked by combining several matchers
+     * using `_.overSome`
      *
      * @static
      * @memberOf _
@@ -85173,6 +92293,10 @@ return /******/ (function(modules) { // webpackBootstrap
      *
      * _.find(objects, _.matchesProperty('a', 4));
      * // => { 'a': 4, 'b': 5, 'c': 6 }
+     *
+     * // Checking for several possible values
+     * _.filter(users, _.overSome([_.matchesProperty('a', 1), _.matchesProperty('a', 4)]));
+     * // => [{ 'a': 1, 'b': 2, 'c': 3 }, { 'a': 4, 'b': 5, 'c': 6 }]
      */
     function matchesProperty(path, srcValue) {
       return baseMatchesProperty(path, baseClone(srcValue, CLONE_DEEP_FLAG));
@@ -85396,6 +92520,10 @@ return /******/ (function(modules) { // webpackBootstrap
      * Creates a function that checks if **all** of the `predicates` return
      * truthy when invoked with the arguments it receives.
      *
+     * Following shorthands are possible for providing predicates.
+     * Pass an `Object` and it will be used as an parameter for `_.matches` to create the predicate.
+     * Pass an `Array` of parameters for `_.matchesProperty` and the predicate will be created using them.
+     *
      * @static
      * @memberOf _
      * @since 4.0.0
@@ -85422,6 +92550,10 @@ return /******/ (function(modules) { // webpackBootstrap
      * Creates a function that checks if **any** of the `predicates` return
      * truthy when invoked with the arguments it receives.
      *
+     * Following shorthands are possible for providing predicates.
+     * Pass an `Object` and it will be used as an parameter for `_.matches` to create the predicate.
+     * Pass an `Array` of parameters for `_.matchesProperty` and the predicate will be created using them.
+     *
      * @static
      * @memberOf _
      * @since 4.0.0
@@ -85441,6 +92573,9 @@ return /******/ (function(modules) { // webpackBootstrap
      *
      * func(NaN);
      * // => false
+     *
+     * var matchesFunc = _.overSome([{ 'a': 1 }, { 'a': 2 }])
+     * var matchesPropertyFunc = _.overSome([['a', 1], ['a', 2]])
      */
     var overSome = createOver(arraySome);
 
@@ -86744,7 +93879,7 @@ var isObject_1 = __webpack_require__(778);
 var isFunction_1 = __webpack_require__(871);
 var tryCatch_1 = __webpack_require__(782);
 var errorObject_1 = __webpack_require__(423);
-var UnsubscriptionError_1 = __webpack_require__(40);
+var UnsubscriptionError_1 = __webpack_require__(515);
 /**
  * Represents a disposable resource, such as the execution of an Observable. A
  * Subscription has one important method, `unsubscribe`, that takes no argument
@@ -87086,7 +94221,138 @@ util.inherits(module.exports.ISO_2022_CN, ISO_2022);
 
 /***/ }),
 /* 567 */,
-/* 568 */,
+/* 568 */
+/***/ (function(module, __unusedexports, __webpack_require__) {
+
+"use strict";
+
+
+const path = __webpack_require__(622);
+const niceTry = __webpack_require__(948);
+const resolveCommand = __webpack_require__(489);
+const escape = __webpack_require__(462);
+const readShebang = __webpack_require__(389);
+const semver = __webpack_require__(280);
+
+const isWin = process.platform === 'win32';
+const isExecutableRegExp = /\.(?:com|exe)$/i;
+const isCmdShimRegExp = /node_modules[\\/].bin[\\/][^\\/]+\.cmd$/i;
+
+// `options.shell` is supported in Node ^4.8.0, ^5.7.0 and >= 6.0.0
+const supportsShellOption = niceTry(() => semver.satisfies(process.version, '^4.8.0 || ^5.7.0 || >= 6.0.0', true)) || false;
+
+function detectShebang(parsed) {
+    parsed.file = resolveCommand(parsed);
+
+    const shebang = parsed.file && readShebang(parsed.file);
+
+    if (shebang) {
+        parsed.args.unshift(parsed.file);
+        parsed.command = shebang;
+
+        return resolveCommand(parsed);
+    }
+
+    return parsed.file;
+}
+
+function parseNonShell(parsed) {
+    if (!isWin) {
+        return parsed;
+    }
+
+    // Detect & add support for shebangs
+    const commandFile = detectShebang(parsed);
+
+    // We don't need a shell if the command filename is an executable
+    const needsShell = !isExecutableRegExp.test(commandFile);
+
+    // If a shell is required, use cmd.exe and take care of escaping everything correctly
+    // Note that `forceShell` is an hidden option used only in tests
+    if (parsed.options.forceShell || needsShell) {
+        // Need to double escape meta chars if the command is a cmd-shim located in `node_modules/.bin/`
+        // The cmd-shim simply calls execute the package bin file with NodeJS, proxying any argument
+        // Because the escape of metachars with ^ gets interpreted when the cmd.exe is first called,
+        // we need to double escape them
+        const needsDoubleEscapeMetaChars = isCmdShimRegExp.test(commandFile);
+
+        // Normalize posix paths into OS compatible paths (e.g.: foo/bar -> foo\bar)
+        // This is necessary otherwise it will always fail with ENOENT in those cases
+        parsed.command = path.normalize(parsed.command);
+
+        // Escape command & arguments
+        parsed.command = escape.command(parsed.command);
+        parsed.args = parsed.args.map((arg) => escape.argument(arg, needsDoubleEscapeMetaChars));
+
+        const shellCommand = [parsed.command].concat(parsed.args).join(' ');
+
+        parsed.args = ['/d', '/s', '/c', `"${shellCommand}"`];
+        parsed.command = process.env.comspec || 'cmd.exe';
+        parsed.options.windowsVerbatimArguments = true; // Tell node's spawn that the arguments are already escaped
+    }
+
+    return parsed;
+}
+
+function parseShell(parsed) {
+    // If node supports the shell option, there's no need to mimic its behavior
+    if (supportsShellOption) {
+        return parsed;
+    }
+
+    // Mimic node shell option
+    // See https://github.com/nodejs/node/blob/b9f6a2dc059a1062776133f3d4fd848c4da7d150/lib/child_process.js#L335
+    const shellCommand = [parsed.command].concat(parsed.args).join(' ');
+
+    if (isWin) {
+        parsed.command = typeof parsed.options.shell === 'string' ? parsed.options.shell : process.env.comspec || 'cmd.exe';
+        parsed.args = ['/d', '/s', '/c', `"${shellCommand}"`];
+        parsed.options.windowsVerbatimArguments = true; // Tell node's spawn that the arguments are already escaped
+    } else {
+        if (typeof parsed.options.shell === 'string') {
+            parsed.command = parsed.options.shell;
+        } else if (process.platform === 'android') {
+            parsed.command = '/system/bin/sh';
+        } else {
+            parsed.command = '/bin/sh';
+        }
+
+        parsed.args = ['-c', shellCommand];
+    }
+
+    return parsed;
+}
+
+function parse(command, args, options) {
+    // Normalize arguments, similar to nodejs
+    if (args && !Array.isArray(args)) {
+        options = args;
+        args = null;
+    }
+
+    args = args ? args.slice(0) : []; // Clone array to avoid changing the original
+    options = Object.assign({}, options); // Clone object to avoid changing the original
+
+    // Build our parsed object
+    const parsed = {
+        command,
+        args,
+        options,
+        file: undefined,
+        original: {
+            command,
+            args,
+        },
+    };
+
+    // Delegate further parsing to shell or non-shell
+    return options.shell ? parseShell(parsed) : parseNonShell(parsed);
+}
+
+module.exports = parse;
+
+
+/***/ }),
 /* 569 */
 /***/ (function(module, __unusedexports, __webpack_require__) {
 
@@ -87748,7 +95014,7 @@ module.exports = function (str, begin, end) {
 /***/ (function(module, __unusedexports, __webpack_require__) {
 
 var conversions = __webpack_require__(600);
-var route = __webpack_require__(260);
+var route = __webpack_require__(40);
 
 var convert = {};
 
@@ -87864,7 +95130,7 @@ module.exports = process.platform === 'win32' ? win : main;
 "use strict";
 
 const onetime = __webpack_require__(723);
-const signalExit = __webpack_require__(497);
+const signalExit = __webpack_require__(260);
 
 module.exports = onetime(() => {
 	signalExit(() => {
@@ -88813,7 +96079,7 @@ module.exports = getSimilarity
 var firstLineError;
 try {throw new Error(); } catch (e) {firstLineError = e;}
 var schedule = __webpack_require__(476);
-var Queue = __webpack_require__(895);
+var Queue = __webpack_require__(392);
 
 function Async() {
     this._customScheduler = false;
@@ -89096,41 +96362,74 @@ Promise.filter = function (promises, fn, options) {
 /* 611 */
 /***/ (function(module) {
 
-/** Used as references for various `Number` constants. */
-var MAX_SAFE_INTEGER = 9007199254740991;
+"use strict";
 
-/**
- * Checks if `value` is a valid array-like length.
- *
- * **Note:** This method is loosely based on
- * [`ToLength`](http://ecma-international.org/ecma-262/7.0/#sec-tolength).
- *
- * @static
- * @memberOf _
- * @since 4.0.0
- * @category Lang
- * @param {*} value The value to check.
- * @returns {boolean} Returns `true` if `value` is a valid length, else `false`.
- * @example
- *
- * _.isLength(3);
- * // => true
- *
- * _.isLength(Number.MIN_VALUE);
- * // => false
- *
- * _.isLength(Infinity);
- * // => false
- *
- * _.isLength('3');
- * // => false
- */
-function isLength(value) {
-  return typeof value == 'number' &&
-    value > -1 && value % 1 == 0 && value <= MAX_SAFE_INTEGER;
-}
+module.exports = (iterable, mapper, opts) => new Promise((resolve, reject) => {
+	opts = Object.assign({
+		concurrency: Infinity
+	}, opts);
 
-module.exports = isLength;
+	if (typeof mapper !== 'function') {
+		throw new TypeError('Mapper function is required');
+	}
+
+	const concurrency = opts.concurrency;
+
+	if (!(typeof concurrency === 'number' && concurrency >= 1)) {
+		throw new TypeError(`Expected \`concurrency\` to be a number from 1 and up, got \`${concurrency}\` (${typeof concurrency})`);
+	}
+
+	const ret = [];
+	const iterator = iterable[Symbol.iterator]();
+	let isRejected = false;
+	let iterableDone = false;
+	let resolvingCount = 0;
+	let currentIdx = 0;
+
+	const next = () => {
+		if (isRejected) {
+			return;
+		}
+
+		const nextItem = iterator.next();
+		const i = currentIdx;
+		currentIdx++;
+
+		if (nextItem.done) {
+			iterableDone = true;
+
+			if (resolvingCount === 0) {
+				resolve(ret);
+			}
+
+			return;
+		}
+
+		resolvingCount++;
+
+		Promise.resolve(nextItem.value)
+			.then(el => mapper(el, i))
+			.then(
+				val => {
+					ret[i] = val;
+					resolvingCount--;
+					next();
+				},
+				err => {
+					isRejected = true;
+					reject(err);
+				}
+			);
+	};
+
+	for (let i = 0; i < concurrency; i++) {
+		next();
+
+		if (iterableDone) {
+			break;
+		}
+	}
+});
 
 
 /***/ }),
@@ -89276,7 +96575,52 @@ module.exports = listCacheGet;
 /***/ }),
 /* 619 */,
 /* 620 */,
-/* 621 */,
+/* 621 */
+/***/ (function(module, __unusedexports, __webpack_require__) {
+
+"use strict";
+
+const path = __webpack_require__(622);
+const pathKey = __webpack_require__(39);
+
+module.exports = opts => {
+	opts = Object.assign({
+		cwd: process.cwd(),
+		path: process.env[pathKey()]
+	}, opts);
+
+	let prev;
+	let pth = path.resolve(opts.cwd);
+	const ret = [];
+
+	while (prev !== pth) {
+		ret.push(path.join(pth, 'node_modules/.bin'));
+		prev = pth;
+		pth = path.resolve(pth, '..');
+	}
+
+	// ensure the running `node` binary is used
+	ret.push(path.dirname(process.execPath));
+
+	return ret.concat(opts.path).join(path.delimiter);
+};
+
+module.exports.env = opts => {
+	opts = Object.assign({
+		env: process.env
+	}, opts);
+
+	const env = Object.assign({}, opts.env);
+	const path = pathKey({env});
+
+	opts.path = env[path];
+	env[path] = module.exports(opts);
+
+	return env;
+};
+
+
+/***/ }),
 /* 622 */
 /***/ (function(module) {
 
@@ -89287,19 +96631,57 @@ module.exports = require("path");
 /* 624 */,
 /* 625 */,
 /* 626 */
-/***/ (function(module, __unusedexports, __webpack_require__) {
+/***/ (function(module) {
 
-var buildDistanceInWordsLocale = __webpack_require__(175)
-var buildFormatLocale = __webpack_require__(212)
+"use strict";
 
-/**
- * @category Locales
- * @summary English locale.
+
+/*!
+ * isobject <https://github.com/jonschlinkert/isobject>
+ *
+ * Copyright (c) 2014-2017, Jon Schlinkert.
+ * Released under the MIT License.
  */
-module.exports = {
-  distanceInWords: buildDistanceInWordsLocale(),
-  format: buildFormatLocale()
+
+function isObject(val) {
+  return val != null && typeof val === 'object' && Array.isArray(val) === false;
 }
+
+/*!
+ * is-plain-object <https://github.com/jonschlinkert/is-plain-object>
+ *
+ * Copyright (c) 2014-2017, Jon Schlinkert.
+ * Released under the MIT License.
+ */
+
+function isObjectObject(o) {
+  return isObject(o) === true
+    && Object.prototype.toString.call(o) === '[object Object]';
+}
+
+function isPlainObject(o) {
+  var ctor,prot;
+
+  if (isObjectObject(o) === false) return false;
+
+  // If has modified constructor
+  ctor = o.constructor;
+  if (typeof ctor !== 'function') return false;
+
+  // If has modified prototype
+  prot = ctor.prototype;
+  if (isObjectObject(prot) === false) return false;
+
+  // If constructor does not have an Object-specific method
+  if (prot.hasOwnProperty('isPrototypeOf') === false) {
+    return false;
+  }
+
+  // Most likely a plain Object
+  return true;
+}
+
+module.exports = isPlainObject;
 
 
 /***/ }),
@@ -89309,7 +96691,7 @@ module.exports = {
 "use strict";
 
 Object.defineProperty(exports, "__esModule", { value: true });
-const schema_validator_1 = __webpack_require__(536);
+const schema_validator_1 = __webpack_require__(398);
 const Joi = __webpack_require__(274);
 class ContentTransformIntentValidator extends schema_validator_1.default {
     constructor() {
@@ -89815,7 +97197,7 @@ inquirer.Separator = __webpack_require__(836);
 
 inquirer.ui = {
   BottomBar: __webpack_require__(724),
-  Prompt: __webpack_require__(813)
+  Prompt: __webpack_require__(57)
 };
 
 /**
@@ -89892,8 +97274,8 @@ inquirer.restoreDefaultPrompts = function () {
 "use strict";
 
 var _ = __webpack_require__(557);
-var util = __webpack_require__(39);
-var cliWidth = __webpack_require__(469);
+var util = __webpack_require__(774);
+var cliWidth = __webpack_require__(659);
 var stripAnsi = __webpack_require__(786);
 var stringWidth = __webpack_require__(758);
 
@@ -90356,11 +97738,11 @@ Utf7IMAPDecoder.prototype.end = function() {
 Object.defineProperty(exports, "__esModule", { value: true });
 const base_intent_1 = __webpack_require__(19);
 const field_rename_1 = __webpack_require__(776);
-const entry_field_rename_1 = __webpack_require__(453);
+const entry_field_rename_1 = __webpack_require__(249);
 const editorinterface_copy_1 = __webpack_require__(167);
 const editorinterface_save_1 = __webpack_require__(552);
 const editorinterface_reset_1 = __webpack_require__(251);
-const content_type_save_1 = __webpack_require__(9);
+const content_type_save_1 = __webpack_require__(132);
 const content_type_publish_1 = __webpack_require__(907);
 const field_update_1 = __webpack_require__(644);
 const chalk_1 = __webpack_require__(946);
@@ -90562,7 +97944,62 @@ Promise.prototype.any = function () {
 
 
 /***/ }),
-/* 659 */,
+/* 659 */
+/***/ (function(module, exports, __webpack_require__) {
+
+"use strict";
+
+
+exports = module.exports = cliWidth;
+
+function normalizeOpts(options) {
+  var defaultOpts = {
+    defaultWidth: 0,
+    output: process.stdout,
+    tty: __webpack_require__(867)
+  };
+
+  if (!options) {
+    return defaultOpts;
+  } else {
+    Object.keys(defaultOpts).forEach(function (key) {
+      if (!options[key]) {
+        options[key] = defaultOpts[key];
+      }
+    });
+
+    return options;
+  }
+}
+
+function cliWidth(options) {
+  var opts = normalizeOpts(options);
+
+  if (opts.output.getWindowSize) {
+    return opts.output.getWindowSize()[0] || opts.defaultWidth;
+  } else {
+    if (opts.tty.getWindowSize) {
+      return opts.tty.getWindowSize()[1] || opts.defaultWidth;
+    } else {
+      if (opts.output.columns) {
+        return opts.output.columns;
+      } else {
+        if (process.env.CLI_WIDTH) {
+          var width = parseInt(process.env.CLI_WIDTH, 10);
+
+          if (!isNaN(width) && width !== 0) {
+            return width;
+          }
+        }
+      }
+
+      return opts.defaultWidth;
+    }
+  }
+};
+
+
+/***/ }),
 /* 660 */,
 /* 661 */
 /***/ (function(module) {
@@ -91184,14 +98621,14 @@ class OfflineAPI {
             const fields = entry.fields;
             for (let key of Object.keys(fields)) {
                 for (let locale of locales) {
-                    const field = entry.fields[key][locale];
-                    if (field instanceof Object && field.sys instanceof Object && field.sys.id === childId) {
+                    const field = lodash_1.get(entry.fields, `${key}.${locale}`);
+                    if (lodash_1.get(field, 'sys.id') === childId) {
                         links.push(new link_1.default(entry, key, locale));
                     }
                     if (field instanceof Array) {
                         const fieldArray = field;
                         fieldArray.forEach((fieldEntry, index) => {
-                            if (fieldEntry instanceof Object && fieldEntry.sys instanceof Object && fieldEntry.sys.id === childId) {
+                            if (lodash_1.get(fieldEntry, 'sys.id') === childId) {
                                 links.push(new link_1.default(entry, key, locale, index));
                             }
                         });
@@ -91509,7 +98946,7 @@ var listCacheClear = __webpack_require__(22),
     listCacheDelete = __webpack_require__(906),
     listCacheGet = __webpack_require__(618),
     listCacheHas = __webpack_require__(903),
-    listCacheSet = __webpack_require__(966);
+    listCacheSet = __webpack_require__(497);
 
 /**
  * Creates an list cache object.
@@ -91781,7 +99218,193 @@ module.exports = isObject;
 
 
 /***/ }),
-/* 679 */,
+/* 679 */
+/***/ (function(module, exports, __webpack_require__) {
+
+"use strict";
+
+
+function _typeof(obj) { if (typeof Symbol === "function" && typeof Symbol.iterator === "symbol") { _typeof = function _typeof(obj) { return typeof obj; }; } else { _typeof = function _typeof(obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; }; } return _typeof(obj); }
+
+/* eslint-env browser */
+
+/**
+ * This is the web browser implementation of `debug()`.
+ */
+exports.log = log;
+exports.formatArgs = formatArgs;
+exports.save = save;
+exports.load = load;
+exports.useColors = useColors;
+exports.storage = localstorage();
+/**
+ * Colors.
+ */
+
+exports.colors = ['#0000CC', '#0000FF', '#0033CC', '#0033FF', '#0066CC', '#0066FF', '#0099CC', '#0099FF', '#00CC00', '#00CC33', '#00CC66', '#00CC99', '#00CCCC', '#00CCFF', '#3300CC', '#3300FF', '#3333CC', '#3333FF', '#3366CC', '#3366FF', '#3399CC', '#3399FF', '#33CC00', '#33CC33', '#33CC66', '#33CC99', '#33CCCC', '#33CCFF', '#6600CC', '#6600FF', '#6633CC', '#6633FF', '#66CC00', '#66CC33', '#9900CC', '#9900FF', '#9933CC', '#9933FF', '#99CC00', '#99CC33', '#CC0000', '#CC0033', '#CC0066', '#CC0099', '#CC00CC', '#CC00FF', '#CC3300', '#CC3333', '#CC3366', '#CC3399', '#CC33CC', '#CC33FF', '#CC6600', '#CC6633', '#CC9900', '#CC9933', '#CCCC00', '#CCCC33', '#FF0000', '#FF0033', '#FF0066', '#FF0099', '#FF00CC', '#FF00FF', '#FF3300', '#FF3333', '#FF3366', '#FF3399', '#FF33CC', '#FF33FF', '#FF6600', '#FF6633', '#FF9900', '#FF9933', '#FFCC00', '#FFCC33'];
+/**
+ * Currently only WebKit-based Web Inspectors, Firefox >= v31,
+ * and the Firebug extension (any Firefox version) are known
+ * to support "%c" CSS customizations.
+ *
+ * TODO: add a `localStorage` variable to explicitly enable/disable colors
+ */
+// eslint-disable-next-line complexity
+
+function useColors() {
+  // NB: In an Electron preload script, document will be defined but not fully
+  // initialized. Since we know we're in Chrome, we'll just detect this case
+  // explicitly
+  if (typeof window !== 'undefined' && window.process && (window.process.type === 'renderer' || window.process.__nwjs)) {
+    return true;
+  } // Internet Explorer and Edge do not support colors.
+
+
+  if (typeof navigator !== 'undefined' && navigator.userAgent && navigator.userAgent.toLowerCase().match(/(edge|trident)\/(\d+)/)) {
+    return false;
+  } // Is webkit? http://stackoverflow.com/a/16459606/376773
+  // document is undefined in react-native: https://github.com/facebook/react-native/pull/1632
+
+
+  return typeof document !== 'undefined' && document.documentElement && document.documentElement.style && document.documentElement.style.WebkitAppearance || // Is firebug? http://stackoverflow.com/a/398120/376773
+  typeof window !== 'undefined' && window.console && (window.console.firebug || window.console.exception && window.console.table) || // Is firefox >= v31?
+  // https://developer.mozilla.org/en-US/docs/Tools/Web_Console#Styling_messages
+  typeof navigator !== 'undefined' && navigator.userAgent && navigator.userAgent.toLowerCase().match(/firefox\/(\d+)/) && parseInt(RegExp.$1, 10) >= 31 || // Double check webkit in userAgent just in case we are in a worker
+  typeof navigator !== 'undefined' && navigator.userAgent && navigator.userAgent.toLowerCase().match(/applewebkit\/(\d+)/);
+}
+/**
+ * Colorize log arguments if enabled.
+ *
+ * @api public
+ */
+
+
+function formatArgs(args) {
+  args[0] = (this.useColors ? '%c' : '') + this.namespace + (this.useColors ? ' %c' : ' ') + args[0] + (this.useColors ? '%c ' : ' ') + '+' + module.exports.humanize(this.diff);
+
+  if (!this.useColors) {
+    return;
+  }
+
+  var c = 'color: ' + this.color;
+  args.splice(1, 0, c, 'color: inherit'); // The final "%c" is somewhat tricky, because there could be other
+  // arguments passed either before or after the %c, so we need to
+  // figure out the correct index to insert the CSS into
+
+  var index = 0;
+  var lastC = 0;
+  args[0].replace(/%[a-zA-Z%]/g, function (match) {
+    if (match === '%%') {
+      return;
+    }
+
+    index++;
+
+    if (match === '%c') {
+      // We only are interested in the *last* %c
+      // (the user may have provided their own)
+      lastC = index;
+    }
+  });
+  args.splice(lastC, 0, c);
+}
+/**
+ * Invokes `console.log()` when available.
+ * No-op when `console.log` is not a "function".
+ *
+ * @api public
+ */
+
+
+function log() {
+  var _console;
+
+  // This hackery is required for IE8/9, where
+  // the `console.log` function doesn't have 'apply'
+  return (typeof console === "undefined" ? "undefined" : _typeof(console)) === 'object' && console.log && (_console = console).log.apply(_console, arguments);
+}
+/**
+ * Save `namespaces`.
+ *
+ * @param {String} namespaces
+ * @api private
+ */
+
+
+function save(namespaces) {
+  try {
+    if (namespaces) {
+      exports.storage.setItem('debug', namespaces);
+    } else {
+      exports.storage.removeItem('debug');
+    }
+  } catch (error) {// Swallow
+    // XXX (@Qix-) should we be logging these?
+  }
+}
+/**
+ * Load `namespaces`.
+ *
+ * @return {String} returns the previously persisted debug modes
+ * @api private
+ */
+
+
+function load() {
+  var r;
+
+  try {
+    r = exports.storage.getItem('debug');
+  } catch (error) {} // Swallow
+  // XXX (@Qix-) should we be logging these?
+  // If debug isn't set in LS, and we're in Electron, try to load $DEBUG
+
+
+  if (!r && typeof process !== 'undefined' && 'env' in process) {
+    r = process.env.DEBUG;
+  }
+
+  return r;
+}
+/**
+ * Localstorage attempts to return the localstorage.
+ *
+ * This is necessary because safari throws
+ * when a user disables cookies/localstorage
+ * and you attempt to access it.
+ *
+ * @return {LocalStorage}
+ * @api private
+ */
+
+
+function localstorage() {
+  try {
+    // TVMLKit (Apple TV JS Runtime) does not have a window object, just localStorage in the global context
+    // The Browser also has localStorage in the global context.
+    return localStorage;
+  } catch (error) {// Swallow
+    // XXX (@Qix-) should we be logging these?
+  }
+}
+
+module.exports = __webpack_require__(783)(exports);
+var formatters = module.exports.formatters;
+/**
+ * Map %j to `JSON.stringify()`, since no Web Inspectors do that by default.
+ */
+
+formatters.j = function (v) {
+  try {
+    return JSON.stringify(v);
+  } catch (error) {
+    return '[UnexpectedJSONParseError]: ' + error.message;
+  }
+};
+
+
+
+/***/ }),
 /* 680 */
 /***/ (function(module) {
 
@@ -93096,15 +100719,29 @@ module.exports = isValid
 /***/ }),
 /* 691 */,
 /* 692 */
-/***/ (function(module, __unusedexports, __webpack_require__) {
+/***/ (function(__unusedmodule, exports) {
 
 "use strict";
 
-var ansiRegex = __webpack_require__(216)();
 
-module.exports = function (str) {
-	return typeof str === 'string' ? str.replace(ansiRegex, '') : str;
-};
+Object.defineProperty(exports, '__esModule', { value: true });
+
+class Deprecation extends Error {
+  constructor(message) {
+    super(message); // Maintains proper stack trace (only available on V8)
+
+    /* istanbul ignore next */
+
+    if (Error.captureStackTrace) {
+      Error.captureStackTrace(this, this.constructor);
+    }
+
+    this.name = 'Deprecation';
+  }
+
+}
+
+exports.Deprecation = Deprecation;
 
 
 /***/ }),
@@ -93180,7 +100817,7 @@ Promise.prototype.asCallback = Promise.prototype.nodeify = function (nodeback,
 "use strict";
 
 Object.defineProperty(exports, "__esModule", { value: true });
-const schema_validator_1 = __webpack_require__(536);
+const schema_validator_1 = __webpack_require__(398);
 const Joi = __webpack_require__(274);
 class FieldUpdateStepValidator extends schema_validator_1.default {
     constructor() {
@@ -93213,7 +100850,28 @@ exports.default = FieldUpdateStepValidator;
 
 /***/ }),
 /* 696 */,
-/* 697 */,
+/* 697 */
+/***/ (function(module) {
+
+"use strict";
+
+module.exports = (promise, onFinally) => {
+	onFinally = onFinally || (() => {});
+
+	return promise.then(
+		val => new Promise(resolve => {
+			resolve(onFinally());
+		}).then(() => val),
+		err => new Promise(resolve => {
+			resolve(onFinally());
+		}).then(() => {
+			throw err;
+		})
+	);
+};
+
+
+/***/ }),
 /* 698 */,
 /* 699 */,
 /* 700 */,
@@ -93254,7 +100912,7 @@ module.exports = getNative;
 /* 708 */
 /***/ (function(module) {
 
-module.exports = {"_from":"joi@^10.6.0","_id":"joi@10.6.0","_inBundle":false,"_integrity":"sha512-hBF3LcqyAid+9X/pwg+eXjD2QBZI5eXnBFJYaAkH4SK3mp9QSRiiQnDYlmlz5pccMvnLcJRS4whhDOTCkmsAdQ==","_location":"/joi","_phantomChildren":{},"_requested":{"type":"range","registry":true,"raw":"joi@^10.6.0","name":"joi","escapedName":"joi","rawSpec":"^10.6.0","saveSpec":null,"fetchSpec":"^10.6.0"},"_requiredBy":["/contentful-migration"],"_resolved":"https://registry.npmjs.org/joi/-/joi-10.6.0.tgz","_shasum":"52587f02d52b8b75cdb0c74f0b164a191a0e1fc2","_spec":"joi@^10.6.0","_where":"/Users/shy/Downloads/action-testing/contentful-action/node_modules/contentful-migration","bugs":{"url":"https://github.com/hapijs/joi/issues"},"bundleDependencies":false,"dependencies":{"hoek":"4.x.x","isemail":"2.x.x","items":"2.x.x","topo":"2.x.x"},"deprecated":false,"description":"Object schema validation","devDependencies":{"code":"4.x.x","hapitoc":"1.x.x","lab":"13.x.x"},"engines":{"node":">=4.0.0"},"homepage":"https://github.com/hapijs/joi","keywords":["hapi","schema","validation"],"license":"BSD-3-Clause","main":"lib/index.js","name":"joi","repository":{"type":"git","url":"git://github.com/hapijs/joi.git"},"scripts":{"test":"lab -t 100 -a code -L","test-cov-html":"lab -r html -o coverage.html -a code","test-debug":"lab -a code","toc":"hapitoc","version":"npm run toc && git add API.md README.md"},"version":"10.6.0"};
+module.exports = {"_args":[["joi@10.6.0","/Users/shy/Documents/Contentful/action-testing/contentful-action"]],"_from":"joi@10.6.0","_id":"joi@10.6.0","_inBundle":false,"_integrity":"sha512-hBF3LcqyAid+9X/pwg+eXjD2QBZI5eXnBFJYaAkH4SK3mp9QSRiiQnDYlmlz5pccMvnLcJRS4whhDOTCkmsAdQ==","_location":"/joi","_phantomChildren":{},"_requested":{"type":"version","registry":true,"raw":"joi@10.6.0","name":"joi","escapedName":"joi","rawSpec":"10.6.0","saveSpec":null,"fetchSpec":"10.6.0"},"_requiredBy":["/contentful-migration"],"_resolved":"https://registry.npmjs.org/joi/-/joi-10.6.0.tgz","_spec":"10.6.0","_where":"/Users/shy/Documents/Contentful/action-testing/contentful-action","bugs":{"url":"https://github.com/hapijs/joi/issues"},"dependencies":{"hoek":"4.x.x","isemail":"2.x.x","items":"2.x.x","topo":"2.x.x"},"description":"Object schema validation","devDependencies":{"code":"4.x.x","hapitoc":"1.x.x","lab":"13.x.x"},"engines":{"node":">=4.0.0"},"homepage":"https://github.com/hapijs/joi","keywords":["hapi","schema","validation"],"license":"BSD-3-Clause","main":"lib/index.js","name":"joi","repository":{"type":"git","url":"git://github.com/hapijs/joi.git"},"scripts":{"test":"lab -t 100 -a code -L","test-cov-html":"lab -r html -o coverage.html -a code","test-debug":"lab -a code","toc":"hapitoc","version":"npm run toc && git add API.md README.md"},"version":"10.6.0"};
 
 /***/ }),
 /* 709 */,
@@ -93927,7 +101585,25 @@ function isDefaultPort(port, secure) {
 
 
 /***/ }),
-/* 718 */,
+/* 718 */
+/***/ (function(__unusedmodule, exports, __webpack_require__) {
+
+"use strict";
+
+Object.defineProperty(exports, "__esModule", { value: true });
+const steps_validation_1 = __webpack_require__(573);
+exports.StepsValidationError = steps_validation_1.default;
+const chunks_validation_1 = __webpack_require__(559);
+exports.ChunksValidationError = chunks_validation_1.default;
+const space_access_1 = __webpack_require__(425);
+exports.SpaceAccessError = space_access_1.default;
+const payload_validation_1 = __webpack_require__(12);
+exports.PayloadValidationError = payload_validation_1.default;
+const editorinterfaces_fetching_1 = __webpack_require__(219);
+exports.EditorInterfacesFetchingError = editorinterfaces_fetching_1.default;
+//# sourceMappingURL=index.js.map
+
+/***/ }),
 /* 719 */,
 /* 720 */,
 /* 721 */,
@@ -93988,7 +101664,7 @@ module.exports = (fn, opts) => {
 var util = __webpack_require__(669);
 var through = __webpack_require__(400);
 var Base = __webpack_require__(825);
-var rlUtils = __webpack_require__(39);
+var rlUtils = __webpack_require__(774);
 var _ = __webpack_require__(557);
 
 /**
@@ -94424,7 +102100,69 @@ Promise.prototype.catchReturn = function (value) {
 /* 739 */,
 /* 740 */,
 /* 741 */,
-/* 742 */,
+/* 742 */
+/***/ (function(module, __unusedexports, __webpack_require__) {
+
+var fs = __webpack_require__(747)
+var core
+if (process.platform === 'win32' || global.TESTING_WINDOWS) {
+  core = __webpack_require__(818)
+} else {
+  core = __webpack_require__(197)
+}
+
+module.exports = isexe
+isexe.sync = sync
+
+function isexe (path, options, cb) {
+  if (typeof options === 'function') {
+    cb = options
+    options = {}
+  }
+
+  if (!cb) {
+    if (typeof Promise !== 'function') {
+      throw new TypeError('callback not provided')
+    }
+
+    return new Promise(function (resolve, reject) {
+      isexe(path, options || {}, function (er, is) {
+        if (er) {
+          reject(er)
+        } else {
+          resolve(is)
+        }
+      })
+    })
+  }
+
+  core(path, options || {}, function (er, is) {
+    // ignore EACCES because that just means we aren't allowed to run it
+    if (er) {
+      if (er.code === 'EACCES' || options && options.ignoreErrors) {
+        er = null
+        is = false
+      }
+    }
+    cb(er, is)
+  })
+}
+
+function sync (path, options) {
+  // my kingdom for a filtered catch
+  try {
+    return core.sync(path, options || {})
+  } catch (er) {
+    if (options && options.ignoreErrors || er.code === 'EACCES') {
+      return false
+    } else {
+      throw er
+    }
+  }
+}
+
+
+/***/ }),
 /* 743 */,
 /* 744 */,
 /* 745 */,
@@ -94909,19 +102647,154 @@ module.exports = parse
 
 "use strict";
 
-Object.defineProperty(exports, "__esModule", { value: true });
-const action_1 = __webpack_require__(64);
-class ContentTypeDeleteAction extends action_1.APIAction {
-    constructor(contentTypeId) {
-        super();
-        this.contentTypeId = contentTypeId;
-    }
-    async applyTo(api) {
-        await api.deleteContentType(this.contentTypeId);
-    }
+
+Object.defineProperty(exports, '__esModule', { value: true });
+
+function _interopDefault (ex) { return (ex && (typeof ex === 'object') && 'default' in ex) ? ex['default'] : ex; }
+
+var endpoint = __webpack_require__(385);
+var universalUserAgent = __webpack_require__(796);
+var isPlainObject = _interopDefault(__webpack_require__(548));
+var nodeFetch = _interopDefault(__webpack_require__(454));
+var requestError = __webpack_require__(463);
+
+const VERSION = "5.4.5";
+
+function getBufferResponse(response) {
+  return response.arrayBuffer();
 }
-exports.ContentTypeDeleteAction = ContentTypeDeleteAction;
-//# sourceMappingURL=content-type-delete.js.map
+
+function fetchWrapper(requestOptions) {
+  if (isPlainObject(requestOptions.body) || Array.isArray(requestOptions.body)) {
+    requestOptions.body = JSON.stringify(requestOptions.body);
+  }
+
+  let headers = {};
+  let status;
+  let url;
+  const fetch = requestOptions.request && requestOptions.request.fetch || nodeFetch;
+  return fetch(requestOptions.url, Object.assign({
+    method: requestOptions.method,
+    body: requestOptions.body,
+    headers: requestOptions.headers,
+    redirect: requestOptions.redirect
+  }, requestOptions.request)).then(response => {
+    url = response.url;
+    status = response.status;
+
+    for (const keyAndValue of response.headers) {
+      headers[keyAndValue[0]] = keyAndValue[1];
+    }
+
+    if (status === 204 || status === 205) {
+      return;
+    } // GitHub API returns 200 for HEAD requests
+
+
+    if (requestOptions.method === "HEAD") {
+      if (status < 400) {
+        return;
+      }
+
+      throw new requestError.RequestError(response.statusText, status, {
+        headers,
+        request: requestOptions
+      });
+    }
+
+    if (status === 304) {
+      throw new requestError.RequestError("Not modified", status, {
+        headers,
+        request: requestOptions
+      });
+    }
+
+    if (status >= 400) {
+      return response.text().then(message => {
+        const error = new requestError.RequestError(message, status, {
+          headers,
+          request: requestOptions
+        });
+
+        try {
+          let responseBody = JSON.parse(error.message);
+          Object.assign(error, responseBody);
+          let errors = responseBody.errors; // Assumption `errors` would always be in Array format
+
+          error.message = error.message + ": " + errors.map(JSON.stringify).join(", ");
+        } catch (e) {// ignore, see octokit/rest.js#684
+        }
+
+        throw error;
+      });
+    }
+
+    const contentType = response.headers.get("content-type");
+
+    if (/application\/json/.test(contentType)) {
+      return response.json();
+    }
+
+    if (!contentType || /^text\/|charset=utf-8$/.test(contentType)) {
+      return response.text();
+    }
+
+    return getBufferResponse(response);
+  }).then(data => {
+    return {
+      status,
+      url,
+      headers,
+      data
+    };
+  }).catch(error => {
+    if (error instanceof requestError.RequestError) {
+      throw error;
+    }
+
+    throw new requestError.RequestError(error.message, 500, {
+      headers,
+      request: requestOptions
+    });
+  });
+}
+
+function withDefaults(oldEndpoint, newDefaults) {
+  const endpoint = oldEndpoint.defaults(newDefaults);
+
+  const newApi = function (route, parameters) {
+    const endpointOptions = endpoint.merge(route, parameters);
+
+    if (!endpointOptions.request || !endpointOptions.request.hook) {
+      return fetchWrapper(endpoint.parse(endpointOptions));
+    }
+
+    const request = (route, parameters) => {
+      return fetchWrapper(endpoint.parse(endpoint.merge(route, parameters)));
+    };
+
+    Object.assign(request, {
+      endpoint,
+      defaults: withDefaults.bind(null, endpoint)
+    });
+    return endpointOptions.request.hook(request, endpointOptions);
+  };
+
+  return Object.assign(newApi, {
+    endpoint,
+    defaults: withDefaults.bind(null, endpoint)
+  });
+}
+
+const request = withDefaults(endpoint.endpoint, {
+  headers: {
+    "user-agent": `octokit-request.js/${VERSION} ${universalUserAgent.getUserAgent()}`
+  }
+});
+
+exports.request = request;
+//# sourceMappingURL=index.js.map
+
 
 /***/ }),
 /* 754 */,
@@ -96378,7 +104251,7 @@ Promise.bind = function (thisArg, value) {
 "use strict";
 
 const stripAnsi = __webpack_require__(786);
-const isFullwidthCodePoint = __webpack_require__(363);
+const isFullwidthCodePoint = __webpack_require__(475);
 
 module.exports = str => {
 	if (typeof str !== 'string' || str.length === 0) {
@@ -96604,7 +104477,29 @@ module.exports = {
 
 
 /***/ }),
-/* 763 */,
+/* 763 */
+/***/ (function(module) {
+
+module.exports = removeHook
+
+function removeHook (state, name, method) {
+  if (!state.registry[name]) {
+    return
+  }
+
+  var index = state.registry[name]
+    .map(function (registered) { return registered.orig })
+    .indexOf(method)
+
+  if (index === -1) {
+    return
+  }
+
+  state.registry[name].splice(index, 1)
+}
+
+
+/***/ }),
 /* 764 */,
 /* 765 */
 /***/ (function(__unusedmodule, exports, __webpack_require__) {
@@ -96612,7 +104507,7 @@ module.exports = {
 "use strict";
 
 Object.defineProperty(exports, "__esModule", { value: true });
-const schema_validator_1 = __webpack_require__(536);
+const schema_validator_1 = __webpack_require__(398);
 const Joi = __webpack_require__(274);
 class EntryDeriveIntentValidator extends schema_validator_1.default {
     constructor() {
@@ -96648,7 +104543,28 @@ exports.default = EntryDeriveIntentValidator;
 /***/ }),
 /* 766 */,
 /* 767 */,
-/* 768 */,
+/* 768 */
+/***/ (function(module) {
+
+"use strict";
+
+module.exports = function (x) {
+	var lf = typeof x === 'string' ? '\n' : '\n'.charCodeAt();
+	var cr = typeof x === 'string' ? '\r' : '\r'.charCodeAt();
+
+	if (x[x.length - 1] === lf) {
+		x = x.slice(0, x.length - 1);
+	}
+
+	if (x[x.length - 1] === cr) {
+		x = x.slice(0, x.length - 1);
+	}
+
+	return x;
+};
+
+
+/***/ }),
 /* 769 */
 /***/ (function(module, __unusedexports, __webpack_require__) {
 
@@ -97010,7 +104926,64 @@ module.exports = nativeKeys;
 
 
 /***/ }),
-/* 774 */,
+/* 774 */
+/***/ (function(__unusedmodule, exports, __webpack_require__) {
+
+"use strict";
+
+var ansiEscapes = __webpack_require__(223);
+
+/**
+ * Move cursor left by `x`
+ * @param  {Readline} rl - Readline instance
+ * @param  {Number}   x  - How far to go left (default to 1)
+ */
+
+exports.left = function (rl, x) {
+  rl.output.write(ansiEscapes.cursorBackward(x));
+};
+
+/**
+ * Move cursor right by `x`
+ * @param  {Readline} rl - Readline instance
+ * @param  {Number}   x  - How far to go left (default to 1)
+ */
+
+exports.right = function (rl, x) {
+  rl.output.write(ansiEscapes.cursorForward(x));
+};
+
+/**
+ * Move cursor up by `x`
+ * @param  {Readline} rl - Readline instance
+ * @param  {Number}   x  - How far to go up (default to 1)
+ */
+
+exports.up = function (rl, x) {
+  rl.output.write(ansiEscapes.cursorUp(x));
+};
+
+/**
+ * Move cursor down by `x`
+ * @param  {Readline} rl - Readline instance
+ * @param  {Number}   x  - How far to go down (default to 1)
+ */
+
+exports.down = function (rl, x) {
+  rl.output.write(ansiEscapes.cursorDown(x));
+};
+
+/**
+ * Clear current line
+ * @param  {Readline} rl  - Readline instance
+ * @param  {Number}   len - number of line to delete
+ */
+exports.clearLine = function (rl, len) {
+  rl.output.write(ansiEscapes.eraseLines(len));
+};
+
+
+/***/ }),
 /* 775 */,
 /* 776 */
 /***/ (function(__unusedmodule, exports, __webpack_require__) {
@@ -97905,193 +105878,7 @@ function isTrustedSubscriber(obj) {
 /* 790 */,
 /* 791 */,
 /* 792 */,
-/* 793 */,
-/* 794 */
-/***/ (function(module, __unusedexports, __webpack_require__) {
-
-"use strict";
-
-
-// Load modules
-
-const Any = __webpack_require__(227);
-const Ref = __webpack_require__(953);
-const Hoek = __webpack_require__(11);
-
-
-// Declare internals
-
-const internals = {};
-
-internals.isoDate = /^(?:[-+]\d{2})?(?:\d{4}(?!\d{2}\b))(?:(-?)(?:(?:0[1-9]|1[0-2])(?:\1(?:[12]\d|0[1-9]|3[01]))?|W(?:[0-4]\d|5[0-2])(?:-?[1-7])?|(?:00[1-9]|0[1-9]\d|[12]\d{2}|3(?:[0-5]\d|6[1-6])))(?![T]$|[T][\d]+Z$)(?:[T\s](?:(?:(?:[01]\d|2[0-3])(?:(:?)[0-5]\d)?|24\:?00)(?:[.,]\d+(?!:))?)(?:\2[0-5]\d(?:[.,]\d+)?)?(?:[Z]|(?:[+-])(?:[01]\d|2[0-3])(?::?[0-5]\d)?)?)?)?$/;
-internals.invalidDate = new Date('');
-internals.isIsoDate = (() => {
-
-    const isoString = internals.isoDate.toString();
-
-    return (date) => {
-
-        return date && (date.toString() === isoString);
-    };
-})();
-
-internals.Date = class extends Any {
-
-    constructor() {
-
-        super();
-        this._type = 'date';
-    }
-
-    _base(value, state, options) {
-
-        const result = {
-            value: (options.convert && internals.Date.toDate(value, this._flags.format, this._flags.timestamp, this._flags.multiplier)) || value
-        };
-
-        if (result.value instanceof Date && !isNaN(result.value.getTime())) {
-            result.errors = null;
-        }
-        else if (!options.convert) {
-            result.errors = this.createError('date.strict', null, state, options);
-        }
-        else {
-            let type;
-            if (internals.isIsoDate(this._flags.format)) {
-                type = 'isoDate';
-            }
-            else if (this._flags.timestamp) {
-                type = `timestamp.${this._flags.timestamp}`;
-            }
-            else {
-                type = 'base';
-            }
-
-            result.errors = this.createError(`date.${type}`, null, state, options);
-        }
-
-        return result;
-    }
-
-    static toDate(value, format, timestamp, multiplier) {
-
-        if (value instanceof Date) {
-            return value;
-        }
-
-        if (typeof value === 'string' ||
-            (typeof value === 'number' && !isNaN(value) && isFinite(value))) {
-
-            if (typeof value === 'string' &&
-                /^[+-]?\d+(\.\d+)?$/.test(value)) {
-
-                value = parseFloat(value);
-            }
-
-            let date;
-            if (format && internals.isIsoDate(format)) {
-                date = format.test(value) ? new Date(value) : internals.invalidDate;
-            }
-            else if (timestamp && multiplier) {
-                date = new Date(value * multiplier);
-            }
-            else {
-                date = new Date(value);
-            }
-
-            if (!isNaN(date.getTime())) {
-                return date;
-            }
-        }
-
-        return null;
-    }
-
-    iso() {
-
-        if (this._flags.format === internals.isoDate) {
-            return this;
-        }
-
-        const obj = this.clone();
-        obj._flags.format = internals.isoDate;
-        return obj;
-    }
-
-    timestamp(type) {
-
-        type = type || 'javascript';
-
-        const allowed = ['javascript', 'unix'];
-        Hoek.assert(allowed.indexOf(type) !== -1, '"type" must be one of "' + allowed.join('", "') + '"');
-
-        if (this._flags.timestamp === type) {
-            return this;
-        }
-
-        const obj = this.clone();
-        obj._flags.timestamp = type;
-        obj._flags.multiplier = type === 'unix' ? 1000 : 1;
-        return obj;
-    }
-
-    _isIsoDate(value) {
-
-        return internals.isoDate.test(value);
-    }
-
-};
-
-internals.compare = function (type, compare) {
-
-    return function (date) {
-
-        const isNow = date === 'now';
-        const isRef = Ref.isRef(date);
-
-        if (!isNow && !isRef) {
-            date = internals.Date.toDate(date);
-        }
-
-        Hoek.assert(date, 'Invalid date format');
-
-        return this._test(type, date, function (value, state, options) {
-
-            let compareTo;
-            if (isNow) {
-                compareTo = Date.now();
-            }
-            else if (isRef) {
-                compareTo = internals.Date.toDate(date(state.reference || state.parent, options));
-
-                if (!compareTo) {
-                    return this.createError('date.ref', { ref: date.key }, state, options);
-                }
-
-                compareTo = compareTo.getTime();
-            }
-            else {
-                compareTo = date.getTime();
-            }
-
-            if (compare(value.getTime(), compareTo)) {
-                return value;
-            }
-
-            return this.createError('date.' + type, { limit: new Date(compareTo) }, state, options);
-        });
-    };
-};
-internals.Date.prototype.min = internals.compare('min', (value, date) => value >= date);
-internals.Date.prototype.max = internals.compare('max', (value, date) => value <= date);
-
-
-module.exports = new internals.Date();
-
-
-/***/ }),
-/* 795 */,
-/* 796 */
+/* 793 */
 /***/ (function(module) {
 
 /** Used for built-in method references. */
@@ -98112,6 +105899,42 @@ function isPrototype(value) {
 }
 
 module.exports = isPrototype;
+
+
+/***/ }),
+/* 794 */
+/***/ (function(module) {
+
+module.exports = require("stream");
+
+/***/ }),
+/* 795 */,
+/* 796 */
+/***/ (function(__unusedmodule, exports, __webpack_require__) {
+
+"use strict";
+
+
+Object.defineProperty(exports, '__esModule', { value: true });
+
+function _interopDefault (ex) { return (ex && (typeof ex === 'object') && 'default' in ex) ? ex['default'] : ex; }
+
+var osName = _interopDefault(__webpack_require__(2));
+
+function getUserAgent() {
+  try {
+    return `Node.js/${process.version.substr(1)} (${osName()}; ${process.arch})`;
+  } catch (error) {
+    if (/wmic os get Caption/.test(error.message)) {
+      return "Windows <version undetectable>";
+    }
+
+    return "<environment undetectable>";
+  }
+}
+
+exports.getUserAgent = getUserAgent;
+//# sourceMappingURL=index.js.map
 
 
 /***/ }),
@@ -98879,322 +106702,267 @@ module.exports = mapCacheClear;
 
 /***/ }),
 /* 813 */
-/***/ (function(module, __unusedexports, __webpack_require__) {
+/***/ (function(__unusedmodule, exports) {
 
 "use strict";
 
-var _ = __webpack_require__(557);
-var rx = __webpack_require__(757);
-var util = __webpack_require__(669);
-var runAsync = __webpack_require__(4);
-var utils = __webpack_require__(414);
-var Base = __webpack_require__(825);
+
+Object.defineProperty(exports, '__esModule', { value: true });
+
+async function auth(token) {
+  const tokenType = token.split(/\./).length === 3 ? "app" : /^v\d+\./.test(token) ? "installation" : "oauth";
+  return {
+    type: "token",
+    token: token,
+    tokenType
+  };
+}
 
 /**
- * Base interface class other can inherits from
+ * Prefix token for usage in the Authorization header
+ *
+ * @param token OAuth token or JSON Web Token
  */
-
-var PromptUI = module.exports = function (prompts, opt) {
-  Base.call(this, opt);
-  this.prompts = prompts;
-};
-util.inherits(PromptUI, Base);
-
-PromptUI.prototype.run = function (questions) {
-  // Keep global reference to the answers
-  this.answers = {};
-
-  // Make sure questions is an array.
-  if (_.isPlainObject(questions)) {
-    questions = [questions];
+function withAuthorizationPrefix(token) {
+  if (token.split(/\./).length === 3) {
+    return `bearer ${token}`;
   }
 
-  // Create an observable, unless we received one as parameter.
-  // Note: As this is a public interface, we cannot do an instanceof check as we won't
-  // be using the exact same object in memory.
-  var obs = _.isArray(questions) ? rx.Observable.from(questions) : questions;
+  return `token ${token}`;
+}
 
-  this.process = obs
-    .concatMap(this.processQuestion.bind(this))
-    // `publish` creates a hot Observable. It prevents duplicating prompts.
-    .publish();
+async function hook(token, request, route, parameters) {
+  const endpoint = request.endpoint.merge(route, parameters);
+  endpoint.headers.authorization = withAuthorizationPrefix(token);
+  return request(endpoint);
+}
 
-  this.process.connect();
-
-  return this.process
-    .reduce(function (answers, answer) {
-      _.set(this.answers, answer.name, answer.answer);
-      return this.answers;
-    }.bind(this), {})
-    .toPromise(Promise)
-    .then(this.onCompletion.bind(this));
-};
-
-/**
- * Once all prompt are over
- */
-
-PromptUI.prototype.onCompletion = function (answers) {
-  this.close();
-
-  return answers;
-};
-
-PromptUI.prototype.processQuestion = function (question) {
-  question = _.clone(question);
-  return rx.Observable.defer(function () {
-    var obs = rx.Observable.of(question);
-
-    return obs
-      .concatMap(this.setDefaultType.bind(this))
-      .concatMap(this.filterIfRunnable.bind(this))
-      .concatMap(utils.fetchAsyncQuestionProperty.bind(null, question, 'message', this.answers))
-      .concatMap(utils.fetchAsyncQuestionProperty.bind(null, question, 'default', this.answers))
-      .concatMap(utils.fetchAsyncQuestionProperty.bind(null, question, 'choices', this.answers))
-      .concatMap(this.fetchAnswer.bind(this));
-  }.bind(this));
-};
-
-PromptUI.prototype.fetchAnswer = function (question) {
-  var Prompt = this.prompts[question.type];
-  this.activePrompt = new Prompt(question, this.rl, this.answers);
-  return rx.Observable.defer(function () {
-    return rx.Observable.fromPromise(this.activePrompt.run().then(function (answer) {
-      return {name: question.name, answer: answer};
-    }));
-  }.bind(this));
-};
-
-PromptUI.prototype.setDefaultType = function (question) {
-  // Default type to input
-  if (!this.prompts[question.type]) {
-    question.type = 'input';
+const createTokenAuth = function createTokenAuth(token) {
+  if (!token) {
+    throw new Error("[@octokit/auth-token] No token passed to createTokenAuth");
   }
-  return rx.Observable.defer(function () {
-    return rx.Observable.return(question);
+
+  if (typeof token !== "string") {
+    throw new Error("[@octokit/auth-token] Token passed to createTokenAuth is not a string");
+  }
+
+  token = token.replace(/^(token|bearer) +/i, "");
+  return Object.assign(auth.bind(null, token), {
+    hook: hook.bind(null, token)
   });
 };
 
-PromptUI.prototype.filterIfRunnable = function (question) {
-  if (question.when === false) {
-    return rx.Observable.empty();
-  }
-
-  if (!_.isFunction(question.when)) {
-    return rx.Observable.return(question);
-  }
-
-  var answers = this.answers;
-  return rx.Observable.defer(function () {
-    return rx.Observable.fromPromise(
-      runAsync(question.when)(answers).then(function (shouldRun) {
-        if (shouldRun) {
-          return question;
-        }
-      })
-    ).filter(function (val) {
-      return val != null;
-    });
-  });
-};
+exports.createTokenAuth = createTokenAuth;
+//# sourceMappingURL=index.js.map
 
 
 /***/ }),
 /* 814 */
 /***/ (function(module, __unusedexports, __webpack_require__) {
 
-"use strict";
+module.exports = which
+which.sync = whichSync
 
-module.exports = function(Promise,
-                          PromiseArray,
-                          apiRejection,
-                          tryConvertToPromise,
-                          INTERNAL,
-                          debug) {
-var util = __webpack_require__(248);
-var tryCatch = util.tryCatch;
+var isWindows = process.platform === 'win32' ||
+    process.env.OSTYPE === 'cygwin' ||
+    process.env.OSTYPE === 'msys'
 
-function ReductionPromiseArray(promises, fn, initialValue, _each) {
-    this.constructor$(promises);
-    var context = Promise._getContext();
-    this._fn = util.contextBind(context, fn);
-    if (initialValue !== undefined) {
-        initialValue = Promise.resolve(initialValue);
-        initialValue._attachCancellationCallback(this);
-    }
-    this._initialValue = initialValue;
-    this._currentCancellable = null;
-    if(_each === INTERNAL) {
-        this._eachValues = Array(this._length);
-    } else if (_each === 0) {
-        this._eachValues = null;
-    } else {
-        this._eachValues = undefined;
-    }
-    this._promise._captureStackTrace();
-    this._init$(undefined, -5);
+var path = __webpack_require__(622)
+var COLON = isWindows ? ';' : ':'
+var isexe = __webpack_require__(742)
+
+function getNotFoundError (cmd) {
+  var er = new Error('not found: ' + cmd)
+  er.code = 'ENOENT'
+
+  return er
 }
-util.inherits(ReductionPromiseArray, PromiseArray);
 
-ReductionPromiseArray.prototype._gotAccum = function(accum) {
-    if (this._eachValues !== undefined &&
-        this._eachValues !== null &&
-        accum !== INTERNAL) {
-        this._eachValues.push(accum);
-    }
-};
+function getPathInfo (cmd, opt) {
+  var colon = opt.colon || COLON
+  var pathEnv = opt.path || process.env.PATH || ''
+  var pathExt = ['']
 
-ReductionPromiseArray.prototype._eachComplete = function(value) {
-    if (this._eachValues !== null) {
-        this._eachValues.push(value);
-    }
-    return this._eachValues;
-};
+  pathEnv = pathEnv.split(colon)
 
-ReductionPromiseArray.prototype._init = function() {};
+  var pathExtExe = ''
+  if (isWindows) {
+    pathEnv.unshift(process.cwd())
+    pathExtExe = (opt.pathExt || process.env.PATHEXT || '.EXE;.CMD;.BAT;.COM')
+    pathExt = pathExtExe.split(colon)
 
-ReductionPromiseArray.prototype._resolveEmptyArray = function() {
-    this._resolve(this._eachValues !== undefined ? this._eachValues
-                                                 : this._initialValue);
-};
 
-ReductionPromiseArray.prototype.shouldCopyValues = function () {
-    return false;
-};
+    // Always test the cmd itself first.  isexe will check to make sure
+    // it's found in the pathExt set.
+    if (cmd.indexOf('.') !== -1 && pathExt[0] !== '')
+      pathExt.unshift('')
+  }
 
-ReductionPromiseArray.prototype._resolve = function(value) {
-    this._promise._resolveCallback(value);
-    this._values = null;
-};
+  // If it has a slash, then we don't bother searching the pathenv.
+  // just check the file itself, and that's it.
+  if (cmd.match(/\//) || isWindows && cmd.match(/\\/))
+    pathEnv = ['']
 
-ReductionPromiseArray.prototype._resultCancelled = function(sender) {
-    if (sender === this._initialValue) return this._cancel();
-    if (this._isResolved()) return;
-    this._resultCancelled$();
-    if (this._currentCancellable instanceof Promise) {
-        this._currentCancellable.cancel();
-    }
-    if (this._initialValue instanceof Promise) {
-        this._initialValue.cancel();
-    }
-};
+  return {
+    env: pathEnv,
+    ext: pathExt,
+    extExe: pathExtExe
+  }
+}
 
-ReductionPromiseArray.prototype._iterate = function (values) {
-    this._values = values;
-    var value;
-    var i;
-    var length = values.length;
-    if (this._initialValue !== undefined) {
-        value = this._initialValue;
-        i = 0;
-    } else {
-        value = Promise.resolve(values[0]);
-        i = 1;
+function which (cmd, opt, cb) {
+  if (typeof opt === 'function') {
+    cb = opt
+    opt = {}
+  }
+
+  var info = getPathInfo(cmd, opt)
+  var pathEnv = info.env
+  var pathExt = info.ext
+  var pathExtExe = info.extExe
+  var found = []
+
+  ;(function F (i, l) {
+    if (i === l) {
+      if (opt.all && found.length)
+        return cb(null, found)
+      else
+        return cb(getNotFoundError(cmd))
     }
 
-    this._currentCancellable = value;
+    var pathPart = pathEnv[i]
+    if (pathPart.charAt(0) === '"' && pathPart.slice(-1) === '"')
+      pathPart = pathPart.slice(1, -1)
 
-    for (var j = i; j < length; ++j) {
-        var maybePromise = values[j];
-        if (maybePromise instanceof Promise) {
-            maybePromise.suppressUnhandledRejections();
+    var p = path.join(pathPart, cmd)
+    if (!pathPart && (/^\.[\\\/]/).test(cmd)) {
+      p = cmd.slice(0, 2) + p
+    }
+    ;(function E (ii, ll) {
+      if (ii === ll) return F(i + 1, l)
+      var ext = pathExt[ii]
+      isexe(p + ext, { pathExt: pathExtExe }, function (er, is) {
+        if (!er && is) {
+          if (opt.all)
+            found.push(p + ext)
+          else
+            return cb(null, p + ext)
         }
+        return E(ii + 1, ll)
+      })
+    })(0, pathExt.length)
+  })(0, pathEnv.length)
+}
+
+function whichSync (cmd, opt) {
+  opt = opt || {}
+
+  var info = getPathInfo(cmd, opt)
+  var pathEnv = info.env
+  var pathExt = info.ext
+  var pathExtExe = info.extExe
+  var found = []
+
+  for (var i = 0, l = pathEnv.length; i < l; i ++) {
+    var pathPart = pathEnv[i]
+    if (pathPart.charAt(0) === '"' && pathPart.slice(-1) === '"')
+      pathPart = pathPart.slice(1, -1)
+
+    var p = path.join(pathPart, cmd)
+    if (!pathPart && /^\.[\\\/]/.test(cmd)) {
+      p = cmd.slice(0, 2) + p
     }
-
-    if (!value.isRejected()) {
-        for (; i < length; ++i) {
-            var ctx = {
-                accum: null,
-                value: values[i],
-                index: i,
-                length: length,
-                array: this
-            };
-
-            value = value._then(gotAccum, undefined, undefined, ctx, undefined);
-
-            if ((i & 127) === 0) {
-                value._setNoAsyncGuarantee();
-            }
+    for (var j = 0, ll = pathExt.length; j < ll; j ++) {
+      var cur = p + pathExt[j]
+      var is
+      try {
+        is = isexe.sync(cur, { pathExt: pathExtExe })
+        if (is) {
+          if (opt.all)
+            found.push(cur)
+          else
+            return cur
         }
+      } catch (ex) {}
     }
+  }
 
-    if (this._eachValues !== undefined) {
-        value = value
-            ._then(this._eachComplete, undefined, undefined, this, undefined);
-    }
-    value._then(completed, completed, undefined, value, this);
-};
+  if (opt.all && found.length)
+    return found
 
-Promise.prototype.reduce = function (fn, initialValue) {
-    return reduce(this, fn, initialValue, null);
-};
+  if (opt.nothrow)
+    return null
 
-Promise.reduce = function (promises, fn, initialValue, _each) {
-    return reduce(promises, fn, initialValue, _each);
-};
-
-function completed(valueOrReason, array) {
-    if (this.isFulfilled()) {
-        array._resolve(valueOrReason);
-    } else {
-        array._reject(valueOrReason);
-    }
+  throw getNotFoundError(cmd)
 }
-
-function reduce(promises, fn, initialValue, _each) {
-    if (typeof fn !== "function") {
-        return apiRejection("expecting a function but got " + util.classString(fn));
-    }
-    var array = new ReductionPromiseArray(promises, fn, initialValue, _each);
-    return array.promise();
-}
-
-function gotAccum(accum) {
-    this.accum = accum;
-    this.array._gotAccum(accum);
-    var value = tryConvertToPromise(this.value, this.array._promise);
-    if (value instanceof Promise) {
-        this.array._currentCancellable = value;
-        return value._then(gotValue, undefined, undefined, this, undefined);
-    } else {
-        return gotValue.call(this, value);
-    }
-}
-
-function gotValue(value) {
-    var array = this.array;
-    var promise = array._promise;
-    var fn = tryCatch(array._fn);
-    promise._pushContext();
-    var ret;
-    if (array._eachValues !== undefined) {
-        ret = fn.call(promise._boundValue(), value, this.index, this.length);
-    } else {
-        ret = fn.call(promise._boundValue(),
-                              this.accum, value, this.index, this.length);
-    }
-    if (ret instanceof Promise) {
-        array._currentCancellable = ret;
-    }
-    var promiseCreated = promise._popContext();
-    debug.checkForgottenReturns(
-        ret,
-        promiseCreated,
-        array._eachValues !== undefined ? "Promise.each" : "Promise.reduce",
-        promise
-    );
-    return ret;
-}
-};
 
 
 /***/ }),
 /* 815 */,
-/* 816 */,
+/* 816 */
+/***/ (function(module) {
+
+"use strict";
+
+module.exports = /^#!.*/;
+
+
+/***/ }),
 /* 817 */,
-/* 818 */,
-/* 819 */,
+/* 818 */
+/***/ (function(module, __unusedexports, __webpack_require__) {
+
+module.exports = isexe
+isexe.sync = sync
+
+var fs = __webpack_require__(747)
+
+function checkPathExt (path, options) {
+  var pathext = options.pathExt !== undefined ?
+    options.pathExt : process.env.PATHEXT
+
+  if (!pathext) {
+    return true
+  }
+
+  pathext = pathext.split(';')
+  if (pathext.indexOf('') !== -1) {
+    return true
+  }
+  for (var i = 0; i < pathext.length; i++) {
+    var p = pathext[i].toLowerCase()
+    if (p && path.substr(-p.length).toLowerCase() === p) {
+      return true
+    }
+  }
+  return false
+}
+
+function checkStat (stat, path, options) {
+  if (!stat.isSymbolicLink() && !stat.isFile()) {
+    return false
+  }
+  return checkPathExt(path, options)
+}
+
+function isexe (path, options, cb) {
+  fs.stat(path, function (er, stat) {
+    cb(er, er ? false : checkStat(stat, path, options))
+  })
+}
+
+function sync (path, options) {
+  return checkStat(fs.statSync(path), path, options)
+}
+
+
+/***/ }),
+/* 819 */
+/***/ (function(module) {
+
+module.exports = require("dns");
+
+/***/ }),
 /* 820 */
 /***/ (function(module, __unusedexports, __webpack_require__) {
 
@@ -99435,15 +107203,13 @@ exports.default = default_1;
 /* 824 */
 /***/ (function(module, __unusedexports, __webpack_require__) {
 
-var freeGlobal = __webpack_require__(319);
+"use strict";
 
-/** Detect free variable `self`. */
-var freeSelf = typeof self == 'object' && self && self.Object === Object && self;
+var ansiRegex = __webpack_require__(216)();
 
-/** Used as a reference to the global object. */
-var root = freeGlobal || freeSelf || Function('return this')();
-
-module.exports = root;
+module.exports = function (str) {
+	return typeof str === 'string' ? str.replace(ansiRegex, '') : str;
+};
 
 
 /***/ }),
@@ -99453,7 +107219,7 @@ module.exports = root;
 "use strict";
 
 var _ = __webpack_require__(557);
-var MuteStream = __webpack_require__(118);
+var MuteStream = __webpack_require__(366);
 var readline = __webpack_require__(58);
 
 /**
@@ -99539,7 +107305,7 @@ function setupReadlineOptions(opt) {
 
 // Load modules
 
-const Hoek = __webpack_require__(11);
+const Hoek = __webpack_require__(970);
 const Any = __webpack_require__(227);
 const Cast = __webpack_require__(436);
 const Ref = __webpack_require__(953);
@@ -100015,7 +107781,1764 @@ module.exports = (chalk, tmp) => {
 
 
 /***/ }),
-/* 842 */,
+/* 842 */
+/***/ (function(__unusedmodule, exports) {
+
+"use strict";
+
+
+Object.defineProperty(exports, '__esModule', { value: true });
+
+const Endpoints = {
+  actions: {
+    addSelectedRepoToOrgSecret: ["PUT /orgs/{org}/actions/secrets/{secret_name}/repositories/{repository_id}"],
+    cancelWorkflowRun: ["POST /repos/{owner}/{repo}/actions/runs/{run_id}/cancel"],
+    createOrUpdateOrgSecret: ["PUT /orgs/{org}/actions/secrets/{secret_name}"],
+    createOrUpdateRepoSecret: ["PUT /repos/{owner}/{repo}/actions/secrets/{secret_name}", {}, {
+      renamedParameters: {
+        name: "secret_name"
+      }
+    }],
+    createOrUpdateSecretForRepo: ["PUT /repos/{owner}/{repo}/actions/secrets/{secret_name}", {}, {
+      renamed: ["actions", "createOrUpdateRepoSecret"],
+      renamedParameters: {
+        name: "secret_name"
+      }
+    }],
+    createRegistrationToken: ["POST /repos/{owner}/{repo}/actions/runners/registration-token", {}, {
+      renamed: ["actions", "createRegistrationTokenForRepo"]
+    }],
+    createRegistrationTokenForOrg: ["POST /orgs/{org}/actions/runners/registration-token"],
+    createRegistrationTokenForRepo: ["POST /repos/{owner}/{repo}/actions/runners/registration-token"],
+    createRemoveToken: ["POST /repos/{owner}/{repo}/actions/runners/remove-token", {}, {
+      renamed: ["actions", "createRemoveTokenForRepo"]
+    }],
+    createRemoveTokenForOrg: ["POST /orgs/{org}/actions/runners/remove-token"],
+    createRemoveTokenForRepo: ["POST /repos/{owner}/{repo}/actions/runners/remove-token"],
+    deleteArtifact: ["DELETE /repos/{owner}/{repo}/actions/artifacts/{artifact_id}"],
+    deleteOrgSecret: ["DELETE /orgs/{org}/actions/secrets/{secret_name}"],
+    deleteRepoSecret: ["DELETE /repos/{owner}/{repo}/actions/secrets/{secret_name}", {}, {
+      renamedParameters: {
+        name: "secret_name"
+      }
+    }],
+    deleteSecretFromRepo: ["DELETE /repos/{owner}/{repo}/actions/secrets/{secret_name}", {}, {
+      renamed: ["actions", "deleteRepoSecret"],
+      renamedParameters: {
+        name: "secret_name"
+      }
+    }],
+    deleteSelfHostedRunnerFromOrg: ["DELETE /orgs/{org}/actions/runners/{runner_id}"],
+    deleteSelfHostedRunnerFromRepo: ["DELETE /repos/{owner}/{repo}/actions/runners/{runner_id}"],
+    deleteWorkflowRunLogs: ["DELETE /repos/{owner}/{repo}/actions/runs/{run_id}/logs"],
+    downloadArtifact: ["GET /repos/{owner}/{repo}/actions/artifacts/{artifact_id}/{archive_format}"],
+    downloadJobLogsForWorkflowRun: ["GET /repos/{owner}/{repo}/actions/jobs/{job_id}/logs"],
+    downloadWorkflowJobLogs: ["GET /repos/{owner}/{repo}/actions/jobs/{job_id}/logs", {}, {
+      renamed: ["actions", "downloadJobLogsForWorkflowRun"]
+    }],
+    downloadWorkflowRunLogs: ["GET /repos/{owner}/{repo}/actions/runs/{run_id}/logs"],
+    getArtifact: ["GET /repos/{owner}/{repo}/actions/artifacts/{artifact_id}"],
+    getJobForWorkflowRun: ["GET /repos/{owner}/{repo}/actions/jobs/{job_id}"],
+    getOrgPublicKey: ["GET /orgs/{org}/actions/secrets/public-key"],
+    getOrgSecret: ["GET /orgs/{org}/actions/secrets/{secret_name}"],
+    getPublicKey: ["GET /repos/{owner}/{repo}/actions/secrets/public-key", {}, {
+      renamed: ["actions", "getRepoPublicKey"]
+    }],
+    getRepoPublicKey: ["GET /repos/{owner}/{repo}/actions/secrets/public-key"],
+    getRepoSecret: ["GET /repos/{owner}/{repo}/actions/secrets/{secret_name}", {}, {
+      renamedParameters: {
+        name: "secret_name"
+      }
+    }],
+    getSecret: ["GET /repos/{owner}/{repo}/actions/secrets/{secret_name}", {}, {
+      renamed: ["actions", "getRepoSecret"],
+      renamedParameters: {
+        name: "secret_name"
+      }
+    }],
+    getSelfHostedRunner: ["GET /repos/{owner}/{repo}/actions/runners/{runner_id}", {}, {
+      renamed: ["actions", "getSelfHostedRunnerForRepo"]
+    }],
+    getSelfHostedRunnerForOrg: ["GET /orgs/{org}/actions/runners/{runner_id}"],
+    getSelfHostedRunnerForRepo: ["GET /repos/{owner}/{repo}/actions/runners/{runner_id}"],
+    getWorkflow: ["GET /repos/{owner}/{repo}/actions/workflows/{workflow_id}"],
+    getWorkflowJob: ["GET /repos/{owner}/{repo}/actions/jobs/{job_id}", {}, {
+      renamed: ["actions", "getJobForWorkflowRun"]
+    }],
+    getWorkflowRun: ["GET /repos/{owner}/{repo}/actions/runs/{run_id}"],
+    getWorkflowRunUsage: ["GET /repos/{owner}/{repo}/actions/runs/{run_id}/timing"],
+    getWorkflowUsage: ["GET /repos/{owner}/{repo}/actions/workflows/{workflow_id}/timing"],
+    listArtifactsForRepo: ["GET /repos/{owner}/{repo}/actions/artifacts"],
+    listDownloadsForSelfHostedRunnerApplication: ["GET /repos/{owner}/{repo}/actions/runners/downloads", {}, {
+      renamed: ["actions", "listRunnerApplicationsForRepo"]
+    }],
+    listJobsForWorkflowRun: ["GET /repos/{owner}/{repo}/actions/runs/{run_id}/jobs"],
+    listOrgSecrets: ["GET /orgs/{org}/actions/secrets"],
+    listRepoSecrets: ["GET /repos/{owner}/{repo}/actions/secrets"],
+    listRepoWorkflowRuns: ["GET /repos/{owner}/{repo}/actions/runs", {}, {
+      renamed: ["actions", "listWorkflowRunsForRepo"]
+    }],
+    listRepoWorkflows: ["GET /repos/{owner}/{repo}/actions/workflows"],
+    listRunnerApplicationsForOrg: ["GET /orgs/{org}/actions/runners/downloads"],
+    listRunnerApplicationsForRepo: ["GET /repos/{owner}/{repo}/actions/runners/downloads"],
+    listSecretsForRepo: ["GET /repos/{owner}/{repo}/actions/secrets", {}, {
+      renamed: ["actions", "listRepoSecrets"]
+    }],
+    listSelectedReposForOrgSecret: ["GET /orgs/{org}/actions/secrets/{secret_name}/repositories"],
+    listSelfHostedRunnersForOrg: ["GET /orgs/{org}/actions/runners"],
+    listSelfHostedRunnersForRepo: ["GET /repos/{owner}/{repo}/actions/runners"],
+    listWorkflowJobLogs: ["GET /repos/{owner}/{repo}/actions/jobs/{job_id}/logs", {}, {
+      renamed: ["actions", "downloadWorkflowJobLogs"]
+    }],
+    listWorkflowRunArtifacts: ["GET /repos/{owner}/{repo}/actions/runs/{run_id}/artifacts"],
+    listWorkflowRunLogs: ["GET /repos/{owner}/{repo}/actions/runs/{run_id}/logs", {}, {
+      renamed: ["actions", "downloadWorkflowRunLogs"]
+    }],
+    listWorkflowRuns: ["GET /repos/{owner}/{repo}/actions/workflows/{workflow_id}/runs"],
+    listWorkflowRunsForRepo: ["GET /repos/{owner}/{repo}/actions/runs"],
+    reRunWorkflow: ["POST /repos/{owner}/{repo}/actions/runs/{run_id}/rerun"],
+    removeSelectedRepoFromOrgSecret: ["DELETE /orgs/{org}/actions/secrets/{secret_name}/repositories/{repository_id}"],
+    removeSelfHostedRunner: ["DELETE /repos/{owner}/{repo}/actions/runners/{runner_id}", {}, {
+      renamed: ["actions", "deleteSelfHostedRunnerFromRepo"]
+    }],
+    setSelectedReposForOrgSecret: ["PUT /orgs/{org}/actions/secrets/{secret_name}/repositories"]
+  },
+  activity: {
+    checkRepoIsStarredByAuthenticatedUser: ["GET /user/starred/{owner}/{repo}"],
+    checkStarringRepo: ["GET /user/starred/{owner}/{repo}", {}, {
+      renamed: ["activity", "checkRepoIsStarredByAuthenticatedUser"]
+    }],
+    deleteRepoSubscription: ["DELETE /repos/{owner}/{repo}/subscription"],
+    deleteThreadSubscription: ["DELETE /notifications/threads/{thread_id}/subscription"],
+    getFeeds: ["GET /feeds"],
+    getRepoSubscription: ["GET /repos/{owner}/{repo}/subscription"],
+    getThread: ["GET /notifications/threads/{thread_id}"],
+    getThreadSubscription: ["PUT /notifications", {}, {
+      renamed: ["activity", "getThreadSubscriptionForAuthenticatedUser"]
+    }],
+    getThreadSubscriptionForAuthenticatedUser: ["GET /notifications/threads/{thread_id}/subscription"],
+    listEventsForAuthenticatedUser: ["GET /users/{username}/events"],
+    listEventsForOrg: ["GET /users/{username}/events/orgs/{org}", {}, {
+      renamed: ["activity", "listOrgEventsForAuthenticatedUser"]
+    }],
+    listEventsForUser: ["GET /users/{username}/events", {}, {
+      renamed: ["activity", "listEventsForAuthenticatedUser"]
+    }],
+    listFeeds: ["GET /feeds", {}, {
+      renamed: ["activity", "getFeeds"]
+    }],
+    listNotifications: ["GET /notifications", {}, {
+      renamed: ["activity", "listNotificationsForAuthenticatedUser"]
+    }],
+    listNotificationsForAuthenticatedUser: ["GET /notifications"],
+    listNotificationsForRepo: ["GET /repos/{owner}/{repo}/notifications", {}, {
+      renamed: ["activity", "listRepoNotificationsForAuthenticatedUser"]
+    }],
+    listOrgEventsForAuthenticatedUser: ["GET /users/{username}/events/orgs/{org}"],
+    listPublicEvents: ["GET /events"],
+    listPublicEventsForOrg: ["GET /orgs/{org}/events", {}, {
+      renamed: ["activity", "listPublicOrgEvents"]
+    }],
+    listPublicEventsForRepoNetwork: ["GET /networks/{owner}/{repo}/events"],
+    listPublicEventsForUser: ["GET /users/{username}/events/public"],
+    listPublicOrgEvents: ["GET /orgs/{org}/events"],
+    listReceivedEventsForUser: ["GET /users/{username}/received_events"],
+    listReceivedPublicEventsForUser: ["GET /users/{username}/received_events/public"],
+    listRepoEvents: ["GET /repos/{owner}/{repo}/events"],
+    listRepoNotificationsForAuthenticatedUser: ["GET /repos/{owner}/{repo}/notifications"],
+    listReposStarredByAuthenticatedUser: ["GET /user/starred"],
+    listReposStarredByUser: ["GET /users/{username}/starred"],
+    listReposWatchedByUser: ["GET /users/{username}/subscriptions"],
+    listStargazersForRepo: ["GET /repos/{owner}/{repo}/stargazers"],
+    listWatchedReposForAuthenticatedUser: ["GET /user/subscriptions"],
+    listWatchersForRepo: ["GET /repos/{owner}/{repo}/subscribers"],
+    markAsRead: ["PUT /notifications", {}, {
+      renamed: ["activity", "markNotificationsAsRead"]
+    }],
+    markNotificationsAsRead: ["PUT /notifications"],
+    markNotificationsAsReadForRepo: ["PUT /repos/{owner}/{repo}/notifications", {}, {
+      renamed: ["activity", "markRepoNotificationsAsRead"]
+    }],
+    markRepoNotificationsAsRead: ["PUT /repos/{owner}/{repo}/notifications"],
+    markThreadAsRead: ["PATCH /notifications/threads/{thread_id}"],
+    setRepoSubscription: ["PUT /repos/{owner}/{repo}/subscription"],
+    setThreadSubscription: ["PUT /notifications/threads/{thread_id}/subscription"],
+    starRepo: ["PUT /user/starred/{owner}/{repo}", {}, {
+      renamed: ["activity", "starRepoForAuthenticatedUser"]
+    }],
+    starRepoForAuthenticatedUser: ["PUT /user/starred/{owner}/{repo}"],
+    unstarRepo: ["DELETE /user/starred/{owner}/{repo}", {}, {
+      renamed: ["activity", "unstarRepoForAuthenticatedUser"]
+    }],
+    unstarRepoForAuthenticatedUser: ["DELETE /user/starred/{owner}/{repo}"]
+  },
+  apps: {
+    addRepoToInstallation: ["PUT /user/installations/{installation_id}/repositories/{repository_id}", {
+      mediaType: {
+        previews: ["machine-man"]
+      }
+    }],
+    checkAccountIsAssociatedWithAny: ["GET /marketplace_listing/accounts/{account_id}", {}, {
+      renamed: ["apps", "getSubscriptionPlanForAccount"]
+    }],
+    checkAccountIsAssociatedWithAnyStubbed: ["GET /marketplace_listing/stubbed/accounts/{account_id}", {}, {
+      renamed: ["apps", "getSubscriptionPlanForAccountStubbed"]
+    }],
+    checkToken: ["POST /applications/{client_id}/token"],
+    createContentAttachment: ["POST /content_references/{content_reference_id}/attachments", {
+      mediaType: {
+        previews: ["corsair"]
+      }
+    }],
+    createFromManifest: ["POST /app-manifests/{code}/conversions"],
+    createInstallationAccessToken: ["POST /app/installations/{installation_id}/access_tokens", {
+      mediaType: {
+        previews: ["machine-man"]
+      }
+    }],
+    createInstallationToken: ["POST /app/installations/{installation_id}/access_tokens", {
+      mediaType: {
+        previews: ["machine-man"]
+      }
+    }, {
+      renamed: ["apps", "createInstallationAccessToken"]
+    }],
+    deleteAuthorization: ["DELETE /applications/{client_id}/grant"],
+    deleteInstallation: ["DELETE /app/installations/{installation_id}", {
+      mediaType: {
+        previews: ["machine-man"]
+      }
+    }],
+    deleteToken: ["DELETE /applications/{client_id}/token"],
+    getAuthenticated: ["GET /app", {
+      mediaType: {
+        previews: ["machine-man"]
+      }
+    }],
+    getBySlug: ["GET /apps/{app_slug}", {
+      mediaType: {
+        previews: ["machine-man"]
+      }
+    }],
+    getInstallation: ["GET /app/installations/{installation_id}", {
+      mediaType: {
+        previews: ["machine-man"]
+      }
+    }],
+    getOrgInstallation: ["GET /orgs/{org}/installation", {
+      mediaType: {
+        previews: ["machine-man"]
+      }
+    }],
+    getRepoInstallation: ["GET /repos/{owner}/{repo}/installation", {
+      mediaType: {
+        previews: ["machine-man"]
+      }
+    }],
+    getSubscriptionPlanForAccount: ["GET /marketplace_listing/accounts/{account_id}"],
+    getSubscriptionPlanForAccountStubbed: ["GET /marketplace_listing/stubbed/accounts/{account_id}"],
+    getUserInstallation: ["GET /users/{username}/installation", {
+      mediaType: {
+        previews: ["machine-man"]
+      }
+    }],
+    listAccountsForPlan: ["GET /marketplace_listing/plans/{plan_id}/accounts"],
+    listAccountsForPlanStubbed: ["GET /marketplace_listing/stubbed/plans/{plan_id}/accounts"],
+    listAccountsUserOrOrgOnPlan: ["GET /marketplace_listing/plans/{plan_id}/accounts", {}, {
+      renamed: ["apps", "listAccountsForPlan"]
+    }],
+    listAccountsUserOrOrgOnPlanStubbed: ["GET /marketplace_listing/stubbed/plans/{plan_id}/accounts", {}, {
+      renamed: ["apps", "listAccountsForPlanStubbed"]
+    }],
+    listInstallationReposForAuthenticatedUser: ["GET /user/installations/{installation_id}/repositories", {
+      mediaType: {
+        previews: ["machine-man"]
+      }
+    }],
+    listInstallations: ["GET /app/installations", {
+      mediaType: {
+        previews: ["machine-man"]
+      }
+    }],
+    listInstallationsForAuthenticatedUser: ["GET /user/installations", {
+      mediaType: {
+        previews: ["machine-man"]
+      }
+    }],
+    listMarketplacePurchasesForAuthenticatedUser: ["GET /user/marketplace_purchases", {}, {
+      renamed: ["apps", "listSubscriptionsForAuthenticatedUser"]
+    }],
+    listMarketplacePurchasesForAuthenticatedUserStubbed: ["GET /user/marketplace_purchases/stubbed", {}, {
+      renamed: ["apps", "listSubscriptionsForAuthenticatedUserStubbed"]
+    }],
+    listPlans: ["GET /marketplace_listing/plans"],
+    listPlansStubbed: ["GET /marketplace_listing/stubbed/plans"],
+    listRepos: ["GET /installation/repositories", {
+      mediaType: {
+        previews: ["machine-man"]
+      }
+    }, {
+      renamed: ["apps", "listReposAccessibleToInstallation"]
+    }],
+    listReposAccessibleToInstallation: ["GET /installation/repositories", {
+      mediaType: {
+        previews: ["machine-man"]
+      }
+    }],
+    listSubscriptionsForAuthenticatedUser: ["GET /user/marketplace_purchases"],
+    listSubscriptionsForAuthenticatedUserStubbed: ["GET /user/marketplace_purchases/stubbed"],
+    removeRepoFromInstallation: ["DELETE /user/installations/{installation_id}/repositories/{repository_id}", {
+      mediaType: {
+        previews: ["machine-man"]
+      }
+    }],
+    resetToken: ["PATCH /applications/{client_id}/token"],
+    revokeInstallationAccessToken: ["DELETE /installation/token"],
+    revokeInstallationToken: ["DELETE /installation/token", {}, {
+      renamed: ["apps", "revokeInstallationAccessToken"]
+    }],
+    suspendInstallation: ["PUT /app/installations/{installation_id}/suspended"],
+    unsuspendInstallation: ["DELETE /app/installations/{installation_id}/suspended"]
+  },
+  checks: {
+    create: ["POST /repos/{owner}/{repo}/check-runs", {
+      mediaType: {
+        previews: ["antiope"]
+      }
+    }],
+    createSuite: ["POST /repos/{owner}/{repo}/check-suites", {
+      mediaType: {
+        previews: ["antiope"]
+      }
+    }],
+    get: ["GET /repos/{owner}/{repo}/check-runs/{check_run_id}", {
+      mediaType: {
+        previews: ["antiope"]
+      }
+    }],
+    getSuite: ["GET /repos/{owner}/{repo}/check-suites/{check_suite_id}", {
+      mediaType: {
+        previews: ["antiope"]
+      }
+    }],
+    listAnnotations: ["GET /repos/{owner}/{repo}/check-runs/{check_run_id}/annotations", {
+      mediaType: {
+        previews: ["antiope"]
+      }
+    }],
+    listForRef: ["GET /repos/{owner}/{repo}/commits/{ref}/check-runs", {
+      mediaType: {
+        previews: ["antiope"]
+      }
+    }],
+    listForSuite: ["GET /repos/{owner}/{repo}/check-suites/{check_suite_id}/check-runs", {
+      mediaType: {
+        previews: ["antiope"]
+      }
+    }],
+    listSuitesForRef: ["GET /repos/{owner}/{repo}/commits/{ref}/check-suites", {
+      mediaType: {
+        previews: ["antiope"]
+      }
+    }],
+    rerequestSuite: ["POST /repos/{owner}/{repo}/check-suites/{check_suite_id}/rerequest", {
+      mediaType: {
+        previews: ["antiope"]
+      }
+    }],
+    setSuitesPreferences: ["PATCH /repos/{owner}/{repo}/check-suites/preferences", {
+      mediaType: {
+        previews: ["antiope"]
+      }
+    }],
+    update: ["PATCH /repos/{owner}/{repo}/check-runs/{check_run_id}", {
+      mediaType: {
+        previews: ["antiope"]
+      }
+    }]
+  },
+  codeScanning: {
+    getAlert: ["GET /repos/{owner}/{repo}/code-scanning/alerts/{alert_id}"],
+    listAlertsForRepo: ["GET /repos/{owner}/{repo}/code-scanning/alerts"]
+  },
+  codesOfConduct: {
+    getAllCodesOfConduct: ["GET /codes_of_conduct", {
+      mediaType: {
+        previews: ["scarlet-witch"]
+      }
+    }],
+    getConductCode: ["GET /codes_of_conduct/{key}", {
+      mediaType: {
+        previews: ["scarlet-witch"]
+      }
+    }],
+    getForRepo: ["GET /repos/{owner}/{repo}/community/code_of_conduct", {
+      mediaType: {
+        previews: ["scarlet-witch"]
+      }
+    }],
+    listConductCodes: ["GET /codes_of_conduct", {
+      mediaType: {
+        previews: ["scarlet-witch"]
+      }
+    }, {
+      renamed: ["codesOfConduct", "getAllCodesOfConduct"]
+    }]
+  },
+  emojis: {
+    get: ["GET /emojis"]
+  },
+  gists: {
+    checkIsStarred: ["GET /gists/{gist_id}/star"],
+    create: ["POST /gists"],
+    createComment: ["POST /gists/{gist_id}/comments"],
+    delete: ["DELETE /gists/{gist_id}"],
+    deleteComment: ["DELETE /gists/{gist_id}/comments/{comment_id}"],
+    fork: ["POST /gists/{gist_id}/forks"],
+    get: ["GET /gists/{gist_id}"],
+    getComment: ["GET /gists/{gist_id}/comments/{comment_id}"],
+    getRevision: ["GET /gists/{gist_id}/{sha}"],
+    list: ["GET /gists"],
+    listComments: ["GET /gists/{gist_id}/comments"],
+    listCommits: ["GET /gists/{gist_id}/commits"],
+    listForUser: ["GET /users/{username}/gists"],
+    listForks: ["GET /gists/{gist_id}/forks"],
+    listPublic: ["GET /gists/public"],
+    listPublicForUser: ["GET /users/{username}/gists", {}, {
+      renamed: ["gists", "listForUser"]
+    }],
+    listStarred: ["GET /gists/starred"],
+    star: ["PUT /gists/{gist_id}/star"],
+    unstar: ["DELETE /gists/{gist_id}/star"],
+    update: ["PATCH /gists/{gist_id}"],
+    updateComment: ["PATCH /gists/{gist_id}/comments/{comment_id}"]
+  },
+  git: {
+    createBlob: ["POST /repos/{owner}/{repo}/git/blobs"],
+    createCommit: ["POST /repos/{owner}/{repo}/git/commits"],
+    createRef: ["POST /repos/{owner}/{repo}/git/refs"],
+    createTag: ["POST /repos/{owner}/{repo}/git/tags"],
+    createTree: ["POST /repos/{owner}/{repo}/git/trees"],
+    deleteRef: ["DELETE /repos/{owner}/{repo}/git/refs/{ref}"],
+    getBlob: ["GET /repos/{owner}/{repo}/git/blobs/{file_sha}"],
+    getCommit: ["GET /repos/{owner}/{repo}/git/commits/{commit_sha}"],
+    getRef: ["GET /repos/{owner}/{repo}/git/ref/{ref}"],
+    getTag: ["GET /repos/{owner}/{repo}/git/tags/{tag_sha}"],
+    getTree: ["GET /repos/{owner}/{repo}/git/trees/{tree_sha}"],
+    listMatchingRefs: ["GET /repos/{owner}/{repo}/git/matching-refs/{ref}"],
+    updateRef: ["PATCH /repos/{owner}/{repo}/git/refs/{ref}"]
+  },
+  gitignore: {
+    getAllTemplates: ["GET /gitignore/templates"],
+    getTemplate: ["GET /gitignore/templates/{name}"],
+    listTemplates: ["GET /gitignore/templates", {}, {
+      renamed: ["gitignore", "getAllTemplates"]
+    }]
+  },
+  interactions: {
+    addOrUpdateRestrictionsForOrg: ["PUT /orgs/{org}/interaction-limits", {
+      mediaType: {
+        previews: ["sombra"]
+      }
+    }, {
+      renamed: ["interactions", "setRestrictionsForOrg"]
+    }],
+    addOrUpdateRestrictionsForRepo: ["PUT /repos/{owner}/{repo}/interaction-limits", {
+      mediaType: {
+        previews: ["sombra"]
+      }
+    }, {
+      renamed: ["interactions", "setRestrictionsForRepo"]
+    }],
+    getRestrictionsForOrg: ["GET /orgs/{org}/interaction-limits", {
+      mediaType: {
+        previews: ["sombra"]
+      }
+    }],
+    getRestrictionsForRepo: ["GET /repos/{owner}/{repo}/interaction-limits", {
+      mediaType: {
+        previews: ["sombra"]
+      }
+    }],
+    removeRestrictionsForOrg: ["DELETE /orgs/{org}/interaction-limits", {
+      mediaType: {
+        previews: ["sombra"]
+      }
+    }],
+    removeRestrictionsForRepo: ["DELETE /repos/{owner}/{repo}/interaction-limits", {
+      mediaType: {
+        previews: ["sombra"]
+      }
+    }],
+    setRestrictionsForOrg: ["PUT /orgs/{org}/interaction-limits", {
+      mediaType: {
+        previews: ["sombra"]
+      }
+    }],
+    setRestrictionsForRepo: ["PUT /repos/{owner}/{repo}/interaction-limits", {
+      mediaType: {
+        previews: ["sombra"]
+      }
+    }]
+  },
+  issues: {
+    addAssignees: ["POST /repos/{owner}/{repo}/issues/{issue_number}/assignees"],
+    addLabels: ["POST /repos/{owner}/{repo}/issues/{issue_number}/labels"],
+    checkAssignee: ["GET /repos/{owner}/{repo}/assignees/{assignee}", {}, {
+      renamed: ["issues", "checkUserCanBeAssigned"]
+    }],
+    checkUserCanBeAssigned: ["GET /repos/{owner}/{repo}/assignees/{assignee}"],
+    create: ["POST /repos/{owner}/{repo}/issues"],
+    createComment: ["POST /repos/{owner}/{repo}/issues/{issue_number}/comments"],
+    createLabel: ["POST /repos/{owner}/{repo}/labels"],
+    createMilestone: ["POST /repos/{owner}/{repo}/milestones"],
+    deleteComment: ["DELETE /repos/{owner}/{repo}/issues/comments/{comment_id}"],
+    deleteLabel: ["DELETE /repos/{owner}/{repo}/labels/{name}"],
+    deleteMilestone: ["DELETE /repos/{owner}/{repo}/milestones/{milestone_number}"],
+    get: ["GET /repos/{owner}/{repo}/issues/{issue_number}"],
+    getComment: ["GET /repos/{owner}/{repo}/issues/comments/{comment_id}"],
+    getEvent: ["GET /repos/{owner}/{repo}/issues/events/{event_id}"],
+    getLabel: ["GET /repos/{owner}/{repo}/labels/{name}"],
+    getMilestone: ["GET /repos/{owner}/{repo}/milestones/{milestone_number}"],
+    list: ["GET /issues"],
+    listAssignees: ["GET /repos/{owner}/{repo}/assignees"],
+    listComments: ["GET /repos/{owner}/{repo}/issues/{issue_number}/comments"],
+    listCommentsForRepo: ["GET /repos/{owner}/{repo}/issues/comments"],
+    listEvents: ["GET /repos/{owner}/{repo}/issues/{issue_number}/events"],
+    listEventsForRepo: ["GET /repos/{owner}/{repo}/issues/events"],
+    listEventsForTimeline: ["GET /repos/{owner}/{repo}/issues/{issue_number}/timeline", {
+      mediaType: {
+        previews: ["mockingbird"]
+      }
+    }],
+    listForAuthenticatedUser: ["GET /user/issues"],
+    listForOrg: ["GET /orgs/{org}/issues"],
+    listForRepo: ["GET /repos/{owner}/{repo}/issues"],
+    listLabelsForMilestone: ["GET /repos/{owner}/{repo}/milestones/{milestone_number}/labels"],
+    listLabelsForRepo: ["GET /repos/{owner}/{repo}/labels"],
+    listLabelsOnIssue: ["GET /repos/{owner}/{repo}/issues/{issue_number}/labels"],
+    listMilestones: ["GET /repos/{owner}/{repo}/milestones"],
+    listMilestonesForRepo: ["GET /repos/{owner}/{repo}/milestones", {}, {
+      renamed: ["issues", "listMilestones"]
+    }],
+    lock: ["PUT /repos/{owner}/{repo}/issues/{issue_number}/lock"],
+    removeAllLabels: ["DELETE /repos/{owner}/{repo}/issues/{issue_number}/labels"],
+    removeAssignees: ["DELETE /repos/{owner}/{repo}/issues/{issue_number}/assignees"],
+    removeLabel: ["DELETE /repos/{owner}/{repo}/issues/{issue_number}/labels/{name}"],
+    removeLabels: ["DELETE /repos/{owner}/{repo}/issues/{issue_number}/labels", {}, {
+      renamed: ["issues", "removeAllLabels"]
+    }],
+    replaceAllLabels: ["PUT /repos/{owner}/{repo}/issues/{issue_number}/labels", {}, {
+      renamed: ["issues", "setLabels"]
+    }],
+    replaceLabels: ["PUT /repos/{owner}/{repo}/issues/{issue_number}/labels", {}, {
+      renamed: ["issues", "replaceAllLabels"]
+    }],
+    setLabels: ["PUT /repos/{owner}/{repo}/issues/{issue_number}/labels"],
+    unlock: ["DELETE /repos/{owner}/{repo}/issues/{issue_number}/lock"],
+    update: ["PATCH /repos/{owner}/{repo}/issues/{issue_number}"],
+    updateComment: ["PATCH /repos/{owner}/{repo}/issues/comments/{comment_id}"],
+    updateLabel: ["PATCH /repos/{owner}/{repo}/labels/{name}"],
+    updateMilestone: ["PATCH /repos/{owner}/{repo}/milestones/{milestone_number}"]
+  },
+  licenses: {
+    get: ["GET /licenses/{license}"],
+    getAllCommonlyUsed: ["GET /licenses"],
+    getForRepo: ["GET /repos/{owner}/{repo}/license"],
+    listCommonlyUsed: ["GET /licenses", {}, {
+      renamed: ["licenses", "getAllCommonlyUsed"]
+    }]
+  },
+  markdown: {
+    render: ["POST /markdown"],
+    renderRaw: ["POST /markdown/raw", {
+      headers: {
+        "content-type": "text/plain; charset=utf-8"
+      }
+    }]
+  },
+  meta: {
+    get: ["GET /meta"]
+  },
+  migrations: {
+    cancelImport: ["DELETE /repos/{owner}/{repo}/import"],
+    deleteArchiveForAuthenticatedUser: ["DELETE /user/migrations/{migration_id}/archive", {
+      mediaType: {
+        previews: ["wyandotte"]
+      }
+    }],
+    deleteArchiveForOrg: ["DELETE /orgs/{org}/migrations/{migration_id}/archive", {
+      mediaType: {
+        previews: ["wyandotte"]
+      }
+    }],
+    downloadArchiveForOrg: ["GET /orgs/{org}/migrations/{migration_id}/archive", {
+      mediaType: {
+        previews: ["wyandotte"]
+      }
+    }],
+    getArchiveForAuthenticatedUser: ["GET /user/migrations/{migration_id}/archive", {
+      mediaType: {
+        previews: ["wyandotte"]
+      }
+    }],
+    getCommitAuthors: ["GET /repos/{owner}/{repo}/import/authors"],
+    getImportProgress: ["GET /repos/{owner}/{repo}/import", {}, {
+      renamed: ["migrations", "getImportStatus"]
+    }],
+    getImportStatus: ["GET /repos/{owner}/{repo}/import"],
+    getLargeFiles: ["GET /repos/{owner}/{repo}/import/large_files"],
+    getStatusForAuthenticatedUser: ["GET /user/migrations/{migration_id}", {
+      mediaType: {
+        previews: ["wyandotte"]
+      }
+    }],
+    getStatusForOrg: ["GET /orgs/{org}/migrations/{migration_id}", {
+      mediaType: {
+        previews: ["wyandotte"]
+      }
+    }],
+    listForAuthenticatedUser: ["GET /user/migrations", {
+      mediaType: {
+        previews: ["wyandotte"]
+      }
+    }],
+    listForOrg: ["GET /orgs/{org}/migrations", {
+      mediaType: {
+        previews: ["wyandotte"]
+      }
+    }],
+    listReposForOrg: ["GET /orgs/{org}/migrations/{migration_id}/repositories", {
+      mediaType: {
+        previews: ["wyandotte"]
+      }
+    }],
+    listReposForUser: ["GET /user/{migration_id}/repositories", {
+      mediaType: {
+        previews: ["wyandotte"]
+      }
+    }],
+    mapCommitAuthor: ["PATCH /repos/{owner}/{repo}/import/authors/{author_id}"],
+    setLfsPreference: ["PATCH /repos/{owner}/{repo}/import/lfs"],
+    startForAuthenticatedUser: ["POST /user/migrations"],
+    startForOrg: ["POST /orgs/{org}/migrations"],
+    startImport: ["PUT /repos/{owner}/{repo}/import"],
+    unlockRepoForAuthenticatedUser: ["DELETE /user/migrations/{migration_id}/repos/{repo_name}/lock", {
+      mediaType: {
+        previews: ["wyandotte"]
+      }
+    }],
+    unlockRepoForOrg: ["DELETE /orgs/{org}/migrations/{migration_id}/repos/{repo_name}/lock", {
+      mediaType: {
+        previews: ["wyandotte"]
+      }
+    }],
+    updateImport: ["PATCH /repos/{owner}/{repo}/import"]
+  },
+  orgs: {
+    addOrUpdateMembership: ["PUT /orgs/{org}/memberships/{username}", {}, {
+      renamed: ["orgs", "setMembershipForUser"]
+    }],
+    blockUser: ["PUT /orgs/{org}/blocks/{username}"],
+    checkBlockedUser: ["GET /orgs/{org}/blocks/{username}"],
+    checkMembership: ["GET /orgs/{org}/members/{username}", {}, {
+      renamed: ["orgs", "checkMembershipForUser"]
+    }],
+    checkMembershipForUser: ["GET /orgs/{org}/members/{username}"],
+    checkPublicMembership: ["GET /orgs/{org}/public_members/{username}", {}, {
+      renamed: ["orgs", "checkPublicMembershipForUser"]
+    }],
+    checkPublicMembershipForUser: ["GET /orgs/{org}/public_members/{username}"],
+    concealMembership: ["DELETE /orgs/{org}/public_members/{username}", {}, {
+      renamed: ["orgs", "removePublicMembershipForAuthenticatedUser"]
+    }],
+    convertMemberToOutsideCollaborator: ["PUT /orgs/{org}/outside_collaborators/{username}"],
+    createHook: ["POST /orgs/{org}/hooks", {}, {
+      renamed: ["orgs", "createWebhook"]
+    }],
+    createInvitation: ["POST /orgs/{org}/invitations"],
+    createWebhook: ["POST /orgs/{org}/hooks"],
+    deleteHook: ["DELETE /orgs/{org}/hooks/{hook_id}", {}, {
+      renamed: ["orgs", "deleteWebhook"]
+    }],
+    deleteWebhook: ["DELETE /orgs/{org}/hooks/{hook_id}"],
+    get: ["GET /orgs/{org}"],
+    getHook: ["GET /orgs/{org}/hooks/{hook_id}", {}, {
+      renamed: ["orgs", "getWebhook"]
+    }],
+    getMembership: ["GET /orgs/{org}/memberships/{username}", {}, {
+      renamed: ["orgs", "getMembershipForUser"]
+    }],
+    getMembershipForAuthenticatedUser: ["GET /user/memberships/orgs/{org}"],
+    getMembershipForUser: ["GET /orgs/{org}/memberships/{username}"],
+    getWebhook: ["GET /orgs/{org}/hooks/{hook_id}"],
+    list: ["GET /organizations"],
+    listAppInstallations: ["GET /orgs/{org}/installations", {
+      mediaType: {
+        previews: ["machine-man"]
+      }
+    }],
+    listBlockedUsers: ["GET /orgs/{org}/blocks"],
+    listForAuthenticatedUser: ["GET /user/orgs"],
+    listForUser: ["GET /users/{username}/orgs"],
+    listHooks: ["GET /orgs/{org}/hooks", {}, {
+      renamed: ["orgs", "listWebhooks"]
+    }],
+    listInstallations: ["GET /orgs/{org}/installations", {
+      mediaType: {
+        previews: ["machine-man"]
+      }
+    }, {
+      renamed: ["orgs", "listAppInstallations"]
+    }],
+    listInvitationTeams: ["GET /orgs/{org}/invitations/{invitation_id}/teams"],
+    listMembers: ["GET /orgs/{org}/members"],
+    listMemberships: ["GET /user/memberships/orgs", {}, {
+      renamed: ["orgs", "listMembershipsForAuthenticatedUser"]
+    }],
+    listMembershipsForAuthenticatedUser: ["GET /user/memberships/orgs"],
+    listOutsideCollaborators: ["GET /orgs/{org}/outside_collaborators"],
+    listPendingInvitations: ["GET /orgs/{org}/invitations"],
+    listPublicMembers: ["GET /orgs/{org}/public_members"],
+    listWebhooks: ["GET /orgs/{org}/hooks"],
+    pingHook: ["POST /orgs/{org}/hooks/{hook_id}/pings", {}, {
+      renamed: ["orgs", "pingWebhook"]
+    }],
+    pingWebhook: ["POST /orgs/{org}/hooks/{hook_id}/pings"],
+    publicizeMembership: ["PUT /orgs/{org}/public_members/{username}", {}, {
+      renamed: ["orgs", "setPublicMembershipForAuthenticatedUser"]
+    }],
+    removeMember: ["DELETE /orgs/{org}/members/{username}"],
+    removeMembership: ["DELETE /orgs/{org}/memberships/{username}", {}, {
+      renamed: ["orgs", "removeMembershipForUser"]
+    }],
+    removeMembershipForUser: ["DELETE /orgs/{org}/memberships/{username}"],
+    removeOutsideCollaborator: ["DELETE /orgs/{org}/outside_collaborators/{username}"],
+    removePublicMembershipForAuthenticatedUser: ["DELETE /orgs/{org}/public_members/{username}"],
+    setMembershipForUser: ["PUT /orgs/{org}/memberships/{username}"],
+    setPublicMembershipForAuthenticatedUser: ["PUT /orgs/{org}/public_members/{username}"],
+    unblockUser: ["DELETE /orgs/{org}/blocks/{username}"],
+    update: ["PATCH /orgs/{org}"],
+    updateHook: ["PATCH /orgs/{org}/hooks/{hook_id}", {}, {
+      renamed: ["orgs", "updateWebhook"]
+    }],
+    updateMembership: ["PATCH /user/memberships/orgs/{org}", {}, {
+      renamed: ["orgs", "updateMembershipForAuthenticatedUser"]
+    }],
+    updateMembershipForAuthenticatedUser: ["PATCH /user/memberships/orgs/{org}"],
+    updateWebhook: ["PATCH /orgs/{org}/hooks/{hook_id}"]
+  },
+  projects: {
+    addCollaborator: ["PUT /projects/{project_id}/collaborators/{username}", {
+      mediaType: {
+        previews: ["inertia"]
+      }
+    }],
+    createCard: ["POST /projects/columns/{column_id}/cards", {
+      mediaType: {
+        previews: ["inertia"]
+      }
+    }],
+    createColumn: ["POST /projects/{project_id}/columns", {
+      mediaType: {
+        previews: ["inertia"]
+      }
+    }],
+    createForAuthenticatedUser: ["POST /user/projects", {
+      mediaType: {
+        previews: ["inertia"]
+      }
+    }],
+    createForOrg: ["POST /orgs/{org}/projects", {
+      mediaType: {
+        previews: ["inertia"]
+      }
+    }],
+    createForRepo: ["POST /repos/{owner}/{repo}/projects", {
+      mediaType: {
+        previews: ["inertia"]
+      }
+    }],
+    delete: ["DELETE /projects/{project_id}", {
+      mediaType: {
+        previews: ["inertia"]
+      }
+    }],
+    deleteCard: ["DELETE /projects/columns/cards/{card_id}", {
+      mediaType: {
+        previews: ["inertia"]
+      }
+    }],
+    deleteColumn: ["DELETE /projects/columns/{column_id}", {
+      mediaType: {
+        previews: ["inertia"]
+      }
+    }],
+    get: ["GET /projects/{project_id}", {
+      mediaType: {
+        previews: ["inertia"]
+      }
+    }],
+    getCard: ["GET /projects/columns/cards/{card_id}", {
+      mediaType: {
+        previews: ["inertia"]
+      }
+    }],
+    getColumn: ["GET /projects/columns/{column_id}", {
+      mediaType: {
+        previews: ["inertia"]
+      }
+    }],
+    getPermissionForUser: ["GET /projects/{project_id}/collaborators/{username}/permission", {
+      mediaType: {
+        previews: ["inertia"]
+      }
+    }],
+    listCards: ["GET /projects/columns/{column_id}/cards", {
+      mediaType: {
+        previews: ["inertia"]
+      }
+    }],
+    listCollaborators: ["GET /projects/{project_id}/collaborators", {
+      mediaType: {
+        previews: ["inertia"]
+      }
+    }],
+    listColumns: ["GET /projects/{project_id}/columns", {
+      mediaType: {
+        previews: ["inertia"]
+      }
+    }],
+    listForOrg: ["GET /orgs/{org}/projects", {
+      mediaType: {
+        previews: ["inertia"]
+      }
+    }],
+    listForRepo: ["GET /repos/{owner}/{repo}/projects", {
+      mediaType: {
+        previews: ["inertia"]
+      }
+    }],
+    listForUser: ["GET /users/{username}/projects", {
+      mediaType: {
+        previews: ["inertia"]
+      }
+    }],
+    moveCard: ["POST /projects/columns/cards/{card_id}/moves", {
+      mediaType: {
+        previews: ["inertia"]
+      }
+    }],
+    moveColumn: ["POST /projects/columns/{column_id}/moves", {
+      mediaType: {
+        previews: ["inertia"]
+      }
+    }],
+    removeCollaborator: ["DELETE /projects/{project_id}/collaborators/{username}", {
+      mediaType: {
+        previews: ["inertia"]
+      }
+    }],
+    reviewUserPermissionLevel: ["GET /projects/{project_id}/collaborators/{username}/permission", {
+      mediaType: {
+        previews: ["inertia"]
+      }
+    }, {
+      renamed: ["projects", "getPermissionForUser"]
+    }],
+    update: ["PATCH /projects/{project_id}", {
+      mediaType: {
+        previews: ["inertia"]
+      }
+    }],
+    updateCard: ["PATCH /projects/columns/cards/{card_id}", {
+      mediaType: {
+        previews: ["inertia"]
+      }
+    }],
+    updateColumn: ["PATCH /projects/columns/{column_id}", {
+      mediaType: {
+        previews: ["inertia"]
+      }
+    }]
+  },
+  pulls: {
+    checkIfMerged: ["GET /repos/{owner}/{repo}/pulls/{pull_number}/merge"],
+    create: ["POST /repos/{owner}/{repo}/pulls"],
+    createComment: ["POST /repos/{owner}/{repo}/pulls/{pull_number}/comments", {}, {
+      renamed: ["pulls", "createReviewComment"]
+    }],
+    createReplyForReviewComment: ["POST /repos/{owner}/{repo}/pulls/{pull_number}/comments/{comment_id}/replies"],
+    createReview: ["POST /repos/{owner}/{repo}/pulls/{pull_number}/reviews"],
+    createReviewComment: ["POST /repos/{owner}/{repo}/pulls/{pull_number}/comments"],
+    createReviewCommentReply: ["POST /repos/{owner}/{repo}/pulls/{pull_number}/comments/{comment_id}/replies", {}, {
+      renamed: ["pulls", "createReplyForReviewComment"]
+    }],
+    createReviewRequest: ["POST /repos/{owner}/{repo}/pulls/{pull_number}/requested_reviewers", {}, {
+      renamed: ["pulls", "requestReviewers"]
+    }],
+    deleteComment: ["DELETE /repos/{owner}/{repo}/pulls/comments/{comment_id}", {}, {
+      renamed: ["pulls", "deleteReviewComment"]
+    }],
+    deletePendingReview: ["DELETE /repos/{owner}/{repo}/pulls/{pull_number}/reviews/{review_id}"],
+    deleteReviewComment: ["DELETE /repos/{owner}/{repo}/pulls/comments/{comment_id}"],
+    deleteReviewRequest: ["DELETE /repos/{owner}/{repo}/pulls/{pull_number}/requested_reviewers", {}, {
+      renamed: ["pulls", "removeRequestedReviewers"]
+    }],
+    dismissReview: ["PUT /repos/{owner}/{repo}/pulls/{pull_number}/reviews/{review_id}/dismissals"],
+    get: ["GET /repos/{owner}/{repo}/pulls/{pull_number}"],
+    getComment: ["GET /repos/{owner}/{repo}/pulls/comments/{comment_id}", {}, {
+      renamed: ["pulls", "getReviewComment"]
+    }],
+    getCommentsForReview: ["GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews/{review_id}/comments", {}, {
+      renamed: ["pulls", "listCommentsForReview"]
+    }],
+    getReview: ["GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews/{review_id}"],
+    getReviewComment: ["GET /repos/{owner}/{repo}/pulls/comments/{comment_id}"],
+    list: ["GET /repos/{owner}/{repo}/pulls"],
+    listComments: ["GET /repos/{owner}/{repo}/pulls/{pull_number}/comments", {}, {
+      renamed: ["pulls", "listReviewComments"]
+    }],
+    listCommentsForRepo: ["GET /repos/{owner}/{repo}/pulls/comments", {}, {
+      renamed: ["pulls", "listReviewCommentsForRepo"]
+    }],
+    listCommentsForReview: ["GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews/{review_id}/comments"],
+    listCommits: ["GET /repos/{owner}/{repo}/pulls/{pull_number}/commits"],
+    listFiles: ["GET /repos/{owner}/{repo}/pulls/{pull_number}/files"],
+    listRequestedReviewers: ["GET /repos/{owner}/{repo}/pulls/{pull_number}/requested_reviewers"],
+    listReviewComments: ["GET /repos/{owner}/{repo}/pulls/{pull_number}/comments"],
+    listReviewCommentsForRepo: ["GET /repos/{owner}/{repo}/pulls/comments"],
+    listReviewRequests: ["GET /repos/{owner}/{repo}/pulls/{pull_number}/requested_reviewers", {}, {
+      renamed: ["pulls", "listRequestedReviewers"]
+    }],
+    listReviews: ["GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews"],
+    merge: ["PUT /repos/{owner}/{repo}/pulls/{pull_number}/merge"],
+    removeRequestedReviewers: ["DELETE /repos/{owner}/{repo}/pulls/{pull_number}/requested_reviewers"],
+    requestReviewers: ["POST /repos/{owner}/{repo}/pulls/{pull_number}/requested_reviewers"],
+    submitReview: ["POST /repos/{owner}/{repo}/pulls/{pull_number}/reviews/{review_id}/events"],
+    update: ["PATCH /repos/{owner}/{repo}/pulls/{pull_number}"],
+    updateBranch: ["PUT /repos/{owner}/{repo}/pulls/{pull_number}/update-branch", {
+      mediaType: {
+        previews: ["lydian"]
+      }
+    }],
+    updateComment: ["PATCH /repos/{owner}/{repo}/pulls/comments/{comment_id}", {}, {
+      renamed: ["pulls", "updateReviewComment"]
+    }],
+    updateReview: ["PUT /repos/{owner}/{repo}/pulls/{pull_number}/reviews/{review_id}"],
+    updateReviewComment: ["PATCH /repos/{owner}/{repo}/pulls/comments/{comment_id}"]
+  },
+  rateLimit: {
+    get: ["GET /rate_limit"]
+  },
+  reactions: {
+    createForCommitComment: ["POST /repos/{owner}/{repo}/comments/{comment_id}/reactions", {
+      mediaType: {
+        previews: ["squirrel-girl"]
+      }
+    }],
+    createForIssue: ["POST /repos/{owner}/{repo}/issues/{issue_number}/reactions", {
+      mediaType: {
+        previews: ["squirrel-girl"]
+      }
+    }],
+    createForIssueComment: ["POST /repos/{owner}/{repo}/issues/comments/{comment_id}/reactions", {
+      mediaType: {
+        previews: ["squirrel-girl"]
+      }
+    }],
+    createForPullRequestReviewComment: ["POST /repos/{owner}/{repo}/pulls/comments/{comment_id}/reactions", {
+      mediaType: {
+        previews: ["squirrel-girl"]
+      }
+    }],
+    createForTeamDiscussionCommentInOrg: ["POST /orgs/{org}/teams/{team_slug}/discussions/{discussion_number}/comments/{comment_number}/reactions", {
+      mediaType: {
+        previews: ["squirrel-girl"]
+      }
+    }],
+    createForTeamDiscussionInOrg: ["POST /orgs/{org}/teams/{team_slug}/discussions/{discussion_number}/reactions", {
+      mediaType: {
+        previews: ["squirrel-girl"]
+      }
+    }],
+    delete: ["DELETE /reactions/{reaction_id}", {
+      mediaType: {
+        previews: ["squirrel-girl"]
+      }
+    }, {
+      renamed: ["reactions", "deleteLegacy"]
+    }],
+    deleteForCommitComment: ["DELETE /repos/{owner}/{repo}/comments/{comment_id}/reactions/{reaction_id}", {
+      mediaType: {
+        previews: ["squirrel-girl"]
+      }
+    }],
+    deleteForIssue: ["DELETE /repos/{owner}/{repo}/issues/{issue_number}/reactions/{reaction_id}", {
+      mediaType: {
+        previews: ["squirrel-girl"]
+      }
+    }],
+    deleteForIssueComment: ["DELETE /repos/{owner}/{repo}/issues/comments/{comment_id}/reactions/{reaction_id}", {
+      mediaType: {
+        previews: ["squirrel-girl"]
+      }
+    }],
+    deleteForPullRequestComment: ["DELETE /repos/{owner}/{repo}/pulls/comments/{comment_id}/reactions/{reaction_id}", {
+      mediaType: {
+        previews: ["squirrel-girl"]
+      }
+    }],
+    deleteForTeamDiscussion: ["DELETE /orgs/{org}/teams/{team_slug}/discussions/{discussion_number}/reactions/{reaction_id}", {
+      mediaType: {
+        previews: ["squirrel-girl"]
+      }
+    }],
+    deleteForTeamDiscussionComment: ["DELETE /orgs/{org}/teams/{team_slug}/discussions/{discussion_number}/comments/{comment_number}/reactions/{reaction_id}", {
+      mediaType: {
+        previews: ["squirrel-girl"]
+      }
+    }],
+    deleteLegacy: ["DELETE /reactions/{reaction_id}", {
+      mediaType: {
+        previews: ["squirrel-girl"]
+      }
+    }, {
+      deprecated: "octokit.reactions.deleteLegacy() is deprecated, see https://developer.github.com/v3/reactions/#delete-a-reaction-legacy"
+    }],
+    listForCommitComment: ["GET /repos/{owner}/{repo}/comments/{comment_id}/reactions", {
+      mediaType: {
+        previews: ["squirrel-girl"]
+      }
+    }],
+    listForIssue: ["GET /repos/{owner}/{repo}/issues/{issue_number}/reactions", {
+      mediaType: {
+        previews: ["squirrel-girl"]
+      }
+    }],
+    listForIssueComment: ["GET /repos/{owner}/{repo}/issues/comments/{comment_id}/reactions", {
+      mediaType: {
+        previews: ["squirrel-girl"]
+      }
+    }],
+    listForPullRequestReviewComment: ["GET /repos/{owner}/{repo}/pulls/comments/{comment_id}/reactions", {
+      mediaType: {
+        previews: ["squirrel-girl"]
+      }
+    }],
+    listForTeamDiscussionCommentInOrg: ["GET /orgs/{org}/teams/{team_slug}/discussions/{discussion_number}/comments/{comment_number}/reactions", {
+      mediaType: {
+        previews: ["squirrel-girl"]
+      }
+    }],
+    listForTeamDiscussionInOrg: ["GET /orgs/{org}/teams/{team_slug}/discussions/{discussion_number}/reactions", {
+      mediaType: {
+        previews: ["squirrel-girl"]
+      }
+    }]
+  },
+  repos: {
+    acceptInvitation: ["PATCH /user/repository_invitations/{invitation_id}"],
+    addAppAccessRestrictions: ["POST /repos/{owner}/{repo}/branches/{branch}/protection/restrictions/apps", {}, {
+      mapToData: "apps"
+    }],
+    addCollaborator: ["PUT /repos/{owner}/{repo}/collaborators/{username}"],
+    addDeployKey: ["POST /repos/{owner}/{repo}/keys", {}, {
+      renamed: ["repos", "createDeployKey"]
+    }],
+    addProtectedBranchAdminEnforcement: ["POST /repos/{owner}/{repo}/branches/{branch}/protection/enforce_admins", {}, {
+      renamed: ["repos", "setAdminBranchProtection"]
+    }],
+    addProtectedBranchAppRestrictions: ["POST /repos/{owner}/{repo}/branches/{branch}/protection/restrictions/apps", {}, {
+      mapToData: "apps",
+      renamed: ["repos", "addAppAccessRestrictions"]
+    }],
+    addProtectedBranchRequiredSignatures: ["POST /repos/{owner}/{repo}/branches/{branch}/protection/required_signatures", {
+      mediaType: {
+        previews: ["zzzax"]
+      }
+    }, {
+      renamed: ["repos", "createCommitSignatureProtection"]
+    }],
+    addProtectedBranchRequiredStatusChecksContexts: ["POST /repos/{owner}/{repo}/branches/{branch}/protection/required_status_checks/contexts", {}, {
+      mapToData: "contexts",
+      renamed: ["repos", "addStatusCheckContexts"]
+    }],
+    addProtectedBranchTeamRestrictions: ["POST /repos/{owner}/{repo}/branches/{branch}/protection/restrictions/teams", {}, {
+      mapToData: "teams",
+      renamed: ["repos", "addTeamAccessRestrictions"]
+    }],
+    addProtectedBranchUserRestrictions: ["POST /repos/{owner}/{repo}/branches/{branch}/protection/restrictions/users", {}, {
+      mapToData: "users",
+      renamed: ["repos", "addUserAccessRestrictions"]
+    }],
+    addStatusCheckContexts: ["POST /repos/{owner}/{repo}/branches/{branch}/protection/required_status_checks/contexts", {}, {
+      mapToData: "contexts"
+    }],
+    addTeamAccessRestrictions: ["POST /repos/{owner}/{repo}/branches/{branch}/protection/restrictions/teams", {}, {
+      mapToData: "teams"
+    }],
+    addUserAccessRestrictions: ["POST /repos/{owner}/{repo}/branches/{branch}/protection/restrictions/users", {}, {
+      mapToData: "users"
+    }],
+    checkCollaborator: ["GET /repos/{owner}/{repo}/collaborators/{username}"],
+    checkVulnerabilityAlerts: ["GET /repos/{owner}/{repo}/vulnerability-alerts", {
+      mediaType: {
+        previews: ["dorian"]
+      }
+    }],
+    compareCommits: ["GET /repos/{owner}/{repo}/compare/{base}...{head}"],
+    createCommitComment: ["POST /repos/{owner}/{repo}/commits/{commit_sha}/comments"],
+    createCommitSignatureProtection: ["POST /repos/{owner}/{repo}/branches/{branch}/protection/required_signatures", {
+      mediaType: {
+        previews: ["zzzax"]
+      }
+    }],
+    createCommitStatus: ["POST /repos/{owner}/{repo}/statuses/{sha}"],
+    createDeployKey: ["POST /repos/{owner}/{repo}/keys"],
+    createDeployment: ["POST /repos/{owner}/{repo}/deployments"],
+    createDeploymentStatus: ["POST /repos/{owner}/{repo}/deployments/{deployment_id}/statuses"],
+    createDispatchEvent: ["POST /repos/{owner}/{repo}/dispatches"],
+    createForAuthenticatedUser: ["POST /user/repos"],
+    createFork: ["POST /repos/{owner}/{repo}/forks"],
+    createHook: ["POST /repos/{owner}/{repo}/hooks", {}, {
+      renamed: ["repos", "createWebhook"]
+    }],
+    createInOrg: ["POST /orgs/{org}/repos"],
+    createOrUpdateFile: ["PUT /repos/{owner}/{repo}/contents/{path}", {}, {
+      renamed: ["repos", "createOrUpdateFileContents"]
+    }],
+    createOrUpdateFileContents: ["PUT /repos/{owner}/{repo}/contents/{path}"],
+    createPagesSite: ["POST /repos/{owner}/{repo}/pages", {
+      mediaType: {
+        previews: ["switcheroo"]
+      }
+    }],
+    createRelease: ["POST /repos/{owner}/{repo}/releases"],
+    createStatus: ["POST /repos/{owner}/{repo}/statuses/{sha}", {}, {
+      renamed: ["repos", "createCommitStatus"]
+    }],
+    createUsingTemplate: ["POST /repos/{template_owner}/{template_repo}/generate", {
+      mediaType: {
+        previews: ["baptiste"]
+      }
+    }],
+    createWebhook: ["POST /repos/{owner}/{repo}/hooks"],
+    declineInvitation: ["DELETE /user/repository_invitations/{invitation_id}"],
+    delete: ["DELETE /repos/{owner}/{repo}"],
+    deleteAccessRestrictions: ["DELETE /repos/{owner}/{repo}/branches/{branch}/protection/restrictions"],
+    deleteAdminBranchProtection: ["DELETE /repos/{owner}/{repo}/branches/{branch}/protection/enforce_admins"],
+    deleteBranchProtection: ["DELETE /repos/{owner}/{repo}/branches/{branch}/protection"],
+    deleteCommitComment: ["DELETE /repos/{owner}/{repo}/comments/{comment_id}"],
+    deleteCommitSignatureProtection: ["DELETE /repos/{owner}/{repo}/branches/{branch}/protection/required_signatures", {
+      mediaType: {
+        previews: ["zzzax"]
+      }
+    }],
+    deleteDeployKey: ["DELETE /repos/{owner}/{repo}/keys/{key_id}"],
+    deleteDeployment: ["DELETE /repos/{owner}/{repo}/deployments/{deployment_id}"],
+    deleteDownload: ["DELETE /repos/{owner}/{repo}/downloads/{download_id}"],
+    deleteFile: ["DELETE /repos/{owner}/{repo}/contents/{path}"],
+    deleteHook: ["DELETE /repos/{owner}/{repo}/hooks/{hook_id}", {}, {
+      renamed: ["repos", "deleteWebhook"]
+    }],
+    deleteInvitation: ["DELETE /repos/{owner}/{repo}/invitations/{invitation_id}"],
+    deletePagesSite: ["DELETE /repos/{owner}/{repo}/pages", {
+      mediaType: {
+        previews: ["switcheroo"]
+      }
+    }],
+    deletePullRequestReviewProtection: ["DELETE /repos/{owner}/{repo}/branches/{branch}/protection/required_pull_request_reviews"],
+    deleteRelease: ["DELETE /repos/{owner}/{repo}/releases/{release_id}"],
+    deleteReleaseAsset: ["DELETE /repos/{owner}/{repo}/releases/assets/{asset_id}"],
+    deleteWebhook: ["DELETE /repos/{owner}/{repo}/hooks/{hook_id}"],
+    disableAutomatedSecurityFixes: ["DELETE /repos/{owner}/{repo}/automated-security-fixes", {
+      mediaType: {
+        previews: ["london"]
+      }
+    }],
+    disablePagesSite: ["DELETE /repos/{owner}/{repo}/pages", {
+      mediaType: {
+        previews: ["switcheroo"]
+      }
+    }, {
+      renamed: ["repos", "deletePagesSite"]
+    }],
+    disableVulnerabilityAlerts: ["DELETE /repos/{owner}/{repo}/vulnerability-alerts", {
+      mediaType: {
+        previews: ["dorian"]
+      }
+    }],
+    downloadArchive: ["GET /repos/{owner}/{repo}/{archive_format}/{ref}"],
+    enableAutomatedSecurityFixes: ["PUT /repos/{owner}/{repo}/automated-security-fixes", {
+      mediaType: {
+        previews: ["london"]
+      }
+    }],
+    enablePagesSite: ["POST /repos/{owner}/{repo}/pages", {
+      mediaType: {
+        previews: ["switcheroo"]
+      }
+    }, {
+      renamed: ["repos", "createPagesSite"]
+    }],
+    enableVulnerabilityAlerts: ["PUT /repos/{owner}/{repo}/vulnerability-alerts", {
+      mediaType: {
+        previews: ["dorian"]
+      }
+    }],
+    get: ["GET /repos/{owner}/{repo}"],
+    getAccessRestrictions: ["GET /repos/{owner}/{repo}/branches/{branch}/protection/restrictions"],
+    getAdminBranchProtection: ["GET /repos/{owner}/{repo}/branches/{branch}/protection/enforce_admins"],
+    getAllStatusCheckContexts: ["GET /repos/{owner}/{repo}/branches/{branch}/protection/required_status_checks/contexts"],
+    getAllTopics: ["GET /repos/{owner}/{repo}/topics", {
+      mediaType: {
+        previews: ["mercy"]
+      }
+    }],
+    getAppsWithAccessToProtectedBranch: ["GET /repos/{owner}/{repo}/branches/{branch}/protection/restrictions/apps"],
+    getArchiveLink: ["GET /repos/{owner}/{repo}/{archive_format}/{ref}", {}, {
+      renamed: ["repos", "downloadArchive"]
+    }],
+    getBranch: ["GET /repos/{owner}/{repo}/branches/{branch}"],
+    getBranchProtection: ["GET /repos/{owner}/{repo}/branches/{branch}/protection"],
+    getClones: ["GET /repos/{owner}/{repo}/traffic/clones"],
+    getCodeFrequencyStats: ["GET /repos/{owner}/{repo}/stats/code_frequency"],
+    getCollaboratorPermissionLevel: ["GET /repos/{owner}/{repo}/collaborators/{username}/permission"],
+    getCombinedStatusForRef: ["GET /repos/{owner}/{repo}/commits/{ref}/status"],
+    getCommit: ["GET /repos/{owner}/{repo}/commits/{ref}"],
+    getCommitActivityStats: ["GET /repos/{owner}/{repo}/stats/commit_activity"],
+    getCommitComment: ["GET /repos/{owner}/{repo}/comments/{comment_id}"],
+    getCommitSignatureProtection: ["GET /repos/{owner}/{repo}/branches/{branch}/protection/required_signatures", {
+      mediaType: {
+        previews: ["zzzax"]
+      }
+    }],
+    getCommunityProfileMetrics: ["GET /repos/{owner}/{repo}/community/profile"],
+    getContent: ["GET /repos/{owner}/{repo}/contents/{path}"],
+    getContents: ["GET /repos/{owner}/{repo}/contents/{path}", {}, {
+      renamed: ["repos", "getContent"]
+    }],
+    getContributorsStats: ["GET /repos/{owner}/{repo}/stats/contributors"],
+    getDeployKey: ["GET /repos/{owner}/{repo}/keys/{key_id}"],
+    getDeployment: ["GET /repos/{owner}/{repo}/deployments/{deployment_id}"],
+    getDeploymentStatus: ["GET /repos/{owner}/{repo}/deployments/{deployment_id}/statuses/{status_id}"],
+    getDownload: ["GET /repos/{owner}/{repo}/downloads/{download_id}"],
+    getHook: ["GET /repos/{owner}/{repo}/hooks/{hook_id}", {}, {
+      renamed: ["repos", "getWebhook"]
+    }],
+    getLatestPagesBuild: ["GET /repos/{owner}/{repo}/pages/builds/latest"],
+    getLatestRelease: ["GET /repos/{owner}/{repo}/releases/latest"],
+    getPages: ["GET /repos/{owner}/{repo}/pages"],
+    getPagesBuild: ["GET /repos/{owner}/{repo}/pages/builds/{build_id}"],
+    getParticipationStats: ["GET /repos/{owner}/{repo}/stats/participation"],
+    getProtectedBranchAdminEnforcement: ["GET /repos/{owner}/{repo}/branches/{branch}/protection/enforce_admins", {}, {
+      renamed: ["repos", "getAdminBranchProtection"]
+    }],
+    getProtectedBranchPullRequestReviewEnforcement: ["GET /repos/{owner}/{repo}/branches/{branch}/protection/required_pull_request_reviews", {}, {
+      renamed: ["repos", "getPullRequestReviewProtection"]
+    }],
+    getProtectedBranchRequiredSignatures: ["GET /repos/{owner}/{repo}/branches/{branch}/protection/required_signatures", {
+      mediaType: {
+        previews: ["zzzax"]
+      }
+    }, {
+      renamed: ["repos", "getCommitSignatureProtection"]
+    }],
+    getProtectedBranchRequiredStatusChecks: ["GET /repos/{owner}/{repo}/branches/{branch}/protection/required_status_checks", {}, {
+      renamed: ["repos", "getStatusChecksProtection"]
+    }],
+    getProtectedBranchRestrictions: ["GET /repos/{owner}/{repo}/branches/{branch}/protection/restrictions", {}, {
+      renamed: ["repos", "getAccessRestrictions"]
+    }],
+    getPullRequestReviewProtection: ["GET /repos/{owner}/{repo}/branches/{branch}/protection/required_pull_request_reviews"],
+    getPunchCardStats: ["GET /repos/{owner}/{repo}/stats/punch_card"],
+    getReadme: ["GET /repos/{owner}/{repo}/readme"],
+    getRelease: ["GET /repos/{owner}/{repo}/releases/{release_id}"],
+    getReleaseAsset: ["GET /repos/{owner}/{repo}/releases/assets/{asset_id}"],
+    getReleaseByTag: ["GET /repos/{owner}/{repo}/releases/tags/{tag}"],
+    getStatusChecksProtection: ["GET /repos/{owner}/{repo}/branches/{branch}/protection/required_status_checks"],
+    getTeamsWithAccessToProtectedBranch: ["GET /repos/{owner}/{repo}/branches/{branch}/protection/restrictions/teams"],
+    getTopPaths: ["GET /repos/{owner}/{repo}/traffic/popular/paths"],
+    getTopReferrers: ["GET /repos/{owner}/{repo}/traffic/popular/referrers"],
+    getUsersWithAccessToProtectedBranch: ["GET /repos/{owner}/{repo}/branches/{branch}/protection/restrictions/users"],
+    getViews: ["GET /repos/{owner}/{repo}/traffic/views"],
+    getWebhook: ["GET /repos/{owner}/{repo}/hooks/{hook_id}"],
+    list: ["GET /user/repos", {}, {
+      renamed: ["repos", "listForAuthenticatedUser"]
+    }],
+    listAssetsForRelease: ["GET /repos/{owner}/{repo}/releases/{release_id}/assets", {}, {
+      renamed: ["repos", "listReleaseAssets"]
+    }],
+    listBranches: ["GET /repos/{owner}/{repo}/branches"],
+    listBranchesForHeadCommit: ["GET /repos/{owner}/{repo}/commits/{commit_sha}/branches-where-head", {
+      mediaType: {
+        previews: ["groot"]
+      }
+    }],
+    listCollaborators: ["GET /repos/{owner}/{repo}/collaborators"],
+    listCommentsForCommit: ["GET /repos/{owner}/{repo}/commits/{commit_sha}/comments"],
+    listCommitComments: ["GET /repos/{owner}/{repo}/comments", {}, {
+      renamed: ["repos", "listCommitCommentsForRepo"]
+    }],
+    listCommitCommentsForRepo: ["GET /repos/{owner}/{repo}/comments"],
+    listCommitStatusesForRef: ["GET /repos/{owner}/{repo}/commits/{ref}/statuses"],
+    listCommits: ["GET /repos/{owner}/{repo}/commits"],
+    listContributors: ["GET /repos/{owner}/{repo}/contributors"],
+    listDeployKeys: ["GET /repos/{owner}/{repo}/keys"],
+    listDeploymentStatuses: ["GET /repos/{owner}/{repo}/deployments/{deployment_id}/statuses"],
+    listDeployments: ["GET /repos/{owner}/{repo}/deployments"],
+    listDownloads: ["GET /repos/{owner}/{repo}/downloads"],
+    listForAuthenticatedUser: ["GET /user/repos"],
+    listForOrg: ["GET /orgs/{org}/repos"],
+    listForUser: ["GET /users/{username}/repos"],
+    listForks: ["GET /repos/{owner}/{repo}/forks"],
+    listHooks: ["GET /repos/{owner}/{repo}/hooks", {}, {
+      renamed: ["repos", "listWebhooks"]
+    }],
+    listInvitations: ["GET /repos/{owner}/{repo}/invitations"],
+    listInvitationsForAuthenticatedUser: ["GET /user/repository_invitations"],
+    listLanguages: ["GET /repos/{owner}/{repo}/languages"],
+    listPagesBuilds: ["GET /repos/{owner}/{repo}/pages/builds"],
+    listProtectedBranchRequiredStatusChecksContexts: ["GET /repos/{owner}/{repo}/branches/{branch}/protection/required_status_checks/contexts", {}, {
+      renamed: ["repos", "getAllStatusCheckContexts"]
+    }],
+    listPublic: ["GET /repositories"],
+    listPullRequestsAssociatedWithCommit: ["GET /repos/{owner}/{repo}/commits/{commit_sha}/pulls", {
+      mediaType: {
+        previews: ["groot"]
+      }
+    }],
+    listReleaseAssets: ["GET /repos/{owner}/{repo}/releases/{release_id}/assets"],
+    listReleases: ["GET /repos/{owner}/{repo}/releases"],
+    listStatusesForRef: ["GET /repos/{owner}/{repo}/commits/{ref}/statuses", {}, {
+      renamed: ["repos", "listCommitStatusesForRef"]
+    }],
+    listTags: ["GET /repos/{owner}/{repo}/tags"],
+    listTeams: ["GET /repos/{owner}/{repo}/teams"],
+    listTopics: ["GET /repos/{owner}/{repo}/topics", {
+      mediaType: {
+        previews: ["mercy"]
+      }
+    }, {
+      renamed: ["repos", "getAllTopics"]
+    }],
+    listWebhooks: ["GET /repos/{owner}/{repo}/hooks"],
+    merge: ["POST /repos/{owner}/{repo}/merges"],
+    pingHook: ["POST /repos/{owner}/{repo}/hooks/{hook_id}/pings", {}, {
+      renamed: ["repos", "pingWebhook"]
+    }],
+    pingWebhook: ["POST /repos/{owner}/{repo}/hooks/{hook_id}/pings"],
+    removeAppAccessRestrictions: ["DELETE /repos/{owner}/{repo}/branches/{branch}/protection/restrictions/apps", {}, {
+      mapToData: "apps"
+    }],
+    removeBranchProtection: ["DELETE /repos/{owner}/{repo}/branches/{branch}/protection", {}, {
+      renamed: ["repos", "deleteBranchProtection"]
+    }],
+    removeCollaborator: ["DELETE /repos/{owner}/{repo}/collaborators/{username}"],
+    removeDeployKey: ["DELETE /repos/{owner}/{repo}/keys/{key_id}", {}, {
+      renamed: ["repos", "deleteDeployKey"]
+    }],
+    removeProtectedBranchAdminEnforcement: ["DELETE /repos/{owner}/{repo}/branches/{branch}/protection/enforce_admins", {}, {
+      renamed: ["repos", "deleteAdminBranchProtection"]
+    }],
+    removeProtectedBranchAppRestrictions: ["DELETE /repos/{owner}/{repo}/branches/{branch}/protection/restrictions/apps", {}, {
+      mapToData: "apps",
+      renamed: ["repos", "removeAppAccessRestrictions"]
+    }],
+    removeProtectedBranchPullRequestReviewEnforcement: ["DELETE /repos/{owner}/{repo}/branches/{branch}/protection/required_pull_request_reviews", {}, {
+      renamed: ["repos", "deletePullRequestReviewProtection"]
+    }],
+    removeProtectedBranchRequiredSignatures: ["DELETE /repos/{owner}/{repo}/branches/{branch}/protection/required_signatures", {
+      mediaType: {
+        previews: ["zzzax"]
+      }
+    }, {
+      renamed: ["repos", "deleteCommitSignatureProtection"]
+    }],
+    removeProtectedBranchRequiredStatusChecks: ["DELETE /repos/{owner}/{repo}/branches/{branch}/protection/required_status_checks", {}, {
+      renamed: ["repos", "removeStatusChecksProtection"]
+    }],
+    removeProtectedBranchRequiredStatusChecksContexts: ["DELETE /repos/{owner}/{repo}/branches/{branch}/protection/required_status_checks/contexts", {}, {
+      mapToData: "contexts",
+      renamed: ["repos", "removeStatusCheckContexts"]
+    }],
+    removeProtectedBranchRestrictions: ["DELETE /repos/{owner}/{repo}/branches/{branch}/protection/restrictions", {}, {
+      renamed: ["repos", "deleteAccessRestrictions"]
+    }],
+    removeProtectedBranchTeamRestrictions: ["DELETE /repos/{owner}/{repo}/branches/{branch}/protection/restrictions/teams", {}, {
+      mapToData: "teams",
+      renamed: ["repos", "removeTeamAccessRestrictions"]
+    }],
+    removeProtectedBranchUserRestrictions: ["DELETE /repos/{owner}/{repo}/branches/{branch}/protection/restrictions/users", {}, {
+      mapToData: "users",
+      renamed: ["repos", "removeUserAccessRestrictions"]
+    }],
+    removeStatusCheckContexts: ["DELETE /repos/{owner}/{repo}/branches/{branch}/protection/required_status_checks/contexts", {}, {
+      mapToData: "contexts"
+    }],
+    removeStatusCheckProtection: ["DELETE /repos/{owner}/{repo}/branches/{branch}/protection/required_status_checks"],
+    removeTeamAccessRestrictions: ["DELETE /repos/{owner}/{repo}/branches/{branch}/protection/restrictions/teams", {}, {
+      mapToData: "teams"
+    }],
+    removeUserAccessRestrictions: ["DELETE /repos/{owner}/{repo}/branches/{branch}/protection/restrictions/users", {}, {
+      mapToData: "users"
+    }],
+    replaceAllTopics: ["PUT /repos/{owner}/{repo}/topics", {
+      mediaType: {
+        previews: ["mercy"]
+      }
+    }],
+    replaceProtectedBranchAppRestrictions: ["PUT /repos/{owner}/{repo}/branches/{branch}/protection/restrictions/apps", {}, {
+      mapToData: "apps",
+      renamed: ["repos", "setAppAccessRestrictions"]
+    }],
+    replaceProtectedBranchRequiredStatusChecksContexts: ["PUT /repos/{owner}/{repo}/branches/{branch}/protection/required_status_checks/contexts", {}, {
+      mapToData: "contexts",
+      renamed: ["repos", "setStatusCheckContexts"]
+    }],
+    replaceProtectedBranchTeamRestrictions: ["PUT /repos/{owner}/{repo}/branches/{branch}/protection/restrictions/teams", {}, {
+      mapToData: "teams",
+      renamed: ["repos", "setTeamAccessRestrictions"]
+    }],
+    replaceProtectedBranchUserRestrictions: ["PUT /repos/{owner}/{repo}/branches/{branch}/protection/restrictions/users", {}, {
+      mapToData: "users",
+      renamed: ["repos", "setUserAccessRestrictions"]
+    }],
+    replaceTopics: ["PUT /repos/{owner}/{repo}/topics", {
+      mediaType: {
+        previews: ["mercy"]
+      }
+    }, {
+      renamed: ["repos", "replaceAllTopics"]
+    }],
+    requestPageBuild: ["POST /repos/{owner}/{repo}/pages/builds", {}, {
+      renamed: ["repos", "requestPagesBuild"]
+    }],
+    requestPagesBuild: ["POST /repos/{owner}/{repo}/pages/builds"],
+    retrieveCommunityProfileMetrics: ["GET /repos/{owner}/{repo}/community/profile", {}, {
+      renamed: ["repos", "getCommunityProfileMetrics"]
+    }],
+    setAdminBranchProtection: ["POST /repos/{owner}/{repo}/branches/{branch}/protection/enforce_admins"],
+    setAppAccessRestrictions: ["PUT /repos/{owner}/{repo}/branches/{branch}/protection/restrictions/apps", {}, {
+      mapToData: "apps"
+    }],
+    setStatusCheckContexts: ["PUT /repos/{owner}/{repo}/branches/{branch}/protection/required_status_checks/contexts", {}, {
+      mapToData: "contexts"
+    }],
+    setTeamAccessRestrictions: ["PUT /repos/{owner}/{repo}/branches/{branch}/protection/restrictions/teams", {}, {
+      mapToData: "teams"
+    }],
+    setUserAccessRestrictions: ["PUT /repos/{owner}/{repo}/branches/{branch}/protection/restrictions/users", {}, {
+      mapToData: "users"
+    }],
+    testPushHook: ["POST /repos/{owner}/{repo}/hooks/{hook_id}/tests", {}, {
+      renamed: ["repos", "testPushWebhook"]
+    }],
+    testPushWebhook: ["POST /repos/{owner}/{repo}/hooks/{hook_id}/tests"],
+    transfer: ["POST /repos/{owner}/{repo}/transfer"],
+    update: ["PATCH /repos/{owner}/{repo}"],
+    updateBranchProtection: ["PUT /repos/{owner}/{repo}/branches/{branch}/protection"],
+    updateCommitComment: ["PATCH /repos/{owner}/{repo}/comments/{comment_id}"],
+    updateHook: ["PATCH /repos/{owner}/{repo}/hooks/{hook_id}", {}, {
+      renamed: ["repos", "updateWebhook"]
+    }],
+    updateInformationAboutPagesSite: ["PUT /repos/{owner}/{repo}/pages"],
+    updateInvitation: ["PATCH /repos/{owner}/{repo}/invitations/{invitation_id}"],
+    updateProtectedBranchPullRequestReviewEnforcement: ["PATCH /repos/{owner}/{repo}/branches/{branch}/protection/required_pull_request_reviews", {}, {
+      renamed: ["repos", "updatePullRequestReviewProtection"]
+    }],
+    updateProtectedBranchRequiredStatusChecks: ["PATCH /repos/{owner}/{repo}/branches/{branch}/protection/required_status_checks", {}, {
+      renamed: ["repos", "updateStatusChecksProtection"]
+    }],
+    updatePullRequestReviewProtection: ["PATCH /repos/{owner}/{repo}/branches/{branch}/protection/required_pull_request_reviews"],
+    updateRelease: ["PATCH /repos/{owner}/{repo}/releases/{release_id}"],
+    updateReleaseAsset: ["PATCH /repos/{owner}/{repo}/releases/assets/{asset_id}"],
+    updateStatusCheckPotection: ["PATCH /repos/{owner}/{repo}/branches/{branch}/protection/required_status_checks"],
+    updateWebhook: ["PATCH /repos/{owner}/{repo}/hooks/{hook_id}"],
+    uploadReleaseAsset: ["POST /repos/{owner}/{repo}/releases/{release_id}/assets{?name,label}", {
+      baseUrl: "https://uploads.github.com"
+    }]
+  },
+  search: {
+    code: ["GET /search/code"],
+    commits: ["GET /search/commits", {
+      mediaType: {
+        previews: ["cloak"]
+      }
+    }],
+    issuesAndPullRequests: ["GET /search/issues"],
+    labels: ["GET /search/labels"],
+    repos: ["GET /search/repositories"],
+    topics: ["GET /search/topics"],
+    users: ["GET /search/users"]
+  },
+  teams: {
+    addOrUpdateMembershipForUserInOrg: ["PUT /orgs/{org}/teams/{team_slug}/memberships/{username}"],
+    addOrUpdateMembershipInOrg: ["PUT /orgs/{org}/teams/{team_slug}/memberships/{username}", {}, {
+      renamed: ["teams", "addOrUpdateMembershipForUserInOrg"]
+    }],
+    addOrUpdateProjectInOrg: ["PUT /orgs/{org}/teams/{team_slug}/projects/{project_id}", {
+      mediaType: {
+        previews: ["inertia"]
+      }
+    }, {
+      renamed: ["teams", "addOrUpdateProjectPermissionsInOrg"]
+    }],
+    addOrUpdateProjectPermissionsInOrg: ["PUT /orgs/{org}/teams/{team_slug}/projects/{project_id}", {
+      mediaType: {
+        previews: ["inertia"]
+      }
+    }],
+    addOrUpdateRepoInOrg: ["PUT /orgs/{org}/teams/{team_slug}/repos/{owner}/{repo}", {}, {
+      renamed: ["teams", "addOrUpdateRepoPermissionsInOrg"]
+    }],
+    addOrUpdateRepoPermissionsInOrg: ["PUT /orgs/{org}/teams/{team_slug}/repos/{owner}/{repo}"],
+    checkManagesRepoInOrg: ["GET /orgs/{org}/teams/{team_slug}/repos/{owner}/{repo}", {}, {
+      renamed: ["teams", "checkPermissionsForRepoInOrg"]
+    }],
+    checkPermissionsForProjectInOrg: ["GET /orgs/{org}/teams/{team_slug}/projects/{project_id}", {
+      mediaType: {
+        previews: ["inertia"]
+      }
+    }],
+    checkPermissionsForRepoInOrg: ["GET /orgs/{org}/teams/{team_slug}/repos/{owner}/{repo}"],
+    create: ["POST /orgs/{org}/teams"],
+    createDiscussionCommentInOrg: ["POST /orgs/{org}/teams/{team_slug}/discussions/{discussion_number}/comments"],
+    createDiscussionInOrg: ["POST /orgs/{org}/teams/{team_slug}/discussions"],
+    deleteDiscussionCommentInOrg: ["DELETE /orgs/{org}/teams/{team_slug}/discussions/{discussion_number}/comments/{comment_number}"],
+    deleteDiscussionInOrg: ["DELETE /orgs/{org}/teams/{team_slug}/discussions/{discussion_number}"],
+    deleteInOrg: ["DELETE /orgs/{org}/teams/{team_slug}"],
+    getByName: ["GET /orgs/{org}/teams/{team_slug}"],
+    getDiscussionCommentInOrg: ["GET /orgs/{org}/teams/{team_slug}/discussions/{discussion_number}/comments/{comment_number}"],
+    getDiscussionInOrg: ["GET /orgs/{org}/teams/{team_slug}/discussions/{discussion_number}"],
+    getMembershipForUserInOrg: ["GET /orgs/{org}/teams/{team_slug}/memberships/{username}"],
+    getMembershipInOrg: ["GET /orgs/{org}/teams/{team_slug}/memberships/{username}", {}, {
+      renamed: ["teams", "getMembershipForUserInOrg"]
+    }],
+    list: ["GET /orgs/{org}/teams"],
+    listChildInOrg: ["GET /orgs/{org}/teams/{team_slug}/teams"],
+    listDiscussionCommentsInOrg: ["GET /orgs/{org}/teams/{team_slug}/discussions/{discussion_number}/comments"],
+    listDiscussionsInOrg: ["GET /orgs/{org}/teams/{team_slug}/discussions"],
+    listForAuthenticatedUser: ["GET /user/teams"],
+    listMembersInOrg: ["GET /orgs/{org}/teams/{team_slug}/members"],
+    listPendingInvitationsInOrg: ["GET /orgs/{org}/teams/{team_slug}/invitations"],
+    listProjectsInOrg: ["GET /orgs/{org}/teams/{team_slug}/projects", {
+      mediaType: {
+        previews: ["inertia"]
+      }
+    }],
+    listReposInOrg: ["GET /orgs/{org}/teams/{team_slug}/repos"],
+    removeMembershipForUserInOrg: ["DELETE /orgs/{org}/teams/{team_slug}/memberships/{username}"],
+    removeMembershipInOrg: ["DELETE /orgs/{org}/teams/{team_slug}/memberships/{username}", {}, {
+      renamed: ["teams", "removeMembershipForUserInOrg"]
+    }],
+    removeProjectInOrg: ["DELETE /orgs/{org}/teams/{team_slug}/projects/{project_id}"],
+    removeRepoInOrg: ["DELETE /orgs/{org}/teams/{team_slug}/repos/{owner}/{repo}"],
+    reviewProjectInOrg: ["GET /orgs/{org}/teams/{team_slug}/projects/{project_id}", {
+      mediaType: {
+        previews: ["inertia"]
+      }
+    }, {
+      renamed: ["teams", "checkPermissionsForProjectInOrg"]
+    }],
+    updateDiscussionCommentInOrg: ["PATCH /orgs/{org}/teams/{team_slug}/discussions/{discussion_number}/comments/{comment_number}"],
+    updateDiscussionInOrg: ["PATCH /orgs/{org}/teams/{team_slug}/discussions/{discussion_number}"],
+    updateInOrg: ["PATCH /orgs/{org}/teams/{team_slug}"]
+  },
+  users: {
+    addEmailForAuthenticated: ["POST /user/emails"],
+    addEmails: ["POST /user/emails", {}, {
+      renamed: ["users", "addEmailsForAuthenticated"]
+    }],
+    block: ["PUT /user/blocks/{username}"],
+    checkBlocked: ["GET /user/blocks/{username}"],
+    checkFollowing: ["GET /user/following/{username}", {}, {
+      renamed: ["users", "checkPersonIsFollowedByAuthenticated"]
+    }],
+    checkFollowingForUser: ["GET /users/{username}/following/{target_user}"],
+    checkPersonIsFollowedByAuthenticated: ["GET /user/following/{username}"],
+    createGpgKey: ["POST /user/gpg_keys", {}, {
+      renamed: ["users", "createGpgKeyForAuthenticated"]
+    }],
+    createGpgKeyForAuthenticated: ["POST /user/gpg_keys"],
+    createPublicKey: ["POST /user/keys", {}, {
+      renamed: ["users", "createPublicSshKeyForAuthenticated"]
+    }],
+    createPublicSshKeyForAuthenticated: ["POST /user/keys"],
+    deleteEmailForAuthenticated: ["DELETE /user/emails"],
+    deleteEmails: ["DELETE /user/emails", {}, {
+      renamed: ["users", "deleteEmailsForAuthenticated"]
+    }],
+    deleteGpgKey: ["DELETE /user/gpg_keys/{gpg_key_id}", {}, {
+      renamed: ["users", "deleteGpgKeyForAuthenticated"]
+    }],
+    deleteGpgKeyForAuthenticated: ["DELETE /user/gpg_keys/{gpg_key_id}"],
+    deletePublicKey: ["DELETE /user/keys/{key_id}", {}, {
+      renamed: ["users", "deletePublicSshKeyForAuthenticated"]
+    }],
+    deletePublicSshKeyForAuthenticated: ["DELETE /user/keys/{key_id}"],
+    follow: ["PUT /user/following/{username}"],
+    getAuthenticated: ["GET /user"],
+    getByUsername: ["GET /users/{username}"],
+    getContextForUser: ["GET /users/{username}/hovercard"],
+    getGpgKey: ["GET /user/gpg_keys/{gpg_key_id}", {}, {
+      renamed: ["users", "getGpgKeyForAuthenticated"]
+    }],
+    getGpgKeyForAuthenticated: ["GET /user/gpg_keys/{gpg_key_id}"],
+    getPublicKey: ["GET /user/keys/{key_id}", {}, {
+      renamed: ["users", "getPublicSshKeyForAuthenticated"]
+    }],
+    getPublicSshKeyForAuthenticated: ["GET /user/keys/{key_id}"],
+    list: ["GET /users"],
+    listBlocked: ["GET /user/blocks", {}, {
+      renamed: ["users", "listBlockedByAuthenticated"]
+    }],
+    listBlockedByAuthenticated: ["GET /user/blocks"],
+    listEmails: ["GET /user/emails", {}, {
+      renamed: ["users", "listEmailsForAuthenticated"]
+    }],
+    listEmailsForAuthenticated: ["GET /user/emails"],
+    listFollowedByAuthenticated: ["GET /user/following"],
+    listFollowersForAuthenticatedUser: ["GET /user/followers"],
+    listFollowersForUser: ["GET /users/{username}/followers"],
+    listFollowingForAuthenticatedUser: ["GET /user/following", {}, {
+      renamed: ["users", "listFollowedByAuthenticated"]
+    }],
+    listFollowingForUser: ["GET /users/{username}/following"],
+    listGpgKeys: ["GET /user/gpg_keys", {}, {
+      renamed: ["users", "listGpgKeysForAuthenticated"]
+    }],
+    listGpgKeysForAuthenticated: ["GET /user/gpg_keys"],
+    listGpgKeysForUser: ["GET /users/{username}/gpg_keys"],
+    listPublicEmails: ["GET /user/public_emails", {}, {
+      renamed: ["users", "listPublicEmailsForAuthenticatedUser"]
+    }],
+    listPublicEmailsForAuthenticated: ["GET /user/public_emails"],
+    listPublicKeys: ["GET /user/keys", {}, {
+      renamed: ["users", "listPublicSshKeysForAuthenticated"]
+    }],
+    listPublicKeysForUser: ["GET /users/{username}/keys"],
+    listPublicSshKeysForAuthenticated: ["GET /user/keys"],
+    setPrimaryEmailVisibilityForAuthenticated: ["PATCH /user/email/visibility"],
+    togglePrimaryEmailVisibility: ["PATCH /user/email/visibility", {}, {
+      renamed: ["users", "setPrimaryEmailVisibilityForAuthenticated"]
+    }],
+    unblock: ["DELETE /user/blocks/{username}"],
+    unfollow: ["DELETE /user/following/{username}"],
+    updateAuthenticated: ["PATCH /user"]
+  }
+};
+
+const VERSION = "3.17.0";
+
+function endpointsToMethods(octokit, endpointsMap) {
+  const newMethods = {};
+
+  for (const [scope, endpoints] of Object.entries(endpointsMap)) {
+    for (const [methodName, endpoint] of Object.entries(endpoints)) {
+      const [route, defaults, decorations] = endpoint;
+      const [method, url] = route.split(/ /);
+      const endpointDefaults = Object.assign({
+        method,
+        url
+      }, defaults);
+
+      if (!newMethods[scope]) {
+        newMethods[scope] = {};
+      }
+
+      const scopeMethods = newMethods[scope];
+
+      if (decorations) {
+        scopeMethods[methodName] = decorate(octokit, scope, methodName, endpointDefaults, decorations);
+        continue;
+      }
+
+      scopeMethods[methodName] = octokit.request.defaults(endpointDefaults);
+    }
+  }
+
+  return newMethods;
+}
+
+function decorate(octokit, scope, methodName, defaults, decorations) {
+  const requestWithDefaults = octokit.request.defaults(defaults);
+
+  function withDecorations(...args) {
+    // @ts-ignore https://github.com/microsoft/TypeScript/issues/25488
+    let options = requestWithDefaults.endpoint.merge(...args); // There are currently no other decorations than `.mapToData`
+
+    if (decorations.mapToData) {
+      options = Object.assign({}, options, {
+        data: options[decorations.mapToData],
+        [decorations.mapToData]: undefined
+      });
+      return requestWithDefaults(options);
+    } // NOTE: there are currently no deprecations. But we keep the code
+    //       below for future reference
+
+
+    if (decorations.renamed) {
+      const [newScope, newMethodName] = decorations.renamed;
+      octokit.log.warn(`octokit.${scope}.${methodName}() has been renamed to octokit.${newScope}.${newMethodName}()`);
+    }
+
+    if (decorations.deprecated) {
+      octokit.log.warn(decorations.deprecated);
+    }
+
+    if (decorations.renamedParameters) {
+      // @ts-ignore https://github.com/microsoft/TypeScript/issues/25488
+      const options = requestWithDefaults.endpoint.merge(...args);
+
+      for (const [name, alias] of Object.entries(decorations.renamedParameters)) {
+        // There is currently no deprecated parameter that is optional,
+        // so we never hit the else branch below at this point.
+
+        /* istanbul ignore else */
+        if (name in options) {
+          octokit.log.warn(`"${name}" parameter is deprecated for "octokit.${scope}.${methodName}()". Use "${alias}" instead`);
+
+          if (!(alias in options)) {
+            options[alias] = options[name];
+          }
+
+          delete options[name];
+        }
+      }
+
+      return requestWithDefaults(options);
+    } // @ts-ignore https://github.com/microsoft/TypeScript/issues/25488
+
+
+    return requestWithDefaults(...args);
+  }
+
+  return Object.assign(withDecorations, requestWithDefaults);
+}
+
+/**
+ * This plugin is a 1:1 copy of internal @octokit/rest plugins. The primary
+ * goal is to rebuild @octokit/rest on top of @octokit/core. Once that is
+ * done, we will remove the registerEndpoints methods and return the methods
+ * directly as with the other plugins. At that point we will also remove the
+ * legacy workarounds and deprecations.
+ *
+ * See the plan at
+ * https://github.com/octokit/plugin-rest-endpoint-methods.js/pull/1
+ */
+
+function restEndpointMethods(octokit) {
+  return endpointsToMethods(octokit, Endpoints);
+}
+restEndpointMethods.VERSION = VERSION;
+
+exports.restEndpointMethods = restEndpointMethods;
+//# sourceMappingURL=index.js.map
+
+
+/***/ }),
 /* 843 */,
 /* 844 */
 /***/ (function(module) {
@@ -100051,7 +109574,190 @@ module.exports = function () {
 /***/ }),
 /* 845 */,
 /* 846 */,
-/* 847 */,
+/* 847 */
+/***/ (function(module, __unusedexports, __webpack_require__) {
+
+"use strict";
+
+
+// Load modules
+
+const Any = __webpack_require__(227);
+const Ref = __webpack_require__(953);
+const Hoek = __webpack_require__(970);
+
+
+// Declare internals
+
+const internals = {};
+
+internals.isoDate = /^(?:[-+]\d{2})?(?:\d{4}(?!\d{2}\b))(?:(-?)(?:(?:0[1-9]|1[0-2])(?:\1(?:[12]\d|0[1-9]|3[01]))?|W(?:[0-4]\d|5[0-2])(?:-?[1-7])?|(?:00[1-9]|0[1-9]\d|[12]\d{2}|3(?:[0-5]\d|6[1-6])))(?![T]$|[T][\d]+Z$)(?:[T\s](?:(?:(?:[01]\d|2[0-3])(?:(:?)[0-5]\d)?|24\:?00)(?:[.,]\d+(?!:))?)(?:\2[0-5]\d(?:[.,]\d+)?)?(?:[Z]|(?:[+-])(?:[01]\d|2[0-3])(?::?[0-5]\d)?)?)?)?$/;
+internals.invalidDate = new Date('');
+internals.isIsoDate = (() => {
+
+    const isoString = internals.isoDate.toString();
+
+    return (date) => {
+
+        return date && (date.toString() === isoString);
+    };
+})();
+
+internals.Date = class extends Any {
+
+    constructor() {
+
+        super();
+        this._type = 'date';
+    }
+
+    _base(value, state, options) {
+
+        const result = {
+            value: (options.convert && internals.Date.toDate(value, this._flags.format, this._flags.timestamp, this._flags.multiplier)) || value
+        };
+
+        if (result.value instanceof Date && !isNaN(result.value.getTime())) {
+            result.errors = null;
+        }
+        else if (!options.convert) {
+            result.errors = this.createError('date.strict', null, state, options);
+        }
+        else {
+            let type;
+            if (internals.isIsoDate(this._flags.format)) {
+                type = 'isoDate';
+            }
+            else if (this._flags.timestamp) {
+                type = `timestamp.${this._flags.timestamp}`;
+            }
+            else {
+                type = 'base';
+            }
+
+            result.errors = this.createError(`date.${type}`, null, state, options);
+        }
+
+        return result;
+    }
+
+    static toDate(value, format, timestamp, multiplier) {
+
+        if (value instanceof Date) {
+            return value;
+        }
+
+        if (typeof value === 'string' ||
+            (typeof value === 'number' && !isNaN(value) && isFinite(value))) {
+
+            if (typeof value === 'string' &&
+                /^[+-]?\d+(\.\d+)?$/.test(value)) {
+
+                value = parseFloat(value);
+            }
+
+            let date;
+            if (format && internals.isIsoDate(format)) {
+                date = format.test(value) ? new Date(value) : internals.invalidDate;
+            }
+            else if (timestamp && multiplier) {
+                date = new Date(value * multiplier);
+            }
+            else {
+                date = new Date(value);
+            }
+
+            if (!isNaN(date.getTime())) {
+                return date;
+            }
+        }
+
+        return null;
+    }
+
+    iso() {
+
+        if (this._flags.format === internals.isoDate) {
+            return this;
+        }
+
+        const obj = this.clone();
+        obj._flags.format = internals.isoDate;
+        return obj;
+    }
+
+    timestamp(type) {
+
+        type = type || 'javascript';
+
+        const allowed = ['javascript', 'unix'];
+        Hoek.assert(allowed.indexOf(type) !== -1, '"type" must be one of "' + allowed.join('", "') + '"');
+
+        if (this._flags.timestamp === type) {
+            return this;
+        }
+
+        const obj = this.clone();
+        obj._flags.timestamp = type;
+        obj._flags.multiplier = type === 'unix' ? 1000 : 1;
+        return obj;
+    }
+
+    _isIsoDate(value) {
+
+        return internals.isoDate.test(value);
+    }
+
+};
+
+internals.compare = function (type, compare) {
+
+    return function (date) {
+
+        const isNow = date === 'now';
+        const isRef = Ref.isRef(date);
+
+        if (!isNow && !isRef) {
+            date = internals.Date.toDate(date);
+        }
+
+        Hoek.assert(date, 'Invalid date format');
+
+        return this._test(type, date, function (value, state, options) {
+
+            let compareTo;
+            if (isNow) {
+                compareTo = Date.now();
+            }
+            else if (isRef) {
+                compareTo = internals.Date.toDate(date(state.reference || state.parent, options));
+
+                if (!compareTo) {
+                    return this.createError('date.ref', { ref: date.key }, state, options);
+                }
+
+                compareTo = compareTo.getTime();
+            }
+            else {
+                compareTo = date.getTime();
+            }
+
+            if (compare(value.getTime(), compareTo)) {
+                return value;
+            }
+
+            return this.createError('date.' + type, { limit: new Date(compareTo) }, state, options);
+        });
+    };
+};
+internals.Date.prototype.min = internals.compare('min', (value, date) => value >= date);
+internals.Date.prototype.max = internals.compare('max', (value, date) => value <= date);
+
+
+module.exports = new internals.Date();
+
+
+/***/ }),
 /* 848 */
 /***/ (function(module, __unusedexports, __webpack_require__) {
 
@@ -100209,7 +109915,7 @@ module.exports = Object.assign(fn, figures);
 /* 849 */
 /***/ (function(module) {
 
-module.exports = {"_from":"contentful-migration@next","_id":"contentful-migration@0.17.1-beta0","_inBundle":false,"_integrity":"sha512-1imwXQ/8L6Y+sWa0TY3P7UKUBgiogOMbMVflQHCwZHydW+MJ3Jd4iLNI84bYdFlqGK00KEQOWC761bY4Jkc9Hw==","_location":"/contentful-migration","_phantomChildren":{"ansi-escapes":"3.2.0","axios":"0.19.0","chalk":"2.4.2","cli-cursor":"2.1.0","cli-width":"2.2.0","code-point-at":"1.1.0","contentful-sdk-core":"6.4.0","decamelize":"1.2.0","error-ex":"1.3.2","figures":"2.0.0","graceful-fs":"4.2.2","iconv-lite":"0.4.24","is-fullwidth-code-point":"2.0.0","lodash":"4.17.15","mute-stream":"0.0.7","normalize-package-data":"2.5.0","number-is-nan":"1.0.1","os-locale":"2.1.0","path-exists":"3.0.0","require-directory":"2.1.1","run-async":"2.3.0","rx-lite":"4.0.8","rx-lite-aggregates":"4.0.8","set-blocking":"2.0.0","strip-bom":"3.0.0","through":"2.3.8","tmp":"0.0.33","which-module":"2.0.0"},"_requested":{"type":"tag","registry":true,"raw":"contentful-migration@next","name":"contentful-migration","escapedName":"contentful-migration","rawSpec":"next","saveSpec":null,"fetchSpec":"next"},"_requiredBy":["#USER","/"],"_resolved":"https://registry.npmjs.org/contentful-migration/-/contentful-migration-0.17.1-beta0.tgz","_shasum":"30f536c08c1fb98cdcbfe61e51cfd1abe5a01f8e","_spec":"contentful-migration@next","_where":"/Users/shy/Downloads/action-testing/contentful-action","author":{"name":"Contentful GmbH"},"bin":{"contentful-migration":"./bin/contentful-migration"},"bugs":{"url":"https://github.com/contentful/contentful-migration/issues"},"bundleDependencies":false,"dependencies":{"bluebird":"^3.5.0","callsites":"^2.0.0","cardinal":"^1.0.0","chalk":"^2.2.0","contentful-management":"^5.3.0","didyoumean2":"^1.3.0","hoek":"^4.2.1","https-proxy-agent":"^2.1.0","inquirer":"^3.2.3","joi":"^10.6.0","kind-of":"^5.0.2","listr":"^0.12.0","lodash":"^4.17.4","yargs":"^8.0.2"},"deprecated":false,"description":"Migration tooling for contentful","devDependencies":{"@contentful/eslint-config-backend":"^5.0.0","@types/bluebird":"^3.5.15","@types/chai":"^4.0.4","@types/chai-as-promised":"^7.1.0","@types/hoek":"^4.1.3","@types/joi":"^10.4.4","@types/lodash":"^4.14.77","@types/mocha":"^2.2.43","@types/node":"^8.0.46","@types/sinon-chai":"^2.7.29","chai":"^4.1.2","chai-as-promised":"^7.1.1","codecov":"^3.0.4","dirty-chai":"^2.0.1","eslint":"^4.6.1","eslint-plugin-import":"^2.7.0","eslint-plugin-mocha":"^4.11.0","eslint-plugin-node":"^5.1.1","eslint-plugin-promise":"^3.5.0","eslint-plugin-standard":"^3.0.1","mocha":"^5.2.0","nixt":"^0.5.1","nock":"^9.4.2","nyc":"^11.2.1","rewire":"^2.5.2","rimraf":"^2.6.2","semantic-release":"^15.9.16","sinon":"^2.4.1","sinon-chai":"^2.13.0","source-map-support":"^0.5.0","strip-ansi":"^4.0.0","travis-deploy-once":"^5.0.8","ts-node":"^3.3.0","tslint":"^5.7.0","tslint-config-standard":"^6.0.1","typescript":"^2.5.3","uuid":"^3.3.2","zlib":"^1.0.5"},"directories":{"test":"test","lib":"lib"},"engines":{"node":">=8.0.0"},"files":["README.md","index.d.ts","CHANGELOG.md","bin","built","docs"],"homepage":"https://github.com/contentful/contentful-migration#readme","keywords":["contentful","content model","content type","migration","migrations","migrate"],"license":"MIT","main":"index","name":"contentful-migration","nyc":{"per-file":true,"include":["src/lib/**/*.js","src/lib/**/*.ts","src/bin/**/*.js","src/bin/**/*.ts","built/lib/**/*.js","built/bin/**/*.js"],"exclude":["test/**/*.spec.js","test/**/*.spec.ts","test/**/*.js","test/**/*.ts","node_modules/**/*.js","node_modules/**/*.ts","typings"],"extension":[".ts"],"all":true},"repository":{"type":"git","url":"git+https://github.com/contentful/contentful-migration.git"},"scripts":{"build":"npm run clean && tsc -p tsconfig.json","build-dev":"npm run clean && tsc -p tsconfig-dev.json","clean":"rimraf built","cover":"nyc --no-clean -s npm run test-unit && nyc --no-clean -s npm run test-integration && nyc --no-clean -s npm run test-e2e && nyc report","cover-e2e":"nyc npm run test-e2e","cover-integration":"nyc npm run test-integration","cover-unit":"nyc npm run test-unit","coverage":"npm run build && npm run cover && nyc report --reporter=text-lcov > coverage.lcov","coverage-report":"npm run coverage && codecov && rm -rf ./nyc_output && rm coverage.lcov","lint":"eslint 'examples/**/*.js' 'test/**/*.js' 'src/**/*.js' && tslint --project tsconfig-dev.json --config tslint.json","prepare":"npm run build","semantic-release":"semantic-release","test":"NOCK_RECORD=0 npm run build && npm run test-unit && npm run test-integration && npm run test-e2e && npm run lint","test-e2e":"NODE_ENV=test mocha 'test/end-to-end/**/*.spec.js'","test-integration":"NODE_ENV=test mocha --require test/integration/setup.js 'test/integration/**/*.spec.js'","test-unit":"NODE_ENV=test mocha --require test/setup-unit.js --recursive 'test/unit/**/**/*.spec.{js,ts}'","test-watch":"npm run test-unit -- --watch","travis-deploy-once":"travis-deploy-once"},"version":"0.17.1-beta0"};
+module.exports = {"_args":[["contentful-migration@0.17.4","/Users/shy/Documents/Contentful/action-testing/contentful-action"]],"_from":"contentful-migration@0.17.4","_id":"contentful-migration@0.17.4","_inBundle":false,"_integrity":"sha512-aF/Jz851t8GIFooprxBkEBH6vWxJDz80UPqSoJgdc61Rt3tKnUWbidNuXmP02vOTMO7NrpsLWxqyhG5+JxJ9Eg==","_location":"/contentful-migration","_phantomChildren":{"ansi-escapes":"3.2.0","axios":"0.19.2","chalk":"2.4.2","cli-cursor":"2.1.0","cli-width":"2.2.0","code-point-at":"1.1.0","contentful-sdk-core":"6.4.5","decamelize":"1.2.0","error-ex":"1.3.2","figures":"2.0.0","graceful-fs":"4.2.2","iconv-lite":"0.4.24","is-fullwidth-code-point":"2.0.0","lodash":"4.17.19","mute-stream":"0.0.7","normalize-package-data":"2.5.0","number-is-nan":"1.0.1","os-locale":"2.1.0","path-exists":"3.0.0","require-directory":"2.1.1","run-async":"2.3.0","rx-lite":"4.0.8","rx-lite-aggregates":"4.0.8","set-blocking":"2.0.0","strip-bom":"3.0.0","through":"2.3.8","tmp":"0.0.33","which-module":"2.0.0"},"_requested":{"type":"version","registry":true,"raw":"contentful-migration@0.17.4","name":"contentful-migration","escapedName":"contentful-migration","rawSpec":"0.17.4","saveSpec":null,"fetchSpec":"0.17.4"},"_requiredBy":["/"],"_resolved":"https://registry.npmjs.org/contentful-migration/-/contentful-migration-0.17.4.tgz","_spec":"0.17.4","_where":"/Users/shy/Documents/Contentful/action-testing/contentful-action","author":{"name":"Contentful GmbH"},"bin":{"contentful-migration":"bin/contentful-migration"},"bugs":{"url":"https://github.com/contentful/contentful-migration/issues"},"dependencies":{"bluebird":"^3.5.0","callsites":"^2.0.0","cardinal":"^1.0.0","chalk":"^2.2.0","contentful-management":"^5.3.0","didyoumean2":"^1.3.0","hoek":"^4.2.1","https-proxy-agent":"^2.1.0","inquirer":"^3.2.3","joi":"^10.6.0","kind-of":"^5.0.2","listr":"^0.12.0","lodash":"^4.17.4","yargs":"^8.0.2"},"description":"Migration tooling for contentful","devDependencies":{"@contentful/eslint-config-backend":"^5.0.0","@types/bluebird":"^3.5.15","@types/chai":"^4.0.4","@types/chai-as-promised":"^7.1.0","@types/hoek":"^4.1.3","@types/joi":"^10.4.4","@types/lodash":"^4.14.77","@types/mocha":"^2.2.43","@types/node":"^8.0.46","@types/sinon-chai":"^2.7.29","chai":"^4.1.2","chai-as-promised":"^7.1.1","codecov":"^3.0.4","dirty-chai":"^2.0.1","eslint":"^4.6.1","eslint-plugin-import":"^2.7.0","eslint-plugin-mocha":"^4.11.0","eslint-plugin-node":"^5.1.1","eslint-plugin-promise":"^3.5.0","eslint-plugin-standard":"^3.0.1","mocha":"^5.2.0","nixt":"^0.5.1","nock":"^9.4.2","nyc":"^11.2.1","rewire":"^2.5.2","rimraf":"^2.6.2","semantic-release":"^15.9.16","sinon":"^2.4.1","sinon-chai":"^2.13.0","source-map-support":"^0.5.0","strip-ansi":"^4.0.0","travis-deploy-once":"^5.0.8","ts-node":"^3.3.0","tslint":"^5.7.0","tslint-config-standard":"^6.0.1","typescript":"^2.5.3","uuid":"^3.3.2","zlib":"^1.0.5"},"directories":{"test":"test","lib":"lib"},"engines":{"node":">=8.0.0"},"files":["README.md","index.d.ts","CHANGELOG.md","bin","built","docs"],"homepage":"https://github.com/contentful/contentful-migration#readme","keywords":["contentful","content model","content type","migration","migrations","migrate"],"license":"MIT","main":"index","name":"contentful-migration","nyc":{"per-file":true,"include":["src/lib/**/*.js","src/lib/**/*.ts","src/bin/**/*.js","src/bin/**/*.ts","built/lib/**/*.js","built/bin/**/*.js"],"exclude":["test/**/*.spec.js","test/**/*.spec.ts","test/**/*.js","test/**/*.ts","node_modules/**/*.js","node_modules/**/*.ts","typings"],"extension":[".ts"],"all":true},"repository":{"type":"git","url":"git+https://github.com/contentful/contentful-migration.git"},"scripts":{"build":"npm run clean && tsc -p tsconfig.json","build-dev":"npm run clean && tsc -p tsconfig-dev.json","clean":"rimraf built","cover":"nyc --no-clean -s npm run test-unit && nyc --no-clean -s npm run test-integration && nyc --no-clean -s npm run test-e2e && nyc report","cover-e2e":"nyc npm run test-e2e","cover-integration":"nyc npm run test-integration","cover-unit":"nyc npm run test-unit","coverage":"npm run build && npm run cover && nyc report --reporter=text-lcov > coverage.lcov","coverage-report":"npm run coverage && codecov && rm -rf ./nyc_output && rm coverage.lcov","lint":"eslint 'examples/**/*.js' 'test/**/*.js' 'src/**/*.js' && tslint --project tsconfig-dev.json --config tslint.json","prepare":"npm run build","semantic-release":"semantic-release","test":"NOCK_RECORD=0 npm run build && npm run test-unit && npm run test-integration && npm run test-e2e && npm run lint","test-e2e":"NODE_ENV=test mocha 'test/end-to-end/**/*.spec.js'","test-integration":"NODE_ENV=test mocha --require test/integration/setup.js 'test/integration/**/*.spec.js'","test-unit":"NODE_ENV=test mocha --require test/setup-unit.js --recursive 'test/unit/**/**/*.spec.{js,ts}'","test-watch":"npm run test-unit -- --watch","travis-deploy-once":"travis-deploy-once"},"version":"0.17.4"};
 
 /***/ }),
 /* 850 */
@@ -100428,7 +110134,7 @@ module.exports = nodebackForPromise;
 /* 863 */
 /***/ (function(module, __unusedexports, __webpack_require__) {
 
-var arrayLikeKeys = __webpack_require__(389),
+var arrayLikeKeys = __webpack_require__(549),
     baseKeys = __webpack_require__(351),
     isArrayLike = __webpack_require__(146);
 
@@ -100519,7 +110225,32 @@ module.exports = function (input, columns, options) {
 
 /***/ }),
 /* 865 */,
-/* 866 */,
+/* 866 */
+/***/ (function(module, __unusedexports, __webpack_require__) {
+
+"use strict";
+
+var shebangRegex = __webpack_require__(816);
+
+module.exports = function (str) {
+	var match = str.match(shebangRegex);
+
+	if (!match) {
+		return null;
+	}
+
+	var arr = match[0].replace(/#! ?/, '').split(' ');
+	var bin = arr[0].split('/').pop();
+	var arg = arr[1];
+
+	return (bin === 'env' ?
+		arg :
+		bin + (arg ? ' ' + arg : '')
+	);
+};
+
+
+/***/ }),
 /* 867 */
 /***/ (function(module) {
 
@@ -100860,7 +110591,67 @@ module.exports = getValue;
 /* 881 */
 /***/ (function(module) {
 
-module.exports = require("dns");
+"use strict";
+
+
+const isWin = process.platform === 'win32';
+
+function notFoundError(original, syscall) {
+    return Object.assign(new Error(`${syscall} ${original.command} ENOENT`), {
+        code: 'ENOENT',
+        errno: 'ENOENT',
+        syscall: `${syscall} ${original.command}`,
+        path: original.command,
+        spawnargs: original.args,
+    });
+}
+
+function hookChildProcess(cp, parsed) {
+    if (!isWin) {
+        return;
+    }
+
+    const originalEmit = cp.emit;
+
+    cp.emit = function (name, arg1) {
+        // If emitting "exit" event and exit code is 1, we need to check if
+        // the command exists and emit an "error" instead
+        // See https://github.com/IndigoUnited/node-cross-spawn/issues/16
+        if (name === 'exit') {
+            const err = verifyENOENT(arg1, parsed, 'spawn');
+
+            if (err) {
+                return originalEmit.call(cp, 'error', err);
+            }
+        }
+
+        return originalEmit.apply(cp, arguments); // eslint-disable-line prefer-rest-params
+    };
+}
+
+function verifyENOENT(status, parsed) {
+    if (isWin && status === 1 && !parsed.file) {
+        return notFoundError(parsed.original, 'spawn');
+    }
+
+    return null;
+}
+
+function verifyENOENTSync(status, parsed) {
+    if (isWin && status === 1 && !parsed.file) {
+        return notFoundError(parsed.original, 'spawnSync');
+    }
+
+    return null;
+}
+
+module.exports = {
+    hookChildProcess,
+    verifyENOENT,
+    verifyENOENTSync,
+    notFoundError,
+};
+
 
 /***/ }),
 /* 882 */,
@@ -101121,7 +110912,7 @@ module.exports = {
 // Load modules
 
 const Any = __webpack_require__(227);
-const Hoek = __webpack_require__(11);
+const Hoek = __webpack_require__(970);
 
 
 // Declare internals
@@ -101314,88 +111105,145 @@ Object.defineProperty(module, 'exports', {
 
 /***/ }),
 /* 895 */
-/***/ (function(module) {
+/***/ (function(__unusedmodule, exports, __webpack_require__) {
 
 "use strict";
 
-function arrayMove(src, srcIndex, dst, dstIndex, len) {
-    for (var j = 0; j < len; ++j) {
-        dst[j + dstIndex] = src[j + srcIndex];
-        src[j + srcIndex] = void 0;
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var Subscription_1 = __webpack_require__(560);
+/**
+ * We need this JSDoc comment for affecting ESDoc.
+ * @ignore
+ * @extends {Ignored}
+ */
+var SubjectSubscription = (function (_super) {
+    __extends(SubjectSubscription, _super);
+    function SubjectSubscription(subject, subscriber) {
+        _super.call(this);
+        this.subject = subject;
+        this.subscriber = subscriber;
+        this.closed = false;
     }
-}
-
-function Queue(capacity) {
-    this._capacity = capacity;
-    this._length = 0;
-    this._front = 0;
-}
-
-Queue.prototype._willBeOverCapacity = function (size) {
-    return this._capacity < size;
-};
-
-Queue.prototype._pushOne = function (arg) {
-    var length = this.length();
-    this._checkCapacity(length + 1);
-    var i = (this._front + length) & (this._capacity - 1);
-    this[i] = arg;
-    this._length = length + 1;
-};
-
-Queue.prototype.push = function (fn, receiver, arg) {
-    var length = this.length() + 3;
-    if (this._willBeOverCapacity(length)) {
-        this._pushOne(fn);
-        this._pushOne(receiver);
-        this._pushOne(arg);
-        return;
-    }
-    var j = this._front + length - 3;
-    this._checkCapacity(length);
-    var wrapMask = this._capacity - 1;
-    this[(j + 0) & wrapMask] = fn;
-    this[(j + 1) & wrapMask] = receiver;
-    this[(j + 2) & wrapMask] = arg;
-    this._length = length;
-};
-
-Queue.prototype.shift = function () {
-    var front = this._front,
-        ret = this[front];
-
-    this[front] = undefined;
-    this._front = (front + 1) & (this._capacity - 1);
-    this._length--;
-    return ret;
-};
-
-Queue.prototype.length = function () {
-    return this._length;
-};
-
-Queue.prototype._checkCapacity = function (size) {
-    if (this._capacity < size) {
-        this._resizeTo(this._capacity << 1);
-    }
-};
-
-Queue.prototype._resizeTo = function (capacity) {
-    var oldCapacity = this._capacity;
-    this._capacity = capacity;
-    var front = this._front;
-    var length = this._length;
-    var moveItemsCount = (front + length) & (oldCapacity - 1);
-    arrayMove(this, 0, this, oldCapacity, moveItemsCount);
-};
-
-module.exports = Queue;
-
+    SubjectSubscription.prototype.unsubscribe = function () {
+        if (this.closed) {
+            return;
+        }
+        this.closed = true;
+        var subject = this.subject;
+        var observers = subject.observers;
+        this.subject = null;
+        if (!observers || observers.length === 0 || subject.isStopped || subject.closed) {
+            return;
+        }
+        var subscriberIndex = observers.indexOf(this.subscriber);
+        if (subscriberIndex !== -1) {
+            observers.splice(subscriberIndex, 1);
+        }
+    };
+    return SubjectSubscription;
+}(Subscription_1.Subscription));
+exports.SubjectSubscription = SubjectSubscription;
+//# sourceMappingURL=SubjectSubscription.js.map
 
 /***/ }),
 /* 896 */,
 /* 897 */,
-/* 898 */,
+/* 898 */
+/***/ (function(__unusedmodule, exports, __webpack_require__) {
+
+"use strict";
+
+
+Object.defineProperty(exports, '__esModule', { value: true });
+
+var request = __webpack_require__(753);
+var universalUserAgent = __webpack_require__(796);
+
+const VERSION = "4.5.1";
+
+class GraphqlError extends Error {
+  constructor(request, response) {
+    const message = response.data.errors[0].message;
+    super(message);
+    Object.assign(this, response.data);
+    this.name = "GraphqlError";
+    this.request = request; // Maintains proper stack trace (only available on V8)
+
+    /* istanbul ignore next */
+
+    if (Error.captureStackTrace) {
+      Error.captureStackTrace(this, this.constructor);
+    }
+  }
+
+}
+
+const NON_VARIABLE_OPTIONS = ["method", "baseUrl", "url", "headers", "request", "query", "mediaType"];
+function graphql(request, query, options) {
+  options = typeof query === "string" ? options = Object.assign({
+    query
+  }, options) : options = query;
+  const requestOptions = Object.keys(options).reduce((result, key) => {
+    if (NON_VARIABLE_OPTIONS.includes(key)) {
+      result[key] = options[key];
+      return result;
+    }
+
+    if (!result.variables) {
+      result.variables = {};
+    }
+
+    result.variables[key] = options[key];
+    return result;
+  }, {});
+  return request(requestOptions).then(response => {
+    if (response.data.errors) {
+      throw new GraphqlError(requestOptions, {
+        data: response.data
+      });
+    }
+
+    return response.data.data;
+  });
+}
+
+function withDefaults(request$1, newDefaults) {
+  const newRequest = request$1.defaults(newDefaults);
+
+  const newApi = (query, options) => {
+    return graphql(newRequest, query, options);
+  };
+
+  return Object.assign(newApi, {
+    defaults: withDefaults.bind(null, newRequest),
+    endpoint: request.request.endpoint
+  });
+}
+
+const graphql$1 = withDefaults(request.request, {
+  headers: {
+    "user-agent": `octokit-graphql.js/${VERSION} ${universalUserAgent.getUserAgent()}`
+  },
+  method: "POST",
+  url: "/graphql"
+});
+function withCustomRequest(customRequest) {
+  return withDefaults(customRequest, {
+    method: "POST",
+    url: "/graphql"
+  });
+}
+
+exports.graphql = graphql$1;
+exports.withCustomRequest = withCustomRequest;
+//# sourceMappingURL=index.js.map
+
+
+/***/ }),
 /* 899 */,
 /* 900 */,
 /* 901 */
@@ -101552,7 +111400,196 @@ exports.ContentTypePublishAction = ContentTypePublishAction;
 
 /***/ }),
 /* 908 */,
-/* 909 */,
+/* 909 */
+/***/ (function(module, __unusedexports, __webpack_require__) {
+
+"use strict";
+
+module.exports = function(Promise,
+                          PromiseArray,
+                          apiRejection,
+                          tryConvertToPromise,
+                          INTERNAL,
+                          debug) {
+var util = __webpack_require__(248);
+var tryCatch = util.tryCatch;
+
+function ReductionPromiseArray(promises, fn, initialValue, _each) {
+    this.constructor$(promises);
+    var context = Promise._getContext();
+    this._fn = util.contextBind(context, fn);
+    if (initialValue !== undefined) {
+        initialValue = Promise.resolve(initialValue);
+        initialValue._attachCancellationCallback(this);
+    }
+    this._initialValue = initialValue;
+    this._currentCancellable = null;
+    if(_each === INTERNAL) {
+        this._eachValues = Array(this._length);
+    } else if (_each === 0) {
+        this._eachValues = null;
+    } else {
+        this._eachValues = undefined;
+    }
+    this._promise._captureStackTrace();
+    this._init$(undefined, -5);
+}
+util.inherits(ReductionPromiseArray, PromiseArray);
+
+ReductionPromiseArray.prototype._gotAccum = function(accum) {
+    if (this._eachValues !== undefined &&
+        this._eachValues !== null &&
+        accum !== INTERNAL) {
+        this._eachValues.push(accum);
+    }
+};
+
+ReductionPromiseArray.prototype._eachComplete = function(value) {
+    if (this._eachValues !== null) {
+        this._eachValues.push(value);
+    }
+    return this._eachValues;
+};
+
+ReductionPromiseArray.prototype._init = function() {};
+
+ReductionPromiseArray.prototype._resolveEmptyArray = function() {
+    this._resolve(this._eachValues !== undefined ? this._eachValues
+                                                 : this._initialValue);
+};
+
+ReductionPromiseArray.prototype.shouldCopyValues = function () {
+    return false;
+};
+
+ReductionPromiseArray.prototype._resolve = function(value) {
+    this._promise._resolveCallback(value);
+    this._values = null;
+};
+
+ReductionPromiseArray.prototype._resultCancelled = function(sender) {
+    if (sender === this._initialValue) return this._cancel();
+    if (this._isResolved()) return;
+    this._resultCancelled$();
+    if (this._currentCancellable instanceof Promise) {
+        this._currentCancellable.cancel();
+    }
+    if (this._initialValue instanceof Promise) {
+        this._initialValue.cancel();
+    }
+};
+
+ReductionPromiseArray.prototype._iterate = function (values) {
+    this._values = values;
+    var value;
+    var i;
+    var length = values.length;
+    if (this._initialValue !== undefined) {
+        value = this._initialValue;
+        i = 0;
+    } else {
+        value = Promise.resolve(values[0]);
+        i = 1;
+    }
+
+    this._currentCancellable = value;
+
+    for (var j = i; j < length; ++j) {
+        var maybePromise = values[j];
+        if (maybePromise instanceof Promise) {
+            maybePromise.suppressUnhandledRejections();
+        }
+    }
+
+    if (!value.isRejected()) {
+        for (; i < length; ++i) {
+            var ctx = {
+                accum: null,
+                value: values[i],
+                index: i,
+                length: length,
+                array: this
+            };
+
+            value = value._then(gotAccum, undefined, undefined, ctx, undefined);
+
+            if ((i & 127) === 0) {
+                value._setNoAsyncGuarantee();
+            }
+        }
+    }
+
+    if (this._eachValues !== undefined) {
+        value = value
+            ._then(this._eachComplete, undefined, undefined, this, undefined);
+    }
+    value._then(completed, completed, undefined, value, this);
+};
+
+Promise.prototype.reduce = function (fn, initialValue) {
+    return reduce(this, fn, initialValue, null);
+};
+
+Promise.reduce = function (promises, fn, initialValue, _each) {
+    return reduce(promises, fn, initialValue, _each);
+};
+
+function completed(valueOrReason, array) {
+    if (this.isFulfilled()) {
+        array._resolve(valueOrReason);
+    } else {
+        array._reject(valueOrReason);
+    }
+}
+
+function reduce(promises, fn, initialValue, _each) {
+    if (typeof fn !== "function") {
+        return apiRejection("expecting a function but got " + util.classString(fn));
+    }
+    var array = new ReductionPromiseArray(promises, fn, initialValue, _each);
+    return array.promise();
+}
+
+function gotAccum(accum) {
+    this.accum = accum;
+    this.array._gotAccum(accum);
+    var value = tryConvertToPromise(this.value, this.array._promise);
+    if (value instanceof Promise) {
+        this.array._currentCancellable = value;
+        return value._then(gotValue, undefined, undefined, this, undefined);
+    } else {
+        return gotValue.call(this, value);
+    }
+}
+
+function gotValue(value) {
+    var array = this.array;
+    var promise = array._promise;
+    var fn = tryCatch(array._fn);
+    promise._pushContext();
+    var ret;
+    if (array._eachValues !== undefined) {
+        ret = fn.call(promise._boundValue(), value, this.index, this.length);
+    } else {
+        ret = fn.call(promise._boundValue(),
+                              this.accum, value, this.index, this.length);
+    }
+    if (ret instanceof Promise) {
+        array._currentCancellable = ret;
+    }
+    var promiseCreated = promise._popContext();
+    debug.checkForgottenReturns(
+        ret,
+        promiseCreated,
+        array._eachValues !== undefined ? "Promise.each" : "Promise.reduce",
+        promise
+    );
+    return ret;
+}
+};
+
+
+/***/ }),
 /* 910 */
 /***/ (function(module, __unusedexports, __webpack_require__) {
 
@@ -101561,7 +111598,7 @@ var getISOWeek = __webpack_require__(988)
 var getISOYear = __webpack_require__(996)
 var parse = __webpack_require__(751)
 var isValid = __webpack_require__(690)
-var enLocale = __webpack_require__(626)
+var enLocale = __webpack_require__(272)
 
 /**
  * @category Common Helpers
@@ -101892,7 +111929,7 @@ module.exports = format
 
 "use strict";
 
-const pMap = __webpack_require__(521);
+const pMap = __webpack_require__(611);
 const Task = __webpack_require__(635);
 const TaskWrapper = __webpack_require__(582);
 const renderer = __webpack_require__(110);
@@ -102065,7 +112102,7 @@ exports.default = ContentTypeCreateIntent;
 // Load modules
 
 const Any = __webpack_require__(227);
-const Hoek = __webpack_require__(11);
+const Hoek = __webpack_require__(970);
 
 
 // Declare internals
@@ -102195,7 +112232,35 @@ return Context;
 
 
 /***/ }),
-/* 924 */,
+/* 924 */
+/***/ (function(__unusedmodule, exports, __webpack_require__) {
+
+"use strict";
+
+
+// Update this array if you add/rename/remove files in this directory.
+// We support Browserify by skipping automatic module discovery and requiring modules directly.
+var modules = [
+    __webpack_require__(162),
+    __webpack_require__(797),
+    __webpack_require__(645),
+    __webpack_require__(877),
+    __webpack_require__(762),
+    __webpack_require__(28),
+    __webpack_require__(1),
+    __webpack_require__(92),
+];
+
+// Put all encoding/alias/codec definitions to single object and export it. 
+for (var i = 0; i < modules.length; i++) {
+    var module = modules[i];
+    for (var enc in module)
+        if (Object.prototype.hasOwnProperty.call(module, enc))
+            exports[enc] = module[enc];
+}
+
+
+/***/ }),
 /* 925 */,
 /* 926 */
 /***/ (function(module, __unusedexports, __webpack_require__) {
@@ -102829,53 +112894,85 @@ module.exports.default = module.exports; // For TypeScript
 
 "use strict";
 
-module.exports = (str, count, opts) => {
-	// Support older versions: use the third parameter as options.indent
-	// TODO: Remove the workaround in the next major version
-	const options = typeof opts === 'object' ? Object.assign({indent: ' '}, opts) : {indent: opts || ' '};
-	count = count === undefined ? 1 : count;
 
-	if (typeof str !== 'string') {
-		throw new TypeError(`Expected \`input\` to be a \`string\`, got \`${typeof str}\``);
-	}
+/**
+ * Tries to execute a function and discards any error that occurs.
+ * @param {Function} fn - Function that might or might not throw an error.
+ * @returns {?*} Return-value of the function when no error occurred.
+ */
+module.exports = function(fn) {
 
-	if (typeof count !== 'number') {
-		throw new TypeError(`Expected \`count\` to be a \`number\`, got \`${typeof count}\``);
-	}
+	try { return fn() } catch (e) {}
 
-	if (typeof options.indent !== 'string') {
-		throw new TypeError(`Expected \`options.indent\` to be a \`string\`, got \`${typeof options.indent}\``);
-	}
-
-	if (count === 0) {
-		return str;
-	}
-
-	const regex = options.includeEmptyLines ? /^/mg : /^(?!\s*$)/mg;
-	return str.replace(regex, options.indent.repeat(count));
 }
-;
-
 
 /***/ }),
-/* 949 */
-/***/ (function(module) {
+/* 949 */,
+/* 950 */
+/***/ (function(__unusedmodule, exports, __webpack_require__) {
 
-let wait = function(milliseconds) {
-  return new Promise((resolve, reject) => {
-    if (typeof(milliseconds) !== 'number') { 
-      throw new Error('milleseconds not a number'); 
+"use strict";
+
+Object.defineProperty(exports, "__esModule", { value: true });
+const url = __webpack_require__(835);
+function getProxyUrl(reqUrl) {
+    let usingSsl = reqUrl.protocol === 'https:';
+    let proxyUrl;
+    if (checkBypass(reqUrl)) {
+        return proxyUrl;
     }
-
-    setTimeout(() => resolve("done!"), milliseconds)
-  });
+    let proxyVar;
+    if (usingSsl) {
+        proxyVar = process.env['https_proxy'] || process.env['HTTPS_PROXY'];
+    }
+    else {
+        proxyVar = process.env['http_proxy'] || process.env['HTTP_PROXY'];
+    }
+    if (proxyVar) {
+        proxyUrl = url.parse(proxyVar);
+    }
+    return proxyUrl;
 }
-
-module.exports = wait;
+exports.getProxyUrl = getProxyUrl;
+function checkBypass(reqUrl) {
+    if (!reqUrl.hostname) {
+        return false;
+    }
+    let noProxy = process.env['no_proxy'] || process.env['NO_PROXY'] || '';
+    if (!noProxy) {
+        return false;
+    }
+    // Determine the request port
+    let reqPort;
+    if (reqUrl.port) {
+        reqPort = Number(reqUrl.port);
+    }
+    else if (reqUrl.protocol === 'http:') {
+        reqPort = 80;
+    }
+    else if (reqUrl.protocol === 'https:') {
+        reqPort = 443;
+    }
+    // Format the request hostname and hostname with port
+    let upperReqHosts = [reqUrl.hostname.toUpperCase()];
+    if (typeof reqPort === 'number') {
+        upperReqHosts.push(`${upperReqHosts[0]}:${reqPort}`);
+    }
+    // Compare request host against noproxy
+    for (let upperNoProxyItem of noProxy
+        .split(',')
+        .map(x => x.trim().toUpperCase())
+        .filter(x => x)) {
+        if (upperReqHosts.some(x => x === upperNoProxyItem)) {
+            return true;
+        }
+    }
+    return false;
+}
+exports.checkBypass = checkBypass;
 
 
 /***/ }),
-/* 950 */,
 /* 951 */,
 /* 952 */,
 /* 953 */
@@ -102886,7 +112983,7 @@ module.exports = wait;
 
 // Load modules
 
-const Hoek = __webpack_require__(11);
+const Hoek = __webpack_require__(970);
 
 
 // Declare internals
@@ -102939,12 +113036,379 @@ exports.push = function (array, ref) {
 
 /***/ }),
 /* 954 */,
-/* 955 */,
+/* 955 */
+/***/ (function(module, __unusedexports, __webpack_require__) {
+
+"use strict";
+
+const path = __webpack_require__(622);
+const childProcess = __webpack_require__(129);
+const crossSpawn = __webpack_require__(20);
+const stripEof = __webpack_require__(768);
+const npmRunPath = __webpack_require__(621);
+const isStream = __webpack_require__(323);
+const _getStream = __webpack_require__(145);
+const pFinally = __webpack_require__(697);
+const onExit = __webpack_require__(260);
+const errname = __webpack_require__(427);
+const stdio = __webpack_require__(168);
+
+const TEN_MEGABYTES = 1000 * 1000 * 10;
+
+function handleArgs(cmd, args, opts) {
+	let parsed;
+
+	opts = Object.assign({
+		extendEnv: true,
+		env: {}
+	}, opts);
+
+	if (opts.extendEnv) {
+		opts.env = Object.assign({}, process.env, opts.env);
+	}
+
+	if (opts.__winShell === true) {
+		delete opts.__winShell;
+		parsed = {
+			command: cmd,
+			args,
+			options: opts,
+			file: cmd,
+			original: {
+				cmd,
+				args
+			}
+		};
+	} else {
+		parsed = crossSpawn._parse(cmd, args, opts);
+	}
+
+	opts = Object.assign({
+		maxBuffer: TEN_MEGABYTES,
+		buffer: true,
+		stripEof: true,
+		preferLocal: true,
+		localDir: parsed.options.cwd || process.cwd(),
+		encoding: 'utf8',
+		reject: true,
+		cleanup: true
+	}, parsed.options);
+
+	opts.stdio = stdio(opts);
+
+	if (opts.preferLocal) {
+		opts.env = npmRunPath.env(Object.assign({}, opts, {cwd: opts.localDir}));
+	}
+
+	if (opts.detached) {
+		// #115
+		opts.cleanup = false;
+	}
+
+	if (process.platform === 'win32' && path.basename(parsed.command) === 'cmd.exe') {
+		// #116
+		parsed.args.unshift('/q');
+	}
+
+	return {
+		cmd: parsed.command,
+		args: parsed.args,
+		opts,
+		parsed
+	};
+}
+
+function handleInput(spawned, input) {
+	if (input === null || input === undefined) {
+		return;
+	}
+
+	if (isStream(input)) {
+		input.pipe(spawned.stdin);
+	} else {
+		spawned.stdin.end(input);
+	}
+}
+
+function handleOutput(opts, val) {
+	if (val && opts.stripEof) {
+		val = stripEof(val);
+	}
+
+	return val;
+}
+
+function handleShell(fn, cmd, opts) {
+	let file = '/bin/sh';
+	let args = ['-c', cmd];
+
+	opts = Object.assign({}, opts);
+
+	if (process.platform === 'win32') {
+		opts.__winShell = true;
+		file = process.env.comspec || 'cmd.exe';
+		args = ['/s', '/c', `"${cmd}"`];
+		opts.windowsVerbatimArguments = true;
+	}
+
+	if (opts.shell) {
+		file = opts.shell;
+		delete opts.shell;
+	}
+
+	return fn(file, args, opts);
+}
+
+function getStream(process, stream, {encoding, buffer, maxBuffer}) {
+	if (!process[stream]) {
+		return null;
+	}
+
+	let ret;
+
+	if (!buffer) {
+		// TODO: Use `ret = util.promisify(stream.finished)(process[stream]);` when targeting Node.js 10
+		ret = new Promise((resolve, reject) => {
+			process[stream]
+				.once('end', resolve)
+				.once('error', reject);
+		});
+	} else if (encoding) {
+		ret = _getStream(process[stream], {
+			encoding,
+			maxBuffer
+		});
+	} else {
+		ret = _getStream.buffer(process[stream], {maxBuffer});
+	}
+
+	return ret.catch(err => {
+		err.stream = stream;
+		err.message = `${stream} ${err.message}`;
+		throw err;
+	});
+}
+
+function makeError(result, options) {
+	const {stdout, stderr} = result;
+
+	let err = result.error;
+	const {code, signal} = result;
+
+	const {parsed, joinedCmd} = options;
+	const timedOut = options.timedOut || false;
+
+	if (!err) {
+		let output = '';
+
+		if (Array.isArray(parsed.opts.stdio)) {
+			if (parsed.opts.stdio[2] !== 'inherit') {
+				output += output.length > 0 ? stderr : `\n${stderr}`;
+			}
+
+			if (parsed.opts.stdio[1] !== 'inherit') {
+				output += `\n${stdout}`;
+			}
+		} else if (parsed.opts.stdio !== 'inherit') {
+			output = `\n${stderr}${stdout}`;
+		}
+
+		err = new Error(`Command failed: ${joinedCmd}${output}`);
+		err.code = code < 0 ? errname(code) : code;
+	}
+
+	err.stdout = stdout;
+	err.stderr = stderr;
+	err.failed = true;
+	err.signal = signal || null;
+	err.cmd = joinedCmd;
+	err.timedOut = timedOut;
+
+	return err;
+}
+
+function joinCmd(cmd, args) {
+	let joinedCmd = cmd;
+
+	if (Array.isArray(args) && args.length > 0) {
+		joinedCmd += ' ' + args.join(' ');
+	}
+
+	return joinedCmd;
+}
+
+module.exports = (cmd, args, opts) => {
+	const parsed = handleArgs(cmd, args, opts);
+	const {encoding, buffer, maxBuffer} = parsed.opts;
+	const joinedCmd = joinCmd(cmd, args);
+
+	let spawned;
+	try {
+		spawned = childProcess.spawn(parsed.cmd, parsed.args, parsed.opts);
+	} catch (err) {
+		return Promise.reject(err);
+	}
+
+	let removeExitHandler;
+	if (parsed.opts.cleanup) {
+		removeExitHandler = onExit(() => {
+			spawned.kill();
+		});
+	}
+
+	let timeoutId = null;
+	let timedOut = false;
+
+	const cleanup = () => {
+		if (timeoutId) {
+			clearTimeout(timeoutId);
+			timeoutId = null;
+		}
+
+		if (removeExitHandler) {
+			removeExitHandler();
+		}
+	};
+
+	if (parsed.opts.timeout > 0) {
+		timeoutId = setTimeout(() => {
+			timeoutId = null;
+			timedOut = true;
+			spawned.kill(parsed.opts.killSignal);
+		}, parsed.opts.timeout);
+	}
+
+	const processDone = new Promise(resolve => {
+		spawned.on('exit', (code, signal) => {
+			cleanup();
+			resolve({code, signal});
+		});
+
+		spawned.on('error', err => {
+			cleanup();
+			resolve({error: err});
+		});
+
+		if (spawned.stdin) {
+			spawned.stdin.on('error', err => {
+				cleanup();
+				resolve({error: err});
+			});
+		}
+	});
+
+	function destroy() {
+		if (spawned.stdout) {
+			spawned.stdout.destroy();
+		}
+
+		if (spawned.stderr) {
+			spawned.stderr.destroy();
+		}
+	}
+
+	const handlePromise = () => pFinally(Promise.all([
+		processDone,
+		getStream(spawned, 'stdout', {encoding, buffer, maxBuffer}),
+		getStream(spawned, 'stderr', {encoding, buffer, maxBuffer})
+	]).then(arr => {
+		const result = arr[0];
+		result.stdout = arr[1];
+		result.stderr = arr[2];
+
+		if (result.error || result.code !== 0 || result.signal !== null) {
+			const err = makeError(result, {
+				joinedCmd,
+				parsed,
+				timedOut
+			});
+
+			// TODO: missing some timeout logic for killed
+			// https://github.com/nodejs/node/blob/master/lib/child_process.js#L203
+			// err.killed = spawned.killed || killed;
+			err.killed = err.killed || spawned.killed;
+
+			if (!parsed.opts.reject) {
+				return err;
+			}
+
+			throw err;
+		}
+
+		return {
+			stdout: handleOutput(parsed.opts, result.stdout),
+			stderr: handleOutput(parsed.opts, result.stderr),
+			code: 0,
+			failed: false,
+			killed: false,
+			signal: null,
+			cmd: joinedCmd,
+			timedOut: false
+		};
+	}), destroy);
+
+	crossSpawn._enoent.hookChildProcess(spawned, parsed.parsed);
+
+	handleInput(spawned, parsed.opts.input);
+
+	spawned.then = (onfulfilled, onrejected) => handlePromise().then(onfulfilled, onrejected);
+	spawned.catch = onrejected => handlePromise().catch(onrejected);
+
+	return spawned;
+};
+
+// TODO: set `stderr: 'ignore'` when that option is implemented
+module.exports.stdout = (...args) => module.exports(...args).then(x => x.stdout);
+
+// TODO: set `stdout: 'ignore'` when that option is implemented
+module.exports.stderr = (...args) => module.exports(...args).then(x => x.stderr);
+
+module.exports.shell = (cmd, opts) => handleShell(module.exports, cmd, opts);
+
+module.exports.sync = (cmd, args, opts) => {
+	const parsed = handleArgs(cmd, args, opts);
+	const joinedCmd = joinCmd(cmd, args);
+
+	if (isStream(parsed.opts.input)) {
+		throw new TypeError('The `input` option cannot be a stream in sync mode');
+	}
+
+	const result = childProcess.spawnSync(parsed.cmd, parsed.args, parsed.opts);
+	result.code = result.status;
+
+	if (result.error || result.status !== 0 || result.signal !== null) {
+		const err = makeError(result, {
+			joinedCmd,
+			parsed
+		});
+
+		if (!parsed.opts.reject) {
+			return err;
+		}
+
+		throw err;
+	}
+
+	return {
+		stdout: handleOutput(parsed.opts, result.stdout),
+		stderr: handleOutput(parsed.opts, result.stderr),
+		code: 0,
+		failed: false,
+		signal: null,
+		cmd: joinedCmd,
+		timedOut: false
+	};
+};
+
+module.exports.shellSync = (cmd, opts) => handleShell(module.exports.sync, cmd, opts);
+
+
+/***/ }),
 /* 956 */
 /***/ (function(module, __unusedexports, __webpack_require__) {
 
 var getNative = __webpack_require__(707),
-    root = __webpack_require__(824);
+    root = __webpack_require__(66);
 
 /* Built-in method references that are verified to be native. */
 var Map = getNative(root, 'Map');
@@ -103061,39 +113525,1096 @@ module.exports = function (rl) {
 /* 966 */
 /***/ (function(module, __unusedexports, __webpack_require__) {
 
-var assocIndexOf = __webpack_require__(820);
+"use strict";
 
-/**
- * Sets the list cache `key` to `value`.
- *
- * @private
- * @name set
- * @memberOf ListCache
- * @param {string} key The key of the value to set.
- * @param {*} value The value to set.
- * @returns {Object} Returns the list cache instance.
- */
-function listCacheSet(key, value) {
-  var data = this.__data__,
-      index = assocIndexOf(data, key);
+const {PassThrough} = __webpack_require__(794);
 
-  if (index < 0) {
-    ++this.size;
-    data.push([key, value]);
-  } else {
-    data[index][1] = value;
-  }
-  return this;
-}
+module.exports = options => {
+	options = Object.assign({}, options);
 
-module.exports = listCacheSet;
+	const {array} = options;
+	let {encoding} = options;
+	const buffer = encoding === 'buffer';
+	let objectMode = false;
+
+	if (array) {
+		objectMode = !(encoding || buffer);
+	} else {
+		encoding = encoding || 'utf8';
+	}
+
+	if (buffer) {
+		encoding = null;
+	}
+
+	let len = 0;
+	const ret = [];
+	const stream = new PassThrough({objectMode});
+
+	if (encoding) {
+		stream.setEncoding(encoding);
+	}
+
+	stream.on('data', chunk => {
+		ret.push(chunk);
+
+		if (objectMode) {
+			len = ret.length;
+		} else {
+			len += chunk.length;
+		}
+	});
+
+	stream.getBufferedValue = () => {
+		if (array) {
+			return ret;
+		}
+
+		return buffer ? Buffer.concat(ret, len) : ret.join('');
+	};
+
+	stream.getBufferedLength = () => len;
+
+	return stream;
+};
 
 
 /***/ }),
 /* 967 */,
 /* 968 */,
-/* 969 */,
-/* 970 */,
+/* 969 */
+/***/ (function(module, __unusedexports, __webpack_require__) {
+
+var wrappy = __webpack_require__(11)
+module.exports = wrappy(once)
+module.exports.strict = wrappy(onceStrict)
+
+once.proto = once(function () {
+  Object.defineProperty(Function.prototype, 'once', {
+    value: function () {
+      return once(this)
+    },
+    configurable: true
+  })
+
+  Object.defineProperty(Function.prototype, 'onceStrict', {
+    value: function () {
+      return onceStrict(this)
+    },
+    configurable: true
+  })
+})
+
+function once (fn) {
+  var f = function () {
+    if (f.called) return f.value
+    f.called = true
+    return f.value = fn.apply(this, arguments)
+  }
+  f.called = false
+  return f
+}
+
+function onceStrict (fn) {
+  var f = function () {
+    if (f.called)
+      throw new Error(f.onceError)
+    f.called = true
+    return f.value = fn.apply(this, arguments)
+  }
+  var name = fn.name || 'Function wrapped with `once`'
+  f.onceError = name + " shouldn't be called more than once"
+  f.called = false
+  return f
+}
+
+
+/***/ }),
+/* 970 */
+/***/ (function(__unusedmodule, exports, __webpack_require__) {
+
+"use strict";
+
+
+// Load modules
+
+const Crypto = __webpack_require__(417);
+const Path = __webpack_require__(622);
+const Util = __webpack_require__(669);
+const Escape = __webpack_require__(480);
+
+
+// Declare internals
+
+const internals = {};
+
+
+// Clone object or array
+
+exports.clone = function (obj, seen) {
+
+    if (typeof obj !== 'object' ||
+        obj === null) {
+
+        return obj;
+    }
+
+    seen = seen || new Map();
+
+    const lookup = seen.get(obj);
+    if (lookup) {
+        return lookup;
+    }
+
+    let newObj;
+    let cloneDeep = false;
+
+    if (!Array.isArray(obj)) {
+        if (Buffer.isBuffer(obj)) {
+            newObj = new Buffer(obj);
+        }
+        else if (obj instanceof Date) {
+            newObj = new Date(obj.getTime());
+        }
+        else if (obj instanceof RegExp) {
+            newObj = new RegExp(obj);
+        }
+        else {
+            const proto = Object.getPrototypeOf(obj);
+            if (proto &&
+                proto.isImmutable) {
+
+                newObj = obj;
+            }
+            else {
+                newObj = Object.create(proto);
+                cloneDeep = true;
+            }
+        }
+    }
+    else {
+        newObj = [];
+        cloneDeep = true;
+    }
+
+    seen.set(obj, newObj);
+
+    if (cloneDeep) {
+        const keys = Object.getOwnPropertyNames(obj);
+        for (let i = 0; i < keys.length; ++i) {
+            const key = keys[i];
+            const descriptor = Object.getOwnPropertyDescriptor(obj, key);
+            if (descriptor &&
+                (descriptor.get ||
+                 descriptor.set)) {
+
+                Object.defineProperty(newObj, key, descriptor);
+            }
+            else {
+                newObj[key] = exports.clone(obj[key], seen);
+            }
+        }
+    }
+
+    return newObj;
+};
+
+
+// Merge all the properties of source into target, source wins in conflict, and by default null and undefined from source are applied
+
+/*eslint-disable */
+exports.merge = function (target, source, isNullOverride /* = true */, isMergeArrays /* = true */) {
+/*eslint-enable */
+
+    exports.assert(target && typeof target === 'object', 'Invalid target value: must be an object');
+    exports.assert(source === null || source === undefined || typeof source === 'object', 'Invalid source value: must be null, undefined, or an object');
+
+    if (!source) {
+        return target;
+    }
+
+    if (Array.isArray(source)) {
+        exports.assert(Array.isArray(target), 'Cannot merge array onto an object');
+        if (isMergeArrays === false) {                                                  // isMergeArrays defaults to true
+            target.length = 0;                                                          // Must not change target assignment
+        }
+
+        for (let i = 0; i < source.length; ++i) {
+            target.push(exports.clone(source[i]));
+        }
+
+        return target;
+    }
+
+    const keys = Object.keys(source);
+    for (let i = 0; i < keys.length; ++i) {
+        const key = keys[i];
+        if (key === '__proto__') {
+            continue;
+        }
+
+        const value = source[key];
+        if (value &&
+            typeof value === 'object') {
+
+            if (!target[key] ||
+                typeof target[key] !== 'object' ||
+                (Array.isArray(target[key]) !== Array.isArray(value)) ||
+                value instanceof Date ||
+                Buffer.isBuffer(value) ||
+                value instanceof RegExp) {
+
+                target[key] = exports.clone(value);
+            }
+            else {
+                exports.merge(target[key], value, isNullOverride, isMergeArrays);
+            }
+        }
+        else {
+            if (value !== null &&
+                value !== undefined) {                              // Explicit to preserve empty strings
+
+                target[key] = value;
+            }
+            else if (isNullOverride !== false) {                    // Defaults to true
+                target[key] = value;
+            }
+        }
+    }
+
+    return target;
+};
+
+
+// Apply options to a copy of the defaults
+
+exports.applyToDefaults = function (defaults, options, isNullOverride) {
+
+    exports.assert(defaults && typeof defaults === 'object', 'Invalid defaults value: must be an object');
+    exports.assert(!options || options === true || typeof options === 'object', 'Invalid options value: must be true, falsy or an object');
+
+    if (!options) {                                                 // If no options, return null
+        return null;
+    }
+
+    const copy = exports.clone(defaults);
+
+    if (options === true) {                                         // If options is set to true, use defaults
+        return copy;
+    }
+
+    return exports.merge(copy, options, isNullOverride === true, false);
+};
+
+
+// Clone an object except for the listed keys which are shallow copied
+
+exports.cloneWithShallow = function (source, keys) {
+
+    if (!source ||
+        typeof source !== 'object') {
+
+        return source;
+    }
+
+    const storage = internals.store(source, keys);    // Move shallow copy items to storage
+    const copy = exports.clone(source);               // Deep copy the rest
+    internals.restore(copy, source, storage);       // Shallow copy the stored items and restore
+    return copy;
+};
+
+
+internals.store = function (source, keys) {
+
+    const storage = {};
+    for (let i = 0; i < keys.length; ++i) {
+        const key = keys[i];
+        const value = exports.reach(source, key);
+        if (value !== undefined) {
+            storage[key] = value;
+            internals.reachSet(source, key, undefined);
+        }
+    }
+
+    return storage;
+};
+
+
+internals.restore = function (copy, source, storage) {
+
+    const keys = Object.keys(storage);
+    for (let i = 0; i < keys.length; ++i) {
+        const key = keys[i];
+        internals.reachSet(copy, key, storage[key]);
+        internals.reachSet(source, key, storage[key]);
+    }
+};
+
+
+internals.reachSet = function (obj, key, value) {
+
+    const path = key.split('.');
+    let ref = obj;
+    for (let i = 0; i < path.length; ++i) {
+        const segment = path[i];
+        if (i + 1 === path.length) {
+            ref[segment] = value;
+        }
+
+        ref = ref[segment];
+    }
+};
+
+
+// Apply options to defaults except for the listed keys which are shallow copied from option without merging
+
+exports.applyToDefaultsWithShallow = function (defaults, options, keys) {
+
+    exports.assert(defaults && typeof defaults === 'object', 'Invalid defaults value: must be an object');
+    exports.assert(!options || options === true || typeof options === 'object', 'Invalid options value: must be true, falsy or an object');
+    exports.assert(keys && Array.isArray(keys), 'Invalid keys');
+
+    if (!options) {                                                 // If no options, return null
+        return null;
+    }
+
+    const copy = exports.cloneWithShallow(defaults, keys);
+
+    if (options === true) {                                         // If options is set to true, use defaults
+        return copy;
+    }
+
+    const storage = internals.store(options, keys);   // Move shallow copy items to storage
+    exports.merge(copy, options, false, false);     // Deep copy the rest
+    internals.restore(copy, options, storage);      // Shallow copy the stored items and restore
+    return copy;
+};
+
+
+// Deep object or array comparison
+
+exports.deepEqual = function (obj, ref, options, seen) {
+
+    options = options || { prototype: true };
+
+    const type = typeof obj;
+
+    if (type !== typeof ref) {
+        return false;
+    }
+
+    if (type !== 'object' ||
+        obj === null ||
+        ref === null) {
+
+        if (obj === ref) {                                                      // Copied from Deep-eql, copyright(c) 2013 Jake Luer, jake@alogicalparadox.com, MIT Licensed, https://github.com/chaijs/deep-eql
+            return obj !== 0 || 1 / obj === 1 / ref;        // -0 / +0
+        }
+
+        return obj !== obj && ref !== ref;                  // NaN
+    }
+
+    seen = seen || [];
+    if (seen.indexOf(obj) !== -1) {
+        return true;                            // If previous comparison failed, it would have stopped execution
+    }
+
+    seen.push(obj);
+
+    if (Array.isArray(obj)) {
+        if (!Array.isArray(ref)) {
+            return false;
+        }
+
+        if (!options.part && obj.length !== ref.length) {
+            return false;
+        }
+
+        for (let i = 0; i < obj.length; ++i) {
+            if (options.part) {
+                let found = false;
+                for (let j = 0; j < ref.length; ++j) {
+                    if (exports.deepEqual(obj[i], ref[j], options)) {
+                        found = true;
+                        break;
+                    }
+                }
+
+                return found;
+            }
+
+            if (!exports.deepEqual(obj[i], ref[i], options)) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    if (Buffer.isBuffer(obj)) {
+        if (!Buffer.isBuffer(ref)) {
+            return false;
+        }
+
+        if (obj.length !== ref.length) {
+            return false;
+        }
+
+        for (let i = 0; i < obj.length; ++i) {
+            if (obj[i] !== ref[i]) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    if (obj instanceof Date) {
+        return (ref instanceof Date && obj.getTime() === ref.getTime());
+    }
+
+    if (obj instanceof RegExp) {
+        return (ref instanceof RegExp && obj.toString() === ref.toString());
+    }
+
+    if (options.prototype) {
+        if (Object.getPrototypeOf(obj) !== Object.getPrototypeOf(ref)) {
+            return false;
+        }
+    }
+
+    const keys = Object.getOwnPropertyNames(obj);
+
+    if (!options.part && keys.length !== Object.getOwnPropertyNames(ref).length) {
+        return false;
+    }
+
+    for (let i = 0; i < keys.length; ++i) {
+        const key = keys[i];
+        const descriptor = Object.getOwnPropertyDescriptor(obj, key);
+        if (descriptor.get) {
+            if (!exports.deepEqual(descriptor, Object.getOwnPropertyDescriptor(ref, key), options, seen)) {
+                return false;
+            }
+        }
+        else if (!exports.deepEqual(obj[key], ref[key], options, seen)) {
+            return false;
+        }
+    }
+
+    return true;
+};
+
+
+// Remove duplicate items from array
+
+exports.unique = (array, key) => {
+
+    let result;
+    if (key) {
+        result = [];
+        const index = new Set();
+        array.forEach((item) => {
+
+            const identifier = item[key];
+            if (!index.has(identifier)) {
+                index.add(identifier);
+                result.push(item);
+            }
+        });
+    }
+    else {
+        result = Array.from(new Set(array));
+    }
+
+    return result;
+};
+
+
+// Convert array into object
+
+exports.mapToObject = function (array, key) {
+
+    if (!array) {
+        return null;
+    }
+
+    const obj = {};
+    for (let i = 0; i < array.length; ++i) {
+        if (key) {
+            if (array[i][key]) {
+                obj[array[i][key]] = true;
+            }
+        }
+        else {
+            obj[array[i]] = true;
+        }
+    }
+
+    return obj;
+};
+
+
+// Find the common unique items in two arrays
+
+exports.intersect = function (array1, array2, justFirst) {
+
+    if (!array1 || !array2) {
+        return [];
+    }
+
+    const common = [];
+    const hash = (Array.isArray(array1) ? exports.mapToObject(array1) : array1);
+    const found = {};
+    for (let i = 0; i < array2.length; ++i) {
+        if (hash[array2[i]] && !found[array2[i]]) {
+            if (justFirst) {
+                return array2[i];
+            }
+
+            common.push(array2[i]);
+            found[array2[i]] = true;
+        }
+    }
+
+    return (justFirst ? null : common);
+};
+
+
+// Test if the reference contains the values
+
+exports.contain = function (ref, values, options) {
+
+    /*
+        string -> string(s)
+        array -> item(s)
+        object -> key(s)
+        object -> object (key:value)
+    */
+
+    let valuePairs = null;
+    if (typeof ref === 'object' &&
+        typeof values === 'object' &&
+        !Array.isArray(ref) &&
+        !Array.isArray(values)) {
+
+        valuePairs = values;
+        values = Object.keys(values);
+    }
+    else {
+        values = [].concat(values);
+    }
+
+    options = options || {};            // deep, once, only, part
+
+    exports.assert(arguments.length >= 2, 'Insufficient arguments');
+    exports.assert(typeof ref === 'string' || typeof ref === 'object', 'Reference must be string or an object');
+    exports.assert(values.length, 'Values array cannot be empty');
+
+    let compare;
+    let compareFlags;
+    if (options.deep) {
+        compare = exports.deepEqual;
+
+        const hasOnly = options.hasOwnProperty('only');
+        const hasPart = options.hasOwnProperty('part');
+
+        compareFlags = {
+            prototype: hasOnly ? options.only : hasPart ? !options.part : false,
+            part: hasOnly ? !options.only : hasPart ? options.part : true
+        };
+    }
+    else {
+        compare = (a, b) => a === b;
+    }
+
+    let misses = false;
+    const matches = new Array(values.length);
+    for (let i = 0; i < matches.length; ++i) {
+        matches[i] = 0;
+    }
+
+    if (typeof ref === 'string') {
+        let pattern = '(';
+        for (let i = 0; i < values.length; ++i) {
+            const value = values[i];
+            exports.assert(typeof value === 'string', 'Cannot compare string reference to non-string value');
+            pattern += (i ? '|' : '') + exports.escapeRegex(value);
+        }
+
+        const regex = new RegExp(pattern + ')', 'g');
+        const leftovers = ref.replace(regex, ($0, $1) => {
+
+            const index = values.indexOf($1);
+            ++matches[index];
+            return '';          // Remove from string
+        });
+
+        misses = !!leftovers;
+    }
+    else if (Array.isArray(ref)) {
+        for (let i = 0; i < ref.length; ++i) {
+            let matched = false;
+            for (let j = 0; j < values.length && matched === false; ++j) {
+                matched = compare(values[j], ref[i], compareFlags) && j;
+            }
+
+            if (matched !== false) {
+                ++matches[matched];
+            }
+            else {
+                misses = true;
+            }
+        }
+    }
+    else {
+        const keys = Object.getOwnPropertyNames(ref);
+        for (let i = 0; i < keys.length; ++i) {
+            const key = keys[i];
+            const pos = values.indexOf(key);
+            if (pos !== -1) {
+                if (valuePairs &&
+                    !compare(valuePairs[key], ref[key], compareFlags)) {
+
+                    return false;
+                }
+
+                ++matches[pos];
+            }
+            else {
+                misses = true;
+            }
+        }
+    }
+
+    let result = false;
+    for (let i = 0; i < matches.length; ++i) {
+        result = result || !!matches[i];
+        if ((options.once && matches[i] > 1) ||
+            (!options.part && !matches[i])) {
+
+            return false;
+        }
+    }
+
+    if (options.only &&
+        misses) {
+
+        return false;
+    }
+
+    return result;
+};
+
+
+// Flatten array
+
+exports.flatten = function (array, target) {
+
+    const result = target || [];
+
+    for (let i = 0; i < array.length; ++i) {
+        if (Array.isArray(array[i])) {
+            exports.flatten(array[i], result);
+        }
+        else {
+            result.push(array[i]);
+        }
+    }
+
+    return result;
+};
+
+
+// Convert an object key chain string ('a.b.c') to reference (object[a][b][c])
+
+exports.reach = function (obj, chain, options) {
+
+    if (chain === false ||
+        chain === null ||
+        typeof chain === 'undefined') {
+
+        return obj;
+    }
+
+    options = options || {};
+    if (typeof options === 'string') {
+        options = { separator: options };
+    }
+
+    const path = chain.split(options.separator || '.');
+    let ref = obj;
+    for (let i = 0; i < path.length; ++i) {
+        let key = path[i];
+        if (key[0] === '-' && Array.isArray(ref)) {
+            key = key.slice(1, key.length);
+            key = ref.length - key;
+        }
+
+        if (!ref ||
+            !((typeof ref === 'object' || typeof ref === 'function') && key in ref) ||
+            (typeof ref !== 'object' && options.functions === false)) {         // Only object and function can have properties
+
+            exports.assert(!options.strict || i + 1 === path.length, 'Missing segment', key, 'in reach path ', chain);
+            exports.assert(typeof ref === 'object' || options.functions === true || typeof ref !== 'function', 'Invalid segment', key, 'in reach path ', chain);
+            ref = options.default;
+            break;
+        }
+
+        ref = ref[key];
+    }
+
+    return ref;
+};
+
+
+exports.reachTemplate = function (obj, template, options) {
+
+    return template.replace(/{([^}]+)}/g, ($0, chain) => {
+
+        const value = exports.reach(obj, chain, options);
+        return (value === undefined || value === null ? '' : value);
+    });
+};
+
+
+exports.formatStack = function (stack) {
+
+    const trace = [];
+    for (let i = 0; i < stack.length; ++i) {
+        const item = stack[i];
+        trace.push([item.getFileName(), item.getLineNumber(), item.getColumnNumber(), item.getFunctionName(), item.isConstructor()]);
+    }
+
+    return trace;
+};
+
+
+exports.formatTrace = function (trace) {
+
+    const display = [];
+
+    for (let i = 0; i < trace.length; ++i) {
+        const row = trace[i];
+        display.push((row[4] ? 'new ' : '') + row[3] + ' (' + row[0] + ':' + row[1] + ':' + row[2] + ')');
+    }
+
+    return display;
+};
+
+
+exports.callStack = function (slice) {
+
+    // http://code.google.com/p/v8/wiki/JavaScriptStackTraceApi
+
+    const v8 = Error.prepareStackTrace;
+    Error.prepareStackTrace = function (_, stack) {
+
+        return stack;
+    };
+
+    const capture = {};
+    Error.captureStackTrace(capture, this);     // arguments.callee is not supported in strict mode so we use this and slice the trace of this off the result
+    const stack = capture.stack;
+
+    Error.prepareStackTrace = v8;
+
+    const trace = exports.formatStack(stack);
+
+    return trace.slice(1 + slice);
+};
+
+
+exports.displayStack = function (slice) {
+
+    const trace = exports.callStack(slice === undefined ? 1 : slice + 1);
+
+    return exports.formatTrace(trace);
+};
+
+
+exports.abortThrow = false;
+
+
+exports.abort = function (message, hideStack) {
+
+    if (process.env.NODE_ENV === 'test' || exports.abortThrow === true) {
+        throw new Error(message || 'Unknown error');
+    }
+
+    let stack = '';
+    if (!hideStack) {
+        stack = exports.displayStack(1).join('\n\t');
+    }
+    console.log('ABORT: ' + message + '\n\t' + stack);
+    process.exit(1);
+};
+
+
+exports.assert = function (condition /*, msg1, msg2, msg3 */) {
+
+    if (condition) {
+        return;
+    }
+
+    if (arguments.length === 2 && arguments[1] instanceof Error) {
+        throw arguments[1];
+    }
+
+    let msgs = [];
+    for (let i = 1; i < arguments.length; ++i) {
+        if (arguments[i] !== '') {
+            msgs.push(arguments[i]);            // Avoids Array.slice arguments leak, allowing for V8 optimizations
+        }
+    }
+
+    msgs = msgs.map((msg) => {
+
+        return typeof msg === 'string' ? msg : msg instanceof Error ? msg.message : exports.stringify(msg);
+    });
+
+    throw new Error(msgs.join(' ') || 'Unknown error');
+};
+
+
+exports.Timer = function () {
+
+    this.ts = 0;
+    this.reset();
+};
+
+
+exports.Timer.prototype.reset = function () {
+
+    this.ts = Date.now();
+};
+
+
+exports.Timer.prototype.elapsed = function () {
+
+    return Date.now() - this.ts;
+};
+
+
+exports.Bench = function () {
+
+    this.ts = 0;
+    this.reset();
+};
+
+
+exports.Bench.prototype.reset = function () {
+
+    this.ts = exports.Bench.now();
+};
+
+
+exports.Bench.prototype.elapsed = function () {
+
+    return exports.Bench.now() - this.ts;
+};
+
+
+exports.Bench.now = function () {
+
+    const ts = process.hrtime();
+    return (ts[0] * 1e3) + (ts[1] / 1e6);
+};
+
+
+// Escape string for Regex construction
+
+exports.escapeRegex = function (string) {
+
+    // Escape ^$.*+-?=!:|\/()[]{},
+    return string.replace(/[\^\$\.\*\+\-\?\=\!\:\|\\\/\(\)\[\]\{\}\,]/g, '\\$&');
+};
+
+
+// Base64url (RFC 4648) encode
+
+exports.base64urlEncode = function (value, encoding) {
+
+    exports.assert(typeof value === 'string' || Buffer.isBuffer(value), 'value must be string or buffer');
+    const buf = (Buffer.isBuffer(value) ? value : new Buffer(value, encoding || 'binary'));
+    return buf.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/\=/g, '');
+};
+
+
+// Base64url (RFC 4648) decode
+
+exports.base64urlDecode = function (value, encoding) {
+
+    if (typeof value !== 'string') {
+
+        return new Error('Value not a string');
+    }
+
+    if (!/^[\w\-]*$/.test(value)) {
+
+        return new Error('Invalid character');
+    }
+
+    const buf = new Buffer(value, 'base64');
+    return (encoding === 'buffer' ? buf : buf.toString(encoding || 'binary'));
+};
+
+
+// Escape attribute value for use in HTTP header
+
+exports.escapeHeaderAttribute = function (attribute) {
+
+    // Allowed value characters: !#$%&'()*+,-./:;<=>?@[]^_`{|}~ and space, a-z, A-Z, 0-9, \, "
+
+    exports.assert(/^[ \w\!#\$%&'\(\)\*\+,\-\.\/\:;<\=>\?@\[\]\^`\{\|\}~\"\\]*$/.test(attribute), 'Bad attribute value (' + attribute + ')');
+
+    return attribute.replace(/\\/g, '\\\\').replace(/\"/g, '\\"');                             // Escape quotes and slash
+};
+
+
+exports.escapeHtml = function (string) {
+
+    return Escape.escapeHtml(string);
+};
+
+
+exports.escapeJavaScript = function (string) {
+
+    return Escape.escapeJavaScript(string);
+};
+
+exports.escapeJson = function (string) {
+
+    return Escape.escapeJson(string);
+};
+
+exports.nextTick = function (callback) {
+
+    return function () {
+
+        const args = arguments;
+        process.nextTick(() => {
+
+            callback.apply(null, args);
+        });
+    };
+};
+
+
+exports.once = function (method) {
+
+    if (method._hoekOnce) {
+        return method;
+    }
+
+    let once = false;
+    const wrapped = function () {
+
+        if (!once) {
+            once = true;
+            method.apply(null, arguments);
+        }
+    };
+
+    wrapped._hoekOnce = true;
+
+    return wrapped;
+};
+
+
+exports.isInteger = Number.isSafeInteger;
+
+
+exports.ignore = function () { };
+
+
+exports.inherits = Util.inherits;
+
+
+exports.format = Util.format;
+
+
+exports.transform = function (source, transform, options) {
+
+    exports.assert(source === null || source === undefined || typeof source === 'object' || Array.isArray(source), 'Invalid source object: must be null, undefined, an object, or an array');
+    const separator = (typeof options === 'object' && options !== null) ? (options.separator || '.') : '.';
+
+    if (Array.isArray(source)) {
+        const results = [];
+        for (let i = 0; i < source.length; ++i) {
+            results.push(exports.transform(source[i], transform, options));
+        }
+        return results;
+    }
+
+    const result = {};
+    const keys = Object.keys(transform);
+
+    for (let i = 0; i < keys.length; ++i) {
+        const key = keys[i];
+        const path = key.split(separator);
+        const sourcePath = transform[key];
+
+        exports.assert(typeof sourcePath === 'string', 'All mappings must be "." delineated strings');
+
+        let segment;
+        let res = result;
+
+        while (path.length > 1) {
+            segment = path.shift();
+            if (!res[segment]) {
+                res[segment] = {};
+            }
+            res = res[segment];
+        }
+        segment = path.shift();
+        res[segment] = exports.reach(source, sourcePath, options);
+    }
+
+    return result;
+};
+
+
+exports.uniqueFilename = function (path, extension) {
+
+    if (extension) {
+        extension = extension[0] !== '.' ? '.' + extension : extension;
+    }
+    else {
+        extension = '';
+    }
+
+    path = Path.resolve(path);
+    const name = [Date.now(), process.pid, Crypto.randomBytes(8).toString('hex')].join('-') + extension;
+    return Path.join(path, name);
+};
+
+
+exports.stringify = function () {
+
+    try {
+        return JSON.stringify.apply(null, arguments);
+    }
+    catch (err) {
+        return '[Cannot display object: ' + err.message + ']';
+    }
+};
+
+
+exports.shallow = function (source) {
+
+    const target = {};
+    const keys = Object.keys(source);
+    for (let i = 0; i < keys.length; ++i) {
+        const key = keys[i];
+        target[key] = source[key];
+    }
+
+    return target;
+};
+
+
+/***/ }),
 /* 971 */,
 /* 972 */,
 /* 973 */
@@ -103504,11 +115025,11 @@ exports.validateIntents = validateIntents;
 // Load modules
 
 const Net = __webpack_require__(631);
-const Hoek = __webpack_require__(11);
+const Hoek = __webpack_require__(970);
 let Isemail;                            // Loaded on demand
 const Any = __webpack_require__(227);
 const Ref = __webpack_require__(953);
-const JoiDate = __webpack_require__(794);
+const JoiDate = __webpack_require__(847);
 const Uri = __webpack_require__(56);
 const Ip = __webpack_require__(861);
 
@@ -104325,7 +115846,7 @@ var Context = __webpack_require__(923)(Promise);
  /*jshint unused:false*/
 var createContext = Context.create;
 
-var debug = __webpack_require__(272)(Promise, Context,
+var debug = __webpack_require__(76)(Promise, Context,
     enableAsyncHooks, disableAsyncHooks);
 var CapturedTrace = debug.CapturedTrace;
 var PassThroughHandlerContext =
@@ -105030,7 +116551,7 @@ __webpack_require__(715)(Promise);
 __webpack_require__(809)(
     Promise, PromiseArray, tryConvertToPromise, INTERNAL, async);
 Promise.Promise = Promise;
-Promise.version = "3.7.1";
+Promise.version = "3.7.2";
 __webpack_require__(238)(Promise);
 __webpack_require__(25)(Promise, apiRejection, INTERNAL, tryConvertToPromise, Proxyable, debug);
 __webpack_require__(220)(Promise, PromiseArray, apiRejection, tryConvertToPromise, INTERNAL, debug);
@@ -105038,7 +116559,7 @@ __webpack_require__(694)(Promise);
 __webpack_require__(804)(Promise, INTERNAL);
 __webpack_require__(321)(Promise, PromiseArray, tryConvertToPromise, apiRejection);
 __webpack_require__(832)(Promise, INTERNAL, tryConvertToPromise, apiRejection);
-__webpack_require__(814)(Promise, PromiseArray, apiRejection, tryConvertToPromise, INTERNAL, debug);
+__webpack_require__(909)(Promise, PromiseArray, apiRejection, tryConvertToPromise, INTERNAL, debug);
 __webpack_require__(94)(Promise, PromiseArray, debug);
 __webpack_require__(84)(Promise, PromiseArray, apiRejection);
 __webpack_require__(409)(Promise, INTERNAL, debug);
