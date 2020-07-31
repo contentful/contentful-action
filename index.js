@@ -212,7 +212,7 @@ async function run() {
     core.setOutput('environment_name', environmentName)
     console.log(environmentUrl);
     console.log(environmentName);
-    console.log('All done!');
+    console.log('All done!!!');
   }
   catch (error) {
     core.setFailed(error.message);
