@@ -6,16 +6,19 @@ async function run() {
   try {
     const { context } = github
 
-    const {promisify} = require('util');
-    const {readdir} = require('fs');
+    const { promisify } = require('util');
+    const { readdir } = require('fs');
     const readdirAsync = promisify(readdir);
     const path = require('path');
     const { createClient } = require('contentful-management');
-    const {default: runMigration} = require('contentful-migration/built/bin/cli');
+    const { default: runMigration } = require('contentful-migration/built/bin/cli');
 
     // utility fns
     const getVersionOfFile = (file) => file.replace('.js', '').replace(/_/g, '.');
     const getFileOfVersion = (version) => version.replace(/\./g, '_') + '.js';
+
+    // workflow inputs
+    const mainBranch = core.getInput('main_branch') || 'master';
 
     const getBranchName = () => {
       let { ref } = context
@@ -27,12 +30,15 @@ async function run() {
         // actual branch name, not something like 'pull/111/merge'
         ref = pullRequestPayload.pull_request.head.ref
         core.info(`The head ref is: ${pullRequestPayload.pull_request.head.ref}`)
+        return ref
+          .replace('refs/heads/', '')
+          // normalize git-flow branch names ie. feat/foo-feature -> feat-foo-feature
+          .replace(/\//g, '-')
       }
 
-      return ref
-        .replace('refs/heads/', '')
-        // normalize git-flow branch names ie. feat/foo-feature -> feat-foo-feature
-        .replace(/\//g, '-')
+      // If we are not on a pull_request event return the specified main branch
+      // defaults to 'master'
+      return mainBranch
     }
 
     //
@@ -56,10 +62,10 @@ async function run() {
     let environment;
     console.log('Running with the following configuration');
     // ---------------------------------------------------------------------------
-    if (ENVIRONMENT_INPUT == 'master'){
+    if (ENVIRONMENT_INPUT == mainBranch) {
       console.log(`Running on master.`);
       ENVIRONMENT_ID = "master-".concat(getStringDate());
-    }else{
+    } else {
       console.log('Running on feature branch');
       ENVIRONMENT_ID = "GH-".concat(ENVIRONMENT_INPUT);
     }
@@ -71,16 +77,16 @@ async function run() {
 
     try {
       environment = await space.getEnvironment(ENVIRONMENT_ID);
-      if (ENVIRONMENT_ID != 'master'){
+      if (ENVIRONMENT_ID != 'master') {
         await environment.delete();
         console.log('Environment deleted');
       }
-    } catch(e) {
+    } catch (e) {
       console.log('Environment not found');
     }
 
     // ---------------------------------------------------------------------------
-    if (ENVIRONMENT_ID != 'master'){
+    if (ENVIRONMENT_ID != 'master') {
       console.log(`Creating environment ${ENVIRONMENT_ID}`);
       environment = await space.createEnvironmentWithId(ENVIRONMENT_ID, { name: ENVIRONMENT_ID });
     }
@@ -118,7 +124,7 @@ async function run() {
       }
     }
 
-    const {items: keys} = await space.getApiKeys();
+    const { items: keys } = await space.getApiKeys();
     await Promise.all(keys.map(key => {
       console.log(`Updating - ${key.sys.id}`);
       key.environments.push(newEnv);
@@ -138,7 +144,7 @@ async function run() {
 
     // ---------------------------------------------------------------------------
     console.log('Figure out latest ran migration of the contentful space');
-    const {items: versions} = await environment.getEntries({
+    const { items: versions } = await environment.getEntries({
       content_type: 'versionTracking'
     });
 
@@ -170,7 +176,7 @@ async function run() {
 
     // ---------------------------------------------------------------------------
     console.log('Run migrations and update version entry');
-    while(migrationToRun = migrationsToRun.shift()) {
+    while (migrationToRun = migrationsToRun.shift()) {
       const filePath = path.join(MIGRATIONS_DIR, getFileOfVersion(migrationToRun));
       console.log(`Running ${filePath}`);
       await runMigration(Object.assign(migrationOptions, {
@@ -187,7 +193,7 @@ async function run() {
 
     // ---------------------------------------------------------------------------
     console.log('Checking if we need to update master alias');
-    if (ENVIRONMENT_INPUT == 'master'){
+    if (ENVIRONMENT_INPUT == 'master') {
       console.log(`Running on master.`);
       console.log(`Updating master alias.`);
       await space.getEnvironmentAlias('master')
@@ -198,7 +204,7 @@ async function run() {
         .then((alias) => console.log(`alias ${alias.sys.id} updated.`))
         .catch(console.error);
       console.log(`Master alias updated.`);
-    }else{
+    } else {
       console.log('Running on feature branch');
       console.log('No alias changes required');
     }
@@ -218,11 +224,11 @@ async function run() {
 run()
 
 
-function getStringDate(){
+function getStringDate() {
   var d = new Date();
-  function pad(n){return n<10 ? '0'+n : n}
+  function pad(n) { return n < 10 ? '0' + n : n }
   return d.toISOString().substring(0, 10)
-  + '-'
-  + pad(d.getUTCHours())
-  + pad(d.getUTCMinutes())
+    + '-'
+    + pad(d.getUTCHours())
+    + pad(d.getUTCMinutes())
 }

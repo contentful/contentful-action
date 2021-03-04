@@ -1,5 +1,10 @@
 name: 'Contentful Migration Action'
 description: 'Run a Migration against your Contentful space'
+inputs: 
+  main_branch:
+    description: 'The default "production" branch that contentful can consider to be the main or master branch.'
+    required: false
+    default: 'master'
 outputs:
   environment_url:
     description: 'Contentful environment URL'
