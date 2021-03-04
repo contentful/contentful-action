@@ -22,7 +22,10 @@ async function run() {
 
     const getBranchName = () => {
       let { ref } = context
-
+      
+      console.log('github.context.eventName', github.context.eventName)
+      
+      // if we are on a pull request return the branch name
       if (github.context.eventName === 'pull_request') {
         const pullRequestPayload = github.context.payload
         core.info(`head : ${pullRequestPayload.pull_request.head}`)
@@ -61,6 +64,8 @@ async function run() {
 
     let environment;
     console.log('Running with the following configuration');
+    console.log('ENVIRONMENT_INPUT is', ENVIRONMENT_INPUT);
+    console.log('main_branch is', mainBranch);
     // ---------------------------------------------------------------------------
     if (ENVIRONMENT_INPUT == mainBranch) {
       console.log(`Running on master.`);
